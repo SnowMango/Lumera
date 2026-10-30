@@ -1,0 +1,14 @@
+{
+  "version": "style-generation-materials-1",
+  "kind": "synthetic-print-render",
+  "files": [
+    {
+      "name": "layout.json",
+      "sha256": "59c29866c59f880fbef85dd877290d7005fc3234e0ce84797902dd99bb7dccdc"
+    },
+    {
+      "name": "composite.png",
+      "sha256": "7dec681dce37b4ed220a164ddd8795ed9b7c3f69ec7b156bf6594c45db5de5e9"
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+# See LICENSE folder for this sample’s licensing information.
+#
+# Apple sample code gitignore configuration.
+
+# Finder
+.DS_Store
+
+# Xcode / SwiftPM — local package checkouts (never commit as submodules)
+build/
+.build/
+
+# Xcode - User files
+xcuserdata/
+xcshareddata/
+
+docs/
+AGENTS.md
