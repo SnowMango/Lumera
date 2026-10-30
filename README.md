@@ -85,7 +85,9 @@ let package = Package(
 
 ## 输入约定
 
-`TextureEffectEncoder` 接收已经标准化的 `MTLTexture`。调用方通过 `RenderRequest.input` 声明输入属性。
+`LumeraRenderer.render` 提供 `MTLTexture`、`CIImage`、`CVPixelBuffer` 同类型输入输出，以及 RAW／ProRAW 文件和数据输入。原有 `TextureEffectEncoder` 接口继续保留。
+
+下表是底层纹理入口的输入约定：调用方通过 `InputDescriptor` 声明输入属性；高层图像入口由内部适配层完成标准化。
 
 | 属性 | 要求 |
 | --- | --- |
@@ -99,15 +101,82 @@ let package = Package(
 
 硬件 `_sRGB` 纹理格式不属于支持范围，以避免重复执行传递函数。`InputDescriptor` 是声明与校验信息，不执行颜色转换，也不会扫描整张纹理来验证像素内容。
 
-P3、HLG、PQ、Apple Log 等输入须由调用方先转换到上述约定。仅修改颜色空间标签不构成像素转换。
+使用裸纹理入口时，P3、HLG、PQ、Apple Log 等输入须由调用方先转换到上述约定。仅修改颜色空间标签不构成像素转换。
 
 引擎不设置业务层的边长或总像素数上限。纹理分配仍受 Metal 设备能力和可用内存约束；超出能力时需要调用方缩放或分块。渲染器不提供自动分块。
 
+### 统一图像 API
+
+```swift
+import CoreImage
+import CoreVideo
+import ImageIO
+import ImagingCore
+import ImageRendering
+
+let renderer = try LumeraRenderer()
+let style = try renderer.prepare(Profile.standard)
+var options = RenderOptions(maximumLongEdge: 2048, seed: 42, frameIndex: 0)
+options.glowScale = .half
+
+// CIImage → CIImage：GPU 执行完成后返回，输出拥有独立存储。
+let styledImage = try await renderer.render(inputImage, style: style, options: options)
+
+// CVPixelBuffer → CVPixelBuffer：输出固定为 BGRA8、sRGB SDR、不透明。
+let styledBuffer = try await renderer.render(inputBuffer, style: style, options: options)
+
+// MTLTexture → MTLTexture：只编码，不提交或等待 command buffer。
+// 必须在同一 command buffer 内使用或复制输出，再提交；完成后池化纹理可被复用。
+let styledTexture = try renderer.render(
+    inputTexture, style: style,
+    inputDescriptor: InputDescriptor(width: inputTexture.width, height: inputTexture.height),
+    options: options, commandBuffer: commandBuffer
+)
+```
+
+三种入口共用 `RenderOptions`：整体尺寸、效果比例、随机种子与帧序号均可配置。`prepareCorrection` 和 `correction:` 提供独立设备校正；固定风格可由 `Profile` 或 `ResolvedStyle` 准备。纹理入口还支持 `CompiledStyleDefinition` 和 `FrameStyleParameters` 动态帧参数。
+
+高层图像入口将已标记的 SDR 颜色转换为 sRGB，透明区域合成到黑色背景，范围归一化到整数像素。未标记颜色的 RGB CVPixelBuffer 假定为 sRGB。CIImage 则遵循 Core Image 工作空间语义（此处为扩展线性 sRGB）；从编码像素创建 CIImage 时应附上实际颜色空间，不能靠补充 metadata 改变像素解释。CIImage 输出使用浮点 RGBA 存储（通常为 16 位；极端颜色变换可能使用 32 位），CVPixelBuffer 输出使用 8 位 BGRA，因此不保证保持输入像素格式或位深。支持 BGRA/ARGB、RGBA half/float 及 8/10 位双平面 YCbCr 输入；YCbCr 必须提供可解析的颜色附件。非全帧 clean aperture、非方形像素、隔行和原始传感器缓冲区需要先由调用方适配。
+
+当前风格引擎输出 SDR。在 iOS 18／macOS 15 及以上，已知 headroom 的 HDR 输入通过系统滤镜映射到 SDR；无法可靠判断的 HDR 输入会报错，不能把此接口视为 HDR 保真通道。超出 SDR 色域/范围的颜色在适配边界裁切。
+
+### RAW／Apple ProRAW
+
+```swift
+// 内部显影：系统默认拍摄白平衡、完整质量、SDR。
+let developed = try await renderer.render(rawURL: rawURL, style: style, options: options)
+
+// 同样支持完整 RAW/DNG 文件 Data；闭包在输出求值前执行，可配置 CIRAWFilter。
+let configured = try await renderer.render(
+    rawData: rawData, style: style, options: options,
+    configureRAW: { filter in
+        filter.exposure = 0.5
+        filter.neutralTemperature = 5200
+    }
+)
+
+// 外部显影：Lumera 不重复显影。补充源 metadata，并声明像素已由 RAW 显影器旋正。
+guard let filter = CIRAWFilter(imageURL: rawURL),
+      let image = filter.outputImage else { throw LabError.unsupported("无法显影 RAW") }
+let externallyDeveloped = try await renderer.render(
+    image, metadata: filter.properties as? [String: Any], orientation: .up,
+    style: style, options: options
+)
+```
+
+RAW／ProRAW 兼容性取决于系统解码器；不使用内嵌预览作为失败回退。输出是显影后的 CIImage，不是保留 RAW 可编辑能力的 DNG；需另外保存原始文件。`configureRAW` 为本次调用独占配置闭包，不要保留并并发修改 filter。曝光等显影修改不覆盖原始拍摄 EXIF。
+
 ### 图像与拍摄元数据
 
-运行入口不直接接收 `CIImage`、`CVPixelBuffer` 或 `CMSampleBuffer`。调用方负责将其转换为符合输入约定的纹理，并独立传递需要参与条件响应的 `CaptureConditions`。
+CIImage／CVPixelBuffer 入口自动维护已知元数据。保留支持的 EXIF 拍摄字段（ISO、快门、光圈、拍摄时间、白平衡模式、镜头等）、TIFF 相机/版权信息和 GPS；根据实际输出重写尺寸、方向和颜色。MakerNote、DNG 显影指令、旧缩略图、辅助图像、几何/标定附件及未知私有字段不透传。GPS 会保留，分享前如需去除定位信息应显式移除。
 
-纹理输出不携带 EXIF、GPS、视频时间戳或 Core Video 附件。输出封装时，调用方应保留适用的拍摄信息，并根据实际输出更新颜色描述、尺寸、方向和透明度。后期曝光调整不应覆盖原始拍摄曝光补偿；未知拍摄条件保持为空。
+`metadata:` 是可选的 ImageIO 属性字典补充：同名拍摄字段以显式参数为准，未冲突的嵌套字段保留。它不决定输入方向，旧尺寸/颜色也不会覆盖输出事实。默认从图像属性或输入附件读取方向；如果像素已经旋正，传 `orientation: .up`，避免重复旋转。内部 RAW 路径自动处理这一点。
+
+CVPixelBuffer 使用两种传播模式的附件解析输入几何和方向，只将可传播的拍摄字段带到输出；输出重建为 RGB 颜色附件，移除旧 YCbCr 矩阵和 HDR/ICC/gamma 描述。CMSampleBuffer 的时间信息由调用方单独管理。输入在异步调用结束前必须保持有效且不被修改。取消已提交任务时等待 GPU 安全结束再返回取消错误。
+
+高层接口保证返回时的像素和支持的 metadata 一致；后续裁剪、旋转、色彩转换由后续处理步骤更新 metadata。图像编码器需要显式写入返回的 CIImage properties，才会将其保存到文件。裸纹理入口不携带 metadata，需要调用者独立管理。
+
+需要按拍摄条件评估风格时，仍独立提供 `CaptureConditions`；metadata 保留不等于自动执行条件响应。未知拍摄条件保持为空。
 
 ## 固定参数渲染
 
