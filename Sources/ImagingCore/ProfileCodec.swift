@@ -58,6 +58,8 @@ public enum ProfileCodec {
         let parsed: Fields
         do { parsed = try JSONDecoder().decode(Fields.self, from: data) }
         catch let error as DecodingError { throw LabError.invalid(error.fieldMessage) }
+        // Validate the serialized values before the editable profile limits exposure.
+        try parsed.parameters.validate()
         var p = Profile()
         p.id = parsed.id; p.name = parsed.name; p.description = parsed.description
         p.parameters = parsed.parameters; p.responses = parsed.responses; p.temporalPolicy = parsed.temporalPolicy

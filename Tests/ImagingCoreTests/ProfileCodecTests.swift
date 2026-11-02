@@ -32,6 +32,7 @@ final class ProfileCodecTests: XCTestCase {
             (",\"parameters\":{\"grain\":{\"size\":null}}", "parameters.grain.size"),
             (",\"parameters\":{\"grain\":{\"typo\":2}}", "parameters.grain.typo"),
             (",\"parameters\":{\"grain\":{\"size\":true}}", "parameters.grain.size"),
+            (#","parameters":{"color":{"exposureEV":15}}"#, "parameters.color.exposureEV"),
             (",\"parameters\":{\"grain\":{\"size\":20}}", "parameters.grain.size"),
             (",\"parameters\":{\"halation\":{\"sigma\":4}}", "parameters.halation.sigma")
         ] {
@@ -76,6 +77,7 @@ final class ProfileCodecTests: XCTestCase {
         }
         let exposure = try XCTUnwrap(ParameterDescriptor.all.first { $0.id == "color.exposureEV" })
         XCTAssertEqual(exposure.unit, .ev)
-        XCTAssertEqual(exposure.effectiveRange, -6...6)
+        XCTAssertEqual(exposure.baseRange, -10...10)
+        XCTAssertEqual(exposure.effectiveRange, -20...20)
     }
 }

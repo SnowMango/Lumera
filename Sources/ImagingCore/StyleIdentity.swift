@@ -15,7 +15,10 @@ public enum StyleIdentity {
     }
 
     public static func effective(parameters: StyleParameters, temporalPolicy: TemporalPolicy) throws -> String {
-        try parameters.validate(resolved: true)
+        try ResolvedStyle(parameters: parameters, temporalPolicy: temporalPolicy).effectiveDigest
+    }
+
+    static func validatedEffectiveDigest(parameters: StyleParameters, temporalPolicy: TemporalPolicy) throws -> String {
         struct Content: Encodable { let parameters: StyleParameters, temporalPolicy: TemporalPolicy }
         return try digest(Content(parameters: parameters, temporalPolicy: temporalPolicy))
     }

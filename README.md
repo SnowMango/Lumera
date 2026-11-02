@@ -288,7 +288,7 @@ func encodeFrame(
 - `CaptureConditions` 只描述拍摄条件，不会再次施加拍摄曝光或白平衡。
 - 色温单位为 K；色调单位为 CIE 1960 uv 的 Duv，不接受厂商 tint 滑块值作为同义量。
 
-`StyleEvaluator.evaluate(..., adjustments:)` 支持独立的 `StyleAdjustments`。临时曝光与条件响应后的曝光相加，可选白点覆盖对应白点设置；效果倍率按各参数范围处理，达到限制时通过 `adjustmentLimits` 返回信息。临时调整不写入 `Profile`。
+`StyleEvaluator.evaluate(..., adjustments:)` 支持独立的 `StyleAdjustments`。手动设置风格曝光或单张照片的临时曝光时，有限数值自动限制在 −10 到 +10 EV。两者相加后的有效范围为 −20 到 +20 EV。导入 JSON 配置时，曝光和其他参数均须通过范围校验。可选白点覆盖对应白点设置；效果倍率按各参数范围处理，达到限制时通过 `adjustmentLimits` 返回信息。临时调整不写入 `Profile`。
 
 ## 处理顺序
 

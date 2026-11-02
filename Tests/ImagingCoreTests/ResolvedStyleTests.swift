@@ -10,8 +10,11 @@ final class ResolvedStyleTests:XCTestCase {
         XCTAssertNotEqual(a.effectiveDigest,try ResolvedStyle(parameters:p).effectiveDigest)
     }
     func testInvalidFinalSettingsThrow() throws {
-        var p=StyleParameters();p.color.exposureEV=7
-        XCTAssertThrowsError(try ResolvedStyle(parameters:p))
+        var p = StyleParameters()
+        for value in [-20.01, 20.01] {
+            p.color.exposureEV = value
+            XCTAssertEqual(try ResolvedStyle(parameters:p).parameters.color.exposureEV, value.sign == .minus ? -20 : 20)
+        }
         p.color.exposureEV = .nan;XCTAssertThrowsError(try ResolvedStyle(parameters:p))
     }
 }

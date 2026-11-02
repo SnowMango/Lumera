@@ -40,6 +40,15 @@ public struct ColorShift: Codable, Equatable, Sendable {
     }
 }
 public struct ColorResponse: Codable, Equatable, Sendable {
+    static let exposureRange = -10.0...10.0
+    static let effectiveExposureRange = (2 * exposureRange.lowerBound)...(2 * exposureRange.upperBound)
+
+    static func limitedExposure(_ value: Double, resolved: Bool = false) -> Double {
+        guard value.isFinite else { return value }
+        let range = resolved ? effectiveExposureRange : exposureRange
+        return min(range.upperBound, max(range.lowerBound, value))
+    }
+
     public var shift=ColorShift()
     public var exposureEV=0.0
     public var whiteBalance=WhiteBalanceCorrection()
@@ -47,7 +56,7 @@ public struct ColorResponse: Codable, Equatable, Sendable {
     public init() {}
     public var isActive: Bool {shift != ColorShift() || exposureEV != 0 || whiteBalance.source != whiteBalance.destination || matrix != ColorMatrix3x3()}
     public func validate(resolved:Bool = false) throws {
-        guard exposureEV.isFinite, (resolved ? -6.0...6.0 : -3.0...3.0).contains(exposureEV) else {throw LabError.invalid("曝光超出允许范围")}
+        guard exposureEV.isFinite, (resolved ? Self.effectiveExposureRange : Self.exposureRange).contains(exposureEV) else {throw LabError.invalid("曝光超出允许范围")}
         try shift.validate();try whiteBalance.validate();try matrix.validate()
     }
 }

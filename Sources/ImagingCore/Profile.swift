@@ -24,7 +24,9 @@ public struct Profile: Codable, Equatable, Sendable {
     public var id = UUID().uuidString
     public var name = "标准风格"
     public var description = "中性起点；不对应已标定机型"
-    public var parameters = StyleParameters()
+    public var parameters = StyleParameters() {
+        didSet { parameters.color.exposureEV = ColorResponse.limitedExposure(parameters.color.exposureEV) }
+    }
     public var responses:[ConditionBinding]=[]
     public var temporalPolicy=TemporalPolicy()
     public init() {}

@@ -76,16 +76,32 @@ final class StyleEvaluatorTests:XCTestCase {
             XCTAssertEqual(result.parameters.grain.amount,0.1)
         }
     }
-    func testExposureCanReachSixOnlyAfterPhotoAdjustment() throws {
-        var profile = Profile()
-        profile.parameters.color.exposureEV = 3
-        var photo = StyleAdjustments()
-        photo.exposureEV = 3
-        let evaluated = try StyleEvaluator.evaluate(StyleEvaluator.compile(profile), adjustments: photo)
-        XCTAssertEqual(evaluated.parameters.color.exposureEV, 6)
-        XCTAssertEqual(try StyleEvaluator.freeze(profile, conditions: .init()).parameters.color.exposureEV, 3)
-        profile.parameters = evaluated.parameters
-        XCTAssertThrowsError(try profile.validate())
+    func testExposureLimitsBeforeAndAfterPhotoAdjustment() throws {
+        for limit in [-10.0, 10.0] {
+            var profile = Profile()
+            profile.parameters.color.exposureEV = limit
+            var photo = StyleAdjustments()
+            photo.exposureEV = limit
+            let evaluated = try StyleEvaluator.evaluate(StyleEvaluator.compile(profile), adjustments: photo)
+            XCTAssertEqual(try evaluated.resolvedStyle().parameters.color.exposureEV, 2 * limit)
+            XCTAssertEqual(try StyleEvaluator.freeze(profile, conditions: .init()).parameters.color.exposureEV, limit)
+
+            profile.parameters.color.exposureEV = limit * 1.01
+            try profile.validate()
+            XCTAssertEqual(profile.parameters.color.exposureEV, limit)
+            photo.exposureEV = limit * 1.01
+            try photo.validate()
+            XCTAssertEqual(photo.exposureEV, limit)
+        }
+    }
+
+    func testDecodedPhotoLimitsOnlyExposure() throws {
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSON.encode(StyleAdjustments())) as? [String: Any])
+        json["grainMultiplier"] = -2
+        json["exposureEV"] = 300
+        let decoded = try JSONDecoder().decode(StyleAdjustments.self, from: JSONSerialization.data(withJSONObject: json))
+        XCTAssertEqual(decoded.exposureEV, 10)
+        XCTAssertThrowsError(try decoded.validate())
     }
 
     func testNoRulesKeepsStaticParametersAndAdjustmentClampingIsReported() throws {

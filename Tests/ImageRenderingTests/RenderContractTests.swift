@@ -88,7 +88,7 @@ final class RenderContractTests:XCTestCase {
         let flat=try h.render(p,width:8192,height:8,value:0.6)
         XCTAssertEqual(flat[0],0.6,accuracy:0.003)
         p.parameters.color.whiteBalance.source=Chromaticity(x:0.44309360431205197,y:0.18605332803746455)
-        p.parameters.color.exposureEV=3
+        p.parameters.color.exposureEV=10
         let extreme=try h.encoder.prepare(ResolvedStyle(profile:p))
         let texture=try h.encode(h.texture(width:32,height:32),extreme,RenderRequest(input:InputDescriptor(width:32,height:32)))
         XCTAssertEqual(texture.pixelFormat,.rgba32Float,"Extreme white points must not overflow half-float optical intermediates")

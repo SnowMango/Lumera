@@ -41,7 +41,7 @@ public struct ParameterDescriptor {
         .init("color.shift.yellowBlue","黄蓝轴 / normalized","color",\.color.shift.yellowBlue,-1...1)
     ] }
     public static let all: [ParameterDescriptor] = [
-        .init("color.exposureEV", "映射前曝光 / EV", "color", \.color.exposureEV, -3...3, .ev, effectiveRange: -6...6),
+        .init("color.exposureEV", "映射前曝光 / EV", "color", \.color.exposureEV, ColorResponse.exposureRange, .ev, effectiveRange: ColorResponse.effectiveExposureRange),
         .init("detail.fineSigma", "细纹理尺度 / px", "detail", \.detail.fineSigma, 0.1...8, .referencePixels),
         .init("detail.midSigma", "中纹理尺度 / px", "detail", \.detail.midSigma, 0.1...16, .referencePixels),
         .init("detail.fineGain", "细纹理强度", "detail", \.detail.fineGain, 0...1.5, .multiplier),
