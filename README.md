@@ -27,7 +27,7 @@ Lumera 是基于 Metal 的相机成片质感处理库，提供颜色变换、色
 https://github.com/SnowMango/Lumera.git
 ```
 
-依赖规则选择 **Up to Next Major Version**，最低版本填写 `1.1.0`（对应标签 `v1.1.0`）。添加到应用目标时，选择 `ImagingCore` 和 `ImageRendering` 产品；在代码中分别使用 `import ImagingCore` 和 `import ImageRendering`，无需 `import Lumera`。
+`v0.2.2` 标签发布后，依赖规则选择 **Up to Next Major Version**，最低版本填写 `0.2.2`。添加到应用目标时，选择 `ImagingCore` 和 `ImageRendering` 产品；在代码中分别使用 `import ImagingCore` 和 `import ImageRendering`，无需 `import Lumera`。
 
 如果宿主项目使用 `Package.swift`，在包的 `dependencies` 中声明仓库，并在目标的 `dependencies` 中添加产品：
 
@@ -42,7 +42,7 @@ let package = Package(
         .library(name: "MyCameraFeature", targets: ["MyCameraFeature"])
     ],
     dependencies: [
-        .package(url: "https://github.com/SnowMango/Lumera.git", from: "1.1.0")
+        .package(url: "https://github.com/SnowMango/Lumera.git", from: "0.2.2")
     ],
     targets: [
         .target(
@@ -77,7 +77,7 @@ let package = Package(
 
 ### 配置文件格式
 
-Lumera v1.1.0 使用 Profile JSON schema 8。根对象必填 `schemaVersion`、`id` 和 `name`。`parameters` 缺省时使用中性参数，`responses` 缺省时使用空数组。以下是最小的固定配置。
+Lumera 0.2.2 使用 Profile JSON schema 8。根对象必填 `schemaVersion`、`id` 和 `name`。`parameters` 缺省时使用中性参数，`responses` 缺省时使用空数组。以下是最小的固定配置。
 
 ```json
 {

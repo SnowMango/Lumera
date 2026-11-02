@@ -191,7 +191,7 @@ def process(path, row, validator, staging, output, output_conflict):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--input', type=Path, action='append', required=True)
-    parser.add_argument('--validator', required=True, help='path to v1.1 ccdlab')
+    parser.add_argument('--validator', required=True, help='path to a schema 8 compatible ccdlab')
     parser.add_argument('--apply', action='store_true')
     parser.add_argument('--output-dir', type=Path)
     parser.add_argument('--report', type=Path)
