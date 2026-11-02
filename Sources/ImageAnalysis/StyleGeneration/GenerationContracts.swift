@@ -25,7 +25,7 @@ public struct AlgorithmCaseResult:Codable,Equatable,Sendable {
     public var algorithm:AlgorithmID,caseID:String,status:AlgorithmCheckStatus,measured:Double?,limit:GenerationLimit,detail:String
 }
 public struct AlgorithmCheckReport:Codable,Equatable,Sendable {
-    public var reportVersion=1,engineVersion=Profile.engineVersion,algorithmVersion=GenerationLimits.algorithmVersion,limitsVersion=GenerationLimits.version
+    public var reportVersion=1,engineVersion=LumeraVersion.rendererRevision,algorithmVersion=GenerationLimits.algorithmVersion,limitsVersion=GenerationLimits.version
     public var materialDigest=GenerationLimits.materialDigest,seed:UInt32=1729,os=ProcessInfo.processInfo.operatingSystemVersionString,gpu:String
     public var elapsedSeconds:Double,results:[AlgorithmCaseResult]
     public var summary:String {results.map {"\($0.status.rawValue) · \($0.algorithm.title) / \($0.caseID)\n\($0.detail)"}.joined(separator:"\n\n")}
@@ -34,7 +34,7 @@ public struct AlgorithmCheckReport:Codable,Equatable,Sendable {
 public struct GenerationEligibility:Sendable {
     public let algorithms:Set<AlgorithmID>
     public init(report:AlgorithmCheckReport,required:[AlgorithmID]) throws {
-        guard !required.isEmpty,report.reportVersion==1,report.engineVersion==Profile.engineVersion,
+        guard !required.isEmpty,report.reportVersion==1,report.engineVersion==LumeraVersion.rendererRevision,
               report.algorithmVersion==GenerationLimits.algorithmVersion,report.limitsVersion==GenerationLimits.version,
               report.materialDigest==GenerationLimits.materialDigest,report.seed==1729 else {throw LabError.invalid("自动算法自检证据缺失或版本已失效")}
         for id in required {

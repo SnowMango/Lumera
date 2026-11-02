@@ -7,7 +7,7 @@ public struct AcceptanceResult:Codable,Sendable {
     public let metrics:[String:Double],limits:[String:Double],explanation:String
 }
 public struct AcceptanceReport:Codable,Sendable {
-    public var version="lumera-style-acceptance-v1"
+    public var version="lumera-style-acceptance-v2"
     public let profileDigest:String,fixtureDigest:String,engineVersion:String,system:String
     public let conditions:[CaptureConditions],evaluations:[[ResponseDiagnostic]],results:[AcceptanceResult]
     public let method:String
@@ -65,6 +65,7 @@ public enum StyleAcceptance {
                     let linear=(0..<width).map{AcceptanceReference.decode(Double(edge.pixels[$0*4]))}
                     for effect in ["softening","detail","glow","halation"] {
                         isolated=StyleParameters();var expected=linear
+                        var expectedRGB:[SIMD3<Double>]?
                         if effect=="softening" {
                             isolated.softening=p.softening
                             if p.softening.isActive {let b=blur(linear,p.softening.sigma*scale);expected=zip(linear,b).map{$0*(1-p.softening.amount)+$1*p.softening.amount}}
@@ -92,15 +93,22 @@ public enum StyleAcceptance {
                                     let a=blur(hi,p.glow.nearSigma*scale),b=blur(hi,p.glow.farSigma*scale)
                                     expected=linear.indices.map{linear[$0]+p.glow.amount*(a[$0]*(1-p.glow.farWeight)+b[$0]*p.glow.farWeight-hi[$0])}
                                 } else {
-                                    let b=blur(hi,p.halation.sigma*scale)
-                                    expected=linear.indices.map{linear[$0]+p.halation.amount*p.halation.red*max(0,b[$0]-hi[$0])}
+                                    let b=try HalationReference.kernel(radius:p.halation.radius).residual(hi,width:width,height:1,scaleX:scale,scaleY:scale)
+                                    let tint=SIMD3(p.halation.red,p.halation.green,p.halation.blue) * p.halation.amount
+                                    expectedRGB=linear.indices.map{SIMD3(repeating:linear[$0])+tint*b[$0]}
                                 }
                             }
                         }
                         let output=try render(edge,isolated)
                         error=0
-                        for x in 0..<width {error=max(error,abs(Double(output.pixels[(4*width+x)*4])-min(1,max(0,effect=="detail" ? expected[x]:AcceptanceReference.encode(expected[x])))))}
-                        record(effect,["redChannelMaxAbs":error,"scale":scale],["maxAbs":0.0002],error<=0.0002 ? .passed:.failed,"独立Double卷积、纵向恒定亮边；细节在编码sRGB域，其余光学效果在线性光域；与相同归一化尺度比较。染色光晕此项检查红色分量；不代表任意场景主观相似度。")
+                        for x in 0..<width {
+                            for channel in 0..<3 {
+                                let reference=expectedRGB?[x][channel] ?? expected[x]
+                                let encoded=effect=="detail" ? reference : AcceptanceReference.encode(reference)
+                                error=max(error,abs(Double(output.pixels[(4*width+x)*4+channel])-min(1,max(0,encoded))))
+                            }
+                        }
+                        record(effect,["rgbMaxAbs":error,"scale":scale],["maxAbs":0.0002],error<=0.0002 ? .passed:.failed,"在纵向恒定的亮边上比较 GPU 的三个通道与独立 Double 卷积。细节使用编码 sRGB，其余光学效果使用线性光。")
                     }
                     isolated=StyleParameters();isolated.vignette=p.vignette
                     let flat=try ImageFrame.solid(width:width,height:width*3/4,value:0.5),vignette=try render(flat,isolated)
@@ -115,6 +123,7 @@ public enum StyleAcceptance {
                     for effect in ["noise","grain"] {
                         isolated=StyleParameters()
                         if effect=="noise" {isolated.noise=p.noise;isolated.noise.chromaRatio=0} else {isolated.grain=p.grain;isolated.grain.chroma=0}
+                        let grainReference = try GrainSamplingReference(parameters: isolated.grain)
                         let source=try ImageFrame.solid(width:width,height:256,value:0.5)
                         var sum=0.0,squares=0.0,count=0,adjacent=0.0,pairs=0,referenceError=0.0
                         for seed:UInt32 in [42,43,44,45] {
@@ -124,20 +133,20 @@ public enum StyleAcceptance {
                                 sum+=r;squares+=r*r;count+=1
                                 adjacent+=r*(Double(output.pixels[index-4])-0.5);pairs+=1
                                 if effect=="grain",x%97==0,y%37==0 {
-                                    let size=max(0.5,p.grain.size*scale)
-                                    let amplitude=p.grain.isActive ? p.grain.amount*AcceptanceReference.curve(0.5,definition:p.grain.luminanceCurve):0
-                                    let expected=0.5+amplitude*GrainReference.value(x:(Double(x)+0.5)/size,y:(Double(y)+0.5)/size,seed:seed,roughness:p.grain.roughness)
+                                    let footprint = CGRect(x:Double(x)/scale,y:Double(y)/scale,width:1/scale,height:1/scale)
+                                    let amplitude=p.grain.isActive ? AcceptanceReference.curve(0.5,definition:p.grain.luminanceCurve):0
+                                    let expected = try 0.5 + amplitude * grainReference.sample(footprint:footprint,seed:seed).x
                                     referenceError=max(referenceError,abs(Double(output.pixels[index])-min(1,max(0,expected))))
                                 }
                             }}
                         }
                         let expected:Double,radius:Double
                         if effect=="noise" {expected=p.noise.isActive ? min(0.1,AcceptanceReference.curve(0.5,definition:p.noise.curve)*p.noise.gain):0;radius=ceil(3*p.noise.lumaSigma*scale)}
-                        else {expected=p.grain.isActive ? p.grain.amount*AcceptanceReference.curve(0.5,definition:p.grain.luminanceCurve):0;radius=ceil(2.5*max(0.5,p.grain.size*scale))}
+                        else {expected=p.grain.isActive ? grainReference.rms(pixelWidth:1/scale)*AcceptanceReference.curve(0.5,definition:p.grain.luminanceCurve):0;radius=ceil(2.5*p.grain.size*scale)}
                         let n=Double(count),mean=sum/n,sigma=sqrt(max(0,squares/n-mean*mean)),effective=n/pow(1+2*radius,2)
                         let meanLimit=5*expected/sqrt(effective)+0.000002,sigmaLimit=expected*5/sqrt(2*max(1,effective-1))+0.000002
-                        let status:AcceptanceStatus = effect=="grain" ? (referenceError<=0.0002 ? .passed:.failed) : effective<1000 ? .insufficient:(abs(mean)<=meanLimit && abs(sigma-expected)<=sigmaLimit ? .passed:.failed)
-                        record(effect,["meanResidual":mean,"sigma":sigma,"expectedSigma":expected,"effectiveSamples":effective,"requestedSizePixels":effect=="grain" ? p.grain.size*scale:p.noise.lumaSigma*scale,"effectiveSizePixels":effect=="grain" ? max(0.5,p.grain.size*scale):p.noise.lumaSigma*scale,"samplingLimited":effect=="grain" && p.grain.size*scale<0.5 ? 1:0,"independentGrainMaxAbs":referenceError,"lag1Correlation":squares>0 ? adjacent/Double(pairs)/(squares/n):0],["meanAbs":meanLimit,"sigmaAbsError":sigmaLimit,"grainMaxAbs":0.0002],status,"中性0.5平场，4种子，关闭彩色分量隔离明暗统计；相关性降低有效样本数。颗粒实际尺度下限0.5px，samplingLimited=1表示受采样限制；颗粒通过依据为独立Double格点参考的抽样最大误差，不以sigma判定；报告一像素相关性，尚不认证完整频谱。噪点有效样本<1000标条件不足。")
+                        let status:AcceptanceStatus = effect=="grain" ? (referenceError<=0.0001 ? .passed:.failed) : effective<1000 ? .insufficient:(abs(mean)<=meanLimit && abs(sigma-expected)<=sigmaLimit ? .passed:.failed)
+                        record(effect,["meanResidual":mean,"sigma":sigma,"expectedSigma":expected,"effectiveSamples":effective,"requestedSizePixels":effect=="grain" ? p.grain.size*scale:p.noise.lumaSigma*scale,"effectiveSizePixels":effect=="grain" ? p.grain.size*scale:p.noise.lumaSigma*scale,"samplingLimited":effect=="grain" && p.grain.size*scale<0.5 ? 1:0,"independentGrainMaxAbs":referenceError,"lag1Correlation":squares>0 ? adjacent/Double(pairs)/(squares/n):0],["meanAbs":meanLimit,"sigmaAbsError":sigmaLimit,"grainMaxAbs":0.0001],status,"中性0.5平场，4种子，关闭彩色分量隔离明暗统计；相关性降低有效样本数。颗粒使用完整像素足迹积分，缩小时方差随之下降；通过依据为Double三次样条积分参考的抽样最大误差，不以sigma判定；报告一像素相关性，尚不认证完整频谱。噪点有效样本<1000标条件不足。")
                     }
                     isolated=p
                     let combined=try render(ramp,isolated)
@@ -147,7 +156,7 @@ public enum StyleAcceptance {
                 }
             }
         }
-        return AcceptanceReport(profileDigest:definition.identity,fixtureDigest:Digest.data(manifestData),engineVersion:Profile.engineVersion,system:ProcessInfo.processInfo.operatingSystemVersionString,conditions:conditions,evaluations:evaluations,results:results,method:"核验v1材料摘要；按同一生成定义制作720/1280/2048长边解析派生图。光学为纵向恒定8行亮边、暗角为4:3平场、随机效果为256行平场。float32，seed42–45，frame0。逐效果隔离，不是相机复刻准确率。")
+        return AcceptanceReport(profileDigest:definition.identity,fixtureDigest:Digest.data(manifestData),engineVersion:LumeraVersion.rendererRevision,system:ProcessInfo.processInfo.operatingSystemVersionString,conditions:conditions,evaluations:evaluations,results:results,method:"核验v1材料摘要；按同一生成定义制作720/1280/2048长边解析派生图。光学为纵向恒定8行亮边、暗角为4:3平场、随机效果为256行平场。float32，seed42–45，frame0。逐效果隔离，不是相机复刻准确率。")
     }
     private static func smooth(_ x:Double,_ lo:Double,_ hi:Double)->Double {let t=min(1,max(0,(x-lo)/(hi-lo)));return t*t*(3-2*t)}
 }

@@ -8,9 +8,9 @@ public struct GenerationLimit:Codable,Equatable,Sendable {
     public func accepts(_ error:Double)->Bool {error.isFinite && error>=0 && error<=absoluteTolerance+relativeTolerance*abs(referenceMagnitude)}
 }
 public enum GenerationLimits {
-    public static let version="generation-limits-6",algorithmVersion="generation-contract-6"
+    public static let version="generation-limits-7",algorithmVersion="generation-contract-7"
     public static let implemented:Set<AlgorithmID>=[.independentLUT,.targetDetection,.captureQuality,.toneColor,.detail,.texture,.glow,.conditionResponse,.combinedValidation]
-    public static let materialDefinition="Lumera independent LUT reference v1; RGB=(0.2,0.4,0.8); correction swap R/B; style cycle G/B/R; creative B/G/R; half LUT; seed=1729; detail Double oracle v3 distinct exposures/repeats, broadband plus missing-high-band refusal, interior ROI weighted ESF; texture independent normal grids v1 seeds1729/99173/4291; light Double RGB rings/convolution v1 core geometry/outside rejection; ISO independent three-condition noise and nonmonotonic holdout; combined actual-band-energy plus distinct actual ISO and actual baseline regression"
+    public static let materialDefinition="Lumera independent LUT reference v1; RGB=(0.2,0.4,0.8); correction swap R/B; style cycle G/B/R; creative B/G/R; half LUT; seed=1729; detail Double oracle v3 distinct exposures/repeats, broadband plus missing-high-band refusal, interior ROI weighted ESF; texture cubic area-integrated two-scale Double reference v2, temporal normal grids seeds1729/99173/4291; light Double RGB rings/integrated three-scale halation v2 core geometry/outside rejection; ISO independent three-condition noise and nonmonotonic holdout; combined actual-band-energy plus distinct actual ISO and actual baseline regression"
     public static let fixtureManifestDigest="d2d4460832d6ce0281efecd58a9ffe1a4bf4ce09cc07c6995c637e7a86192ee4"
     public static let materialDigest=Digest.data(Data((materialDefinition+fixtureManifestDigest).utf8))
     public static func cases(for id:AlgorithmID)->[GenerationLimit] {

@@ -31,6 +31,8 @@ final class GenerationCheckTests:XCTestCase {
         }
         var report=valid;report.engineVersion="old"
         XCTAssertThrowsError(try GenerationEligibility(report:report,required:[.independentLUT]))
+        report=valid;report.algorithmVersion="generation-contract-6";report.limitsVersion="generation-limits-6"
+        XCTAssertThrowsError(try GenerationEligibility(report:report,required:[.independentLUT]))
         report=valid;report.results.removeLast()
         XCTAssertThrowsError(try GenerationEligibility(report:report,required:[.independentLUT]))
         report=valid;report.results.append(report.results[0])

@@ -34,3 +34,20 @@ public struct RenderResources:Equatable,Sendable {
     public init(lut:LUTAsset?=nil,correctionLUT:LUTAsset?=nil) {self.lut=lut;self.correctionLUT=correctionLUT}
     public func validate() throws {try lut?.validate();try correctionLUT?.validate()}
 }
+
+extension RenderResources {
+    public func validate(against references: ResourceReferences, correction: DeviceCorrection? = nil) throws {
+        try validate()
+        try correction?.validate()
+        func check(_ role: String, _ reference: ResourceReferences.Entry?, digest: String?, contract: String) throws {
+            guard let reference else { return }
+            guard !reference.id.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty, reference.contract == contract, let digest,
+                  digest == reference.sha256 else {
+                throw LabError.invalid("\(role)：缺少资源或资源摘要、契约不匹配（\(reference.id)）")
+            }
+        }
+        try check("styleLUT", references.styleLUT, digest: lut?.sha256, contract: "encoded-sRGB-to-encoded-sRGB")
+        try check("correctionLUT", references.correctionLUT, digest: correctionLUT?.sha256, contract: "encoded-sRGB-to-encoded-sRGB")
+        try check("deviceCorrection", references.deviceCorrection, digest: correction?.effectDigest(), contract: "linear-sRGB-device-correction")
+    }
+}

@@ -20,5 +20,5 @@ public struct DeviceCorrection: Codable, Equatable, Sendable {
         var p=StyleParameters();p.color.whiteBalance=whiteBalance;p.color.matrix=matrix
         try p.validate()
     }
-    public func effectDigest() throws -> String {try validate();return Digest.data(try JSON.encode(self))}
+    public func effectDigest() throws -> String {try validate();return try StyleIdentity.digest(self)}
 }

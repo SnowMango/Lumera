@@ -18,8 +18,8 @@ final class StyleContractTests: XCTestCase {
         for key in ["seed","bypass","evidence"] {XCTAssertNil(object[key])}
         object["schemaVersion"]=2
         XCTAssertThrowsError(try JSONDecoder().decode(Profile.self,from:JSONSerialization.data(withJSONObject:object)))
-        object["schemaVersion"]=7;object.removeValue(forKey:"parameters")
-        XCTAssertThrowsError(try JSONDecoder().decode(Profile.self,from:JSONSerialization.data(withJSONObject:object)))
+        object["schemaVersion"]=8;object.removeValue(forKey:"parameters")
+        XCTAssertEqual(try ProfileCodec.decode(JSONSerialization.data(withJSONObject:object)),p)
     }
     func testInvalidParametersAreRejectedBeforeIndexing() throws {
         var p=Profile.standard;p.parameters.noise.curve = .init(knots:zip([0.0,0.18,0.5,0.85,1],[]).map{.init(x:$0,y:$1)})

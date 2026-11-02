@@ -8,8 +8,14 @@ public final class PreparedCameraStyle: @unchecked Sendable {
     fileprivate let curves:PreparedResponseCurves
     fileprivate let color: PreparedColorTransform
     fileprivate let lut: MTLTexture?
+    public var preparationStatistics: StylePreparationStatistics {
+        let counts = executionPlan.counts
+        return .init(colors:counts.colors, grains:counts.grains, halations:counts.halations)
+    }
+    let executionPlan: PreparedExecutionPlan
     fileprivate let deviceID: UInt64
     fileprivate init(style: ResolvedStyle, color:PreparedColorTransform, lut: MTLTexture?, deviceID: UInt64) {
+        self.executionPlan = PreparedExecutionPlan(parameters: style.parameters, color: color)
         self.curves=PreparedResponseCurves(style.parameters);self.style=style; self.color=color; self.lut=lut; self.deviceID=deviceID
     }
 }
@@ -50,7 +56,7 @@ public final class TextureEffectEncoder: @unchecked Sendable {
         self.device=device;self.precision=precision
         let library=try RenderingResources.makeLibrary(device:device)
         var compiled=[String:MTLComputePipelineState]()
-        for name in ["transfer","lutMap","gaussianPrepared","detailCombine","sharpen","vignette","highlights","glowCombine","resizeLinear","randomField","finish"] + CameraEffectUniforms.kernels {
+        for name in ["transfer","lutMap","gaussianPrepared","detailCombine","sharpen","vignette","highlights","glowCombine","resizeLinear","randomField","finish"] + CameraEffectUniforms.kernels + ["opticalReduceRegion", "softenCombineReducedRegion", "glowCombineReducedRegion", "halationCombineReducedRegion", "randomFieldRegion", "vignetteRegion", "resizeLinearRegion"] {
             guard let function=library.makeFunction(name:name) else {throw LabError.io("缺少 风格处理函数："+name)}
             compiled[name]=try device.makeComputePipelineState(function:function)
         }
@@ -80,8 +86,14 @@ public final class TextureEffectEncoder: @unchecked Sendable {
 
     public func encode(_ input: MTLTexture, style: PreparedCameraStyle, correction:PreparedDeviceCorrection? = nil, request:RenderRequest,
                        commandBuffer: MTLCommandBuffer) throws -> MTLTexture {
-        try encodeFrame(input,parameters:style.style.parameters,color:style.color,curves:style.curves,lut:style.lut,styleDeviceID:style.deviceID,
+        try encodeFrame(input,executionPlan:style.executionPlan,parameters:style.style.parameters,color:style.color,curves:style.curves,lut:style.lut,styleDeviceID:style.deviceID,
                         temporal:style.style.temporalPolicy,correction:correction,request:request,commandBuffer:commandBuffer)
+    }
+    func encodeRegion(_ input: MTLTexture, style: PreparedCameraStyle, correction: PreparedDeviceCorrection?,
+                      request: RenderRequest, geometry: RenderGeometry, workingSet: TileWorkingSet, commandBuffer: MTLCommandBuffer) throws -> MTLTexture {
+        try encodeFrame(input, executionPlan: style.executionPlan, parameters: style.style.parameters, color: style.color,
+            curves: style.curves, lut: style.lut, styleDeviceID: style.deviceID, temporal: style.style.temporalPolicy,
+            correction: correction, request: request, geometry: geometry, workingSet: workingSet, commandBuffer: commandBuffer)
     }
     public func prepare(_ definition:CompiledStyleDefinition,lut:LUTAsset?=nil) throws -> PreparedStyleDefinition {
         let fixed=try prepare(ResolvedStyle(parameters:definition.parameters,profileDigest:definition.identity,temporalPolicy:definition.temporalPolicy),lut:lut)
@@ -91,13 +103,13 @@ public final class TextureEffectEncoder: @unchecked Sendable {
                        correction:PreparedDeviceCorrection?=nil,request:RenderRequest,commandBuffer:MTLCommandBuffer) throws -> MTLTexture {
         let values=parameters.evaluated
         guard values.definitionIdentity==style.definition.identity else {throw LabError.invalid("帧参数不属于此已准备风格定义")}
-        return try encodeFrame(input,parameters:values.parameters,color:ColorTransform.prepare(values.parameters.color),
+        return try encodeFrame(input,executionPlan:style.fixed.executionPlan,parameters:values.parameters,color:style.fixed.executionPlan.color(for: values.parameters.color),
                                curves:style.fixed.curves,lut:style.fixed.lut,styleDeviceID:style.fixed.deviceID,temporal:values.temporalPolicy,
                                correction:correction,request:request,commandBuffer:commandBuffer)
     }
-    private func encodeFrame(_ input:MTLTexture,parameters p:StyleParameters,color:PreparedColorTransform,curves:PreparedResponseCurves,lut:MTLTexture?,
+    private func encodeFrame(_ input:MTLTexture,executionPlan:PreparedExecutionPlan,parameters p:StyleParameters,color:PreparedColorTransform,curves:PreparedResponseCurves,lut:MTLTexture?,
                              styleDeviceID:UInt64,temporal:TemporalPolicy,correction:PreparedDeviceCorrection?,
-                             request:RenderRequest,commandBuffer:MTLCommandBuffer) throws -> MTLTexture {
+                             request:RenderRequest,geometry:RenderGeometry? = nil,workingSet:TileWorkingSet? = nil,commandBuffer:MTLCommandBuffer) throws -> MTLTexture {
         try request.validate()
         guard input.device.registryID==device.registryID, styleDeviceID==device.registryID,
               correction == nil || correction!.deviceID==device.registryID,
@@ -107,9 +119,16 @@ public final class TextureEffectEncoder: @unchecked Sendable {
               [.rgba8Unorm,.bgra8Unorm,.rgba16Float,.rgba32Float].contains(input.pixelFormat) else {
             throw LabError.invalid("纹理尺寸、格式或设备与请求不符；请传入保留资源引用且尚未提交的 command buffer")
         }
+        let limit = min(request.maximumLongEdge ?? max(input.width,input.height), max(input.width,input.height))
+        let ratio = Double(limit) / Double(max(input.width,input.height))
+        let width = max(1, Int(Double(input.width) * ratio)), height = max(1, Int(Double(input.height) * ratio))
+        let frameGeometry = geometry ?? RenderGeometry(fullWidth: width, fullHeight: height,
+            area: CGRect(x:0,y:0,width:width,height:height), sourceWidth: input.width, sourceHeight: input.height,
+            sourceArea: CGRect(x:0,y:0,width:input.width,height:input.height))
+        let needsResize = frameGeometry.sourceWidth != frameGeometry.fullWidth || frameGeometry.sourceHeight != frameGeometry.fullHeight
         let maximumLongEdge=request.maximumLongEdge
         let hasEffects=correction != nil || p.color.isActive || lut != nil || p.tone.isActive || p.detail.isActive || p.softening.isActive || p.vignette.isActive || (request.previewGlow && (p.glow.isActive || p.halation.isActive)) || p.noise.isActive || p.grain.isActive
-        if !hasEffects,maximumLongEdge == nil || maximumLongEdge!>=max(input.width,input.height) {return input}
+        if !hasEffects && !needsResize { return input }
         // An extreme but valid white-point transform can exceed half-float optical intermediates.
         // Conservative row-sum bound leaves headroom for detail and diffusion; use Float32 then.
         let colorBound=color.maximumGain
@@ -118,31 +137,51 @@ public final class TextureEffectEncoder: @unchecked Sendable {
         guard combinedBound.isFinite,combinedBound < Double(Float.greatestFiniteMagnitude)/1024 else {throw LabError.invalid("组合颜色变换超出浮点安全范围")}
         let format:MTLPixelFormat=(precision == .float32 || combinedBound>256) ? .rgba32Float:.rgba16Float
         poolLock.lock()
-        let arena=available.popLast() ?? Arena(device:device)
+        let arena = geometry == nil ? (available.popLast() ?? Arena(device:device)) : Arena(device:device, workingSet:workingSet)
         let generation=cacheGeneration
         poolLock.unlock()
         arena.configure(width:input.width,height:input.height,limit:maximumLongEdge,format:format)
         // Resources remain reserved until completion even if encoding throws after its first pass.
         commandBuffer.addCompletedHandler { [weak self,arena] command in
             if command.status == .error {arena.clearNoise()}
-            self?.recycle(arena,generation:generation)
+            if geometry == nil { self?.recycle(arena,generation:generation) }
         }
         if !p.noise.isActive {arena.clearNoise()}
+        var grid: OpticalGrid?
+        func opticalGeometry(_ resolution: EffectResolution) -> OpticalGrid {
+            let value = frameGeometry.opticalGrid(resolution)
+            grid = value
+            return value
+        }
         func pass(_ name:String,_ source:MTLTexture,_ extras:[MTLTexture]=[],_ parameters:[Float]=[0],size:(Int,Int)?=nil,weights:MTLBuffer?=nil) throws -> MTLTexture {
             let result=try arena.take(width:size?.0 ?? source.width,height:size?.1 ?? source.height)
-            guard let state=pipelines[name],let encoder=commandBuffer.makeComputeCommandEncoder() else {throw LabError.io("无法创建 风格渲染 GPU 任务")}
+            let regionOptical = geometry != nil && (name == "opticalReduce" || name.hasSuffix("CombineReduced"))
+            let regional = regionOptical || (geometry != nil && ["vignette", "randomField", "resizeLinear"].contains(name))
+            let functionName = regional ? name + "Region" : name
+            guard let state=pipelines[functionName],let encoder=commandBuffer.makeComputeCommandEncoder() else {throw LabError.io("无法创建 风格渲染 GPU 任务")}
             encoder.setComputePipelineState(state)
             encoder.setTexture(source,index:0);encoder.setTexture(result,index:1)
             for (i,texture) in extras.enumerated(){encoder.setTexture(texture,index:i+2)}
             parameters.withUnsafeBytes{encoder.setBytes($0.baseAddress!,length:$0.count,index:0)}
+            if regional {
+                let g = frameGeometry
+                var values = [Float(g.originX), Float(g.originY), Float(g.fullWidth), Float(g.fullHeight)]
+                if regionOptical, let grid {
+                    values += [Float(grid.scaleX), Float(grid.scaleY), Float(grid.x), Float(grid.y),
+                               Float((Double(g.fullWidth)*grid.scaleX).rounded()), Float((Double(g.fullHeight)*grid.scaleY).rounded())]
+                } else if name == "resizeLinear" {
+                    values += [Float(g.sourceWidth), Float(g.sourceHeight), Float(g.sourceX), Float(g.sourceY)]
+                }
+                values.withUnsafeBytes { encoder.setBytes($0.baseAddress!, length:$0.count, index:2) }
+            }
             if let weights {encoder.setBuffer(weights,offset:0,index:1)}
             encoder.dispatchThreads(MTLSize(width:result.width,height:result.height,depth:1),threadsPerThreadgroup:MTLSize(width:16,height:16,depth:1))
             encoder.endEncoding();return result
         }
-        func blur(_ source:MTLTexture,_ sigma:Double,noise:Bool=false,scaleX:Double=1,scaleY:Double=1) throws -> MTLTexture {
+        func blur(_ source:MTLTexture,_ sigma:Double,noise:Bool=false,scaleX:Double=1,scaleY:Double=1,integrated:Bool=false) throws -> MTLTexture {
             func axis(_ input:MTLTexture,_ radius:Double,_ direction:Float) throws -> MTLTexture {
-                if radius<0.08{return input}
-                let (kernel,weights)=try arena.kernel(sigma:Float(radius),noise:noise)
+                if !integrated && radius<0.08{return input}
+                let (kernel,weights)=try arena.kernel(sigma:Float(radius),noise:noise,integrated:integrated)
                 return try pass("gaussianPrepared",input,[],[Float(kernel.radius),direction,kernel.denominator,noise ? 1:0],weights:weights)
             }
             let x=try axis(source,sigma*scaleX,0),y=try axis(x,sigma*scaleY,1)
@@ -154,15 +193,12 @@ public final class TextureEffectEncoder: @unchecked Sendable {
             if correction.colorIsActive {current=try pass("colorResponse",current,[],correction.color.uniforms)}
             if let lut=correction.lutTexture {let next=try pass("lutMap",current,[lut]);arena.release(current);current=next}
         }
-        if let limit=maximumLongEdge,max(current.width,current.height)>limit {
-            let ratio=Double(limit)/Double(max(current.width,current.height))
-            let linear=try pass("transfer",current,[],[-1])
-            arena.release(current)
-            let scaled=try pass("resizeLinear",linear,size:(max(1,Int(Double(current.width)*ratio)),max(1,Int(Double(current.height)*ratio))))
-            arena.release(linear)
+        if needsResize {
+            let linear=try pass("transfer",current,[],[-1]);arena.release(current)
+            let scaled=try pass("resizeLinear",linear,size:(frameGeometry.width,frameGeometry.height));arena.release(linear)
             current=try pass("transfer",scaled,[],[1]);arena.release(scaled)
         }
-        let scale=EffectScale.factor(width:current.width,height:current.height)
+        let scale=EffectScale.factor(width:frameGeometry.fullWidth,height:frameGeometry.fullHeight)
         if p.color.isActive {let next=try pass("colorResponse",current,[],color.uniforms);arena.release(current);current=next}
         if let lut {let next=try pass("lutMap",current,[lut]);arena.release(current);current=next}
         if p.tone.isActive {let next=try pass("toneResponse",current,[],curves.tone);arena.release(current);current=next}
@@ -178,7 +214,7 @@ public final class TextureEffectEncoder: @unchecked Sendable {
         }
         let linear=try pass("transfer",current,[],[-1]);arena.release(current);current=linear
         if p.softening.isActive {
-            let geometry=try OpticalProcessingGeometry(width:current.width,height:current.height,scale:request.softeningScale.scale)
+            let geometry=opticalGeometry(request.softeningScale)
             let reduced=request.softeningScale != .full
             let base=reduced ? try pass("opticalReduce",current,[],[0,0,0],size:(geometry.width,geometry.height)):current
             let blurred=try blur(base,p.softening.sigma*scale,scaleX:geometry.scaleX,scaleY:geometry.scaleY)
@@ -192,7 +228,7 @@ public final class TextureEffectEncoder: @unchecked Sendable {
             arena.release(current);current=next
         }
         if request.previewGlow,p.glow.isActive {
-            let g=p.glow,geometry=try OpticalProcessingGeometry(width:current.width,height:current.height,scale:request.glowScale.scale)
+            let g=p.glow,geometry=opticalGeometry(request.glowScale)
             let reduced=request.glowScale != .full
             let hi=reduced ? try pass("opticalReduce",current,[],[1,Float(g.threshold),Float(g.knee)],size:(geometry.width,geometry.height)):try pass("highlights",current,[],[Float(g.threshold),Float(g.knee)])
             let near=try blur(hi,g.nearSigma*scale,scaleX:geometry.scaleX,scaleY:geometry.scaleY)
@@ -201,12 +237,12 @@ public final class TextureEffectEncoder: @unchecked Sendable {
             arena.release(hi);arena.release(near);arena.release(far);arena.release(current);current=next
         }
         if request.previewGlow,p.halation.isActive {
-            let h=p.halation,geometry=try OpticalProcessingGeometry(width:current.width,height:current.height,scale:request.halationScale.scale)
+            let h=p.halation,geometry=opticalGeometry(request.halationScale)
             let reduced=request.halationScale != .full
             let hi=reduced ? try pass("opticalReduce",current,[],[1,Float(h.threshold),Float(h.knee)],size:(geometry.width,geometry.height)):try pass("highlights",current,[],[Float(h.threshold),Float(h.knee)])
-            let scattered=try blur(hi,h.sigma*scale,scaleX:geometry.scaleX,scaleY:geometry.scaleY)
-            let next=reduced ? try pass("halationCombineReduced",current,[scattered],CameraEffectUniforms.halation(h)+[Float(h.threshold),Float(h.knee)]):try pass("halationCombine",current,[hi,scattered],CameraEffectUniforms.halation(h))
-            arena.release(hi);arena.release(scattered);arena.release(current);current=next
+            let scattered=try executionPlan.halation(for:h).sigmas.map { try blur(hi,$0*scale,scaleX:geometry.scaleX,scaleY:geometry.scaleY,integrated:true) }
+            let next=reduced ? try pass("halationCombineReduced",current,scattered,CameraEffectUniforms.halation(h)+[Float(h.threshold),Float(h.knee)]):try pass("halationCombine",current,[hi]+scattered,CameraEffectUniforms.halation(h))
+            arena.release(hi);scattered.forEach(arena.release);arena.release(current);current=next
         }
         var luma=current,chroma=current
         if p.noise.isActive {
@@ -223,9 +259,21 @@ public final class TextureEffectEncoder: @unchecked Sendable {
                 arena.noise=NoiseField(key:key,luma:luma,chroma:chroma)
             }
         }
-        let result=try pass("finish",current,[luma,chroma],CameraEffectUniforms.noise(p.noise))
+        let result=try pass("finish",current,[luma,chroma],CameraEffectUniforms.noise(p.noise,envelope:curves.noise))
         if p.grain.isActive {
-            let grained=try pass("filmGrain",result,[],CameraEffectUniforms.grain(p.grain,scale:scale,seed:request.seed,frameIndex:temporal.grain == .fixed ? 0:request.frameIndex,envelope:curves.grain))
+            let prepared = executionPlan.grain(for:p.grain)
+            let uniforms = CameraEffectUniforms.grain(p.grain,scale:scale,seed:request.seed,
+                frameIndex:temporal.grain == .fixed ? 0:request.frameIndex,envelope:curves.grain,
+                originX:frameGeometry.originX,originY:frameGeometry.originY,prepared:prepared)
+            let factor = prepared.subdivision(scale:scale)
+            let grained: MTLTexture
+            if factor > 1 {
+                let subpixels = try pass("grainSubpixels",result,[],uniforms,size:(result.width*factor,result.height*factor))
+                grained = try pass("grainReduce",result,[subpixels],uniforms)
+                arena.release(subpixels)
+            } else {
+                grained = try pass("filmGrain",result,[],uniforms)
+            }
             arena.release(result);return grained
         }
         return result
@@ -263,7 +311,8 @@ public final class TextureEffectEncoder: @unchecked Sendable {
             if key != configuration {clearNoise();textures.removeAll();busy.removeAll();configuration=key}
             self.format=format
         }
-        init(device:MTLDevice){self.device=device}
+        let workingSet: TileWorkingSet?
+        init(device:MTLDevice, workingSet: TileWorkingSet? = nil){self.device=device; self.workingSet = workingSet}
         func take(width:Int,height:Int) throws -> MTLTexture {
             try TextureDimensions.validate(width:width,height:height,device:device)
             if let texture=textures.first(where:{$0.width==width && $0.height==height && !busy.contains(ObjectIdentifier($0))}) {
@@ -271,16 +320,18 @@ public final class TextureEffectEncoder: @unchecked Sendable {
             }
             let descriptor=MTLTextureDescriptor.texture2DDescriptor(pixelFormat:format,width:width,height:height,mipmapped:false)
             descriptor.storageMode = .shared;descriptor.usage=[.shaderRead,.shaderWrite]
+            try workingSet?.reserve(texture:descriptor,on:device)
             guard let texture=device.makeTexture(descriptor:descriptor) else {throw LabError.io("相机风格图像处理内存不足")}
             textures.append(texture);busy.insert(ObjectIdentifier(texture));return texture
         }
-        func kernel(sigma:Float,noise:Bool) throws -> (PreparedGaussianKernel,MTLBuffer) {
-            let key=UInt64(sigma.bitPattern)*2+(noise ? 1:0)
+        func kernel(sigma:Float,noise:Bool,integrated:Bool) throws -> (PreparedGaussianKernel,MTLBuffer) {
+            let key=UInt64(sigma.bitPattern)*4+(integrated ? 2 : (noise ? 1 : 0))
             if let cached=kernels[key] {return cached}
             // Bound retained weights when the user continuously edits a style or dimensions change.
             if kernels.count>=32 {kernels.removeAll(keepingCapacity:true)}
-            let value=try PreparedGaussianKernel(sigma:sigma,noise:noise)
+            let value=try PreparedGaussianKernel(sigma:sigma,noise:noise,integrated:integrated)
             // Large full-resolution radii can exceed setBytes' 4 KiB limit.
+            try workingSet?.reserve(bufferLength:value.weights.count * MemoryLayout<Float>.stride,on:device)
             guard let buffer=value.weights.withUnsafeBytes({device.makeBuffer(bytes:$0.baseAddress!,length:$0.count,options:.storageModeShared)}) else {throw LabError.io("无法分配模糊权重")}
             kernels[key]=(value,buffer);return (value,buffer)
         }
@@ -303,12 +354,28 @@ public struct PreparedGaussianKernel {
     public let weights:[Float]
     public let denominator:Float
     public init(sigma:Float,noise:Bool) throws {
-        guard sigma.isFinite,sigma>0,sigma<=256 else {throw LabError.invalid("高斯标准差需要为 0–256 范围内的正有限值")}
-        radius=Int(ceil(3*sigma))
+        try self.init(sigma:sigma,noise:noise,integrated:false)
+    }
+
+    package init(sigma:Float,noise:Bool,integrated:Bool) throws {
+        // Bound kernel storage, rather than imposing a scale limit tied to one image size.
+        let support = ceil(Double(sigma) * (integrated ? 4 : 3))
+        let maximumRadius = ((16 * 1024 * 1024 / MemoryLayout<Float>.stride) - 1) / 2
+        guard sigma.isFinite, sigma > 0, support <= Double(maximumRadius) else {
+            throw LabError.invalid("高斯尺度无效或权重超出 16 MiB")
+        }
+        radius = Int(support)
         var values=[Float]();values.reserveCapacity(2*radius+1)
         var sum:Float=0
         for i in -radius...radius {
-            let value=exp(-Float(i*i)/(2*sigma*sigma))
+            let value:Float
+            if integrated {
+                let k = sqrt(2.0) * Double(sigma)
+                let index = Double(i)
+                value = Float((erf((index+0.5)/k) - erf((index-0.5)/k)) / 2)
+            } else {
+                value = exp(-Float(i*i)/(2*sigma*sigma))
+            }
             values.append(value);sum += noise ? value*value:value
         }
         weights=values;denominator=noise ? sqrt(sum):sum

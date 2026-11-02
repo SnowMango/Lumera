@@ -1,0 +1,169 @@
+{
+  "description" : "原创演示参数；不是胶片乳剂的物理模拟或具体胶片复刻。",
+  "id" : "film-demo",
+  "name" : "胶片质感示例",
+  "parameters" : {
+    "color" : {
+      "exposureEV" : 0,
+      "matrix" : {
+        "values" : [
+          1,
+          0,
+          0,
+          0,
+          1,
+          0,
+          0,
+          0,
+          1
+        ]
+      },
+      "shift" : {
+        "redGreen" : 0,
+        "yellowBlue" : 0
+      },
+      "whiteBalance" : {
+        "destination" : {
+          "x" : 0.3127,
+          "y" : 0.329
+        },
+        "source" : {
+          "x" : 0.3127,
+          "y" : 0.329
+        }
+      }
+    },
+    "detail" : {
+      "enabled" : false,
+      "fineGain" : 1,
+      "fineSigma" : 0.75,
+      "maxAdjustment" : 0.015,
+      "midGain" : 1,
+      "midSigma" : 2.5,
+      "sharpenAmount" : 0,
+      "sharpenSigma" : 0.8,
+      "threshold" : 0.008
+    },
+    "glow" : {
+      "amount" : 0.06,
+      "enabled" : true,
+      "farSigma" : 14,
+      "farWeight" : 0.25,
+      "knee" : 0.15,
+      "nearSigma" : 3,
+      "threshold" : 0.7
+    },
+    "grain" : {
+      "amount" : 0.018,
+      "chroma" : 0.15,
+      "enabled" : true,
+      "luminanceCurve" : {
+        "shape" : {
+          "function" : {
+            "_0" : {
+              "center" : 0.5,
+              "end" : 1,
+              "exponent" : 2,
+              "family" : "bell",
+              "start" : 0,
+              "width" : 0.25,
+              "xLower" : 0,
+              "xUpper" : 1
+            }
+          }
+        }
+      },
+      "roughness" : 0.35,
+      "size" : 1.2
+    },
+    "halation" : {
+      "amount" : 0.12,
+      "blue" : 0.04,
+      "enabled" : true,
+      "green" : 0.2,
+      "knee" : 0.15,
+      "red" : 1,
+      "sigma" : 4,
+      "threshold" : 0.7
+    },
+    "noise" : {
+      "chromaCorrelation" : 0,
+      "chromaRatio" : 0.15,
+      "chromaSigma" : 1.3,
+      "curve" : {
+        "shape" : {
+          "function" : {
+            "_0" : {
+              "center" : 0.5,
+              "end" : 0,
+              "exponent" : 2,
+              "family" : "constant",
+              "start" : 0,
+              "width" : 0.25,
+              "xLower" : 0,
+              "xUpper" : 1
+            }
+          }
+        }
+      },
+      "enabled" : false,
+      "gain" : 1,
+      "lumaSigma" : 0.65
+    },
+    "softening" : {
+      "amount" : 0.2,
+      "enabled" : true,
+      "sigma" : 1.4
+    },
+    "tone" : {
+      "curve" : {
+        "shape" : {
+          "points" : {
+            "_0" : [
+              {
+                "x" : 0,
+                "y" : 0.025
+              },
+              {
+                "x" : 0.25,
+                "y" : 0.23
+              },
+              {
+                "x" : 0.5,
+                "y" : 0.5
+              },
+              {
+                "x" : 0.75,
+                "y" : 0.78
+              },
+              {
+                "x" : 1,
+                "y" : 0.97
+              }
+            ],
+            "interpolation" : "smooth"
+          }
+        }
+      },
+      "enabled" : true
+    },
+    "vignette" : {
+      "amountEV" : 0.25,
+      "centerX" : 0.5,
+      "centerY" : 0.5,
+      "enabled" : true,
+      "falloff" : 1.5,
+      "startRadius" : 0.35
+    }
+  },
+  "renderContractVersion" : 1,
+  "responses" : [
+
+  ],
+  "schemaVersion" : 7,
+  "spatialScaleVersion" : 1,
+  "temporalPolicy" : {
+    "grain" : "evolving",
+    "noise" : "fixed"
+  }
+}

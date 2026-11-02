@@ -8,8 +8,7 @@ public struct ResolvedStyle: Equatable, Sendable {
     public init(parameters:StyleParameters,profileDigest:String? = nil,temporalPolicy:TemporalPolicy=TemporalPolicy()) throws {
         try parameters.validate(resolved:true)
         self.parameters=parameters;self.temporalPolicy=temporalPolicy
-        struct Content:Encodable {let parameters:StyleParameters;let temporalPolicy:TemporalPolicy}
-        self.effectiveDigest=Digest.data(try JSON.encode(Content(parameters:parameters,temporalPolicy:temporalPolicy)))
+        self.effectiveDigest = try StyleIdentity.effective(parameters:parameters, temporalPolicy:temporalPolicy)
         self.profileDigest=profileDigest ?? effectiveDigest
     }
     /// Convenience for an unmodified saved style; never applies photo adjustments.

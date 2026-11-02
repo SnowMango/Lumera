@@ -15,6 +15,7 @@ public final class MetalRenderer: @unchecked Sendable {
     private var noiseMeasurement:GPUNoiseMeasurement?,edgeMeasurement:GPUEdgeMeasurement?,glowMeasurement:GPUGlowMeasurement?
     private var command: MTLCommandBuffer?
     private var inputs: [InputKey: CachedInput] = [:]
+    private var grainCalibration: (size: Double, roughness: Double, value: PreparedGrain)?
     private var lastUse: UInt64 = 0
     private var gaussianWeights:[UInt64:(PreparedGaussianKernel,MTLBuffer)]=[:]
     private var correctionCache:(String,PreparedDeviceCorrection?)?
@@ -35,6 +36,7 @@ public final class MetalRenderer: @unchecked Sendable {
     public func releaseCaches() {
         lock.lock();defer{lock.unlock()}
         inputs.removeAll();lutCache=nil;correctionCache=nil;correctionLUTCache=nil;gaussianWeights.removeAll();pool.removeAll()
+        grainCalibration = nil
         radialReducer?.releaseCaches();glowMeasurement?.releaseCaches()
     }
     public var deviceName: String { device.name }
@@ -155,15 +157,15 @@ public final class MetalRenderer: @unchecked Sendable {
         // Tracked textures order dependencies between encoders, including recycled scratch textures.
         encoder.endEncoding();lastWork.dispatches+=1;return out
     }
-    private func blur(_ input:TextureLease,sigma:Double,noise:Bool=false,scaleX:Double=1,scaleY:Double=1) throws -> TextureLease {
+    private func blur(_ input:TextureLease,sigma:Double,noise:Bool=false,scaleX:Double=1,scaleY:Double=1,integrated:Bool=false) throws -> TextureLease {
         func axis(_ source:TextureLease,_ radius:Double,_ direction:Float) throws -> TextureLease {
-            if radius<0.08{return source}
-            let key=UInt64(Float(radius).bitPattern)*2+(noise ? 1:0)
+            if !integrated && radius<0.08{return source}
+            let key=UInt64(Float(radius).bitPattern)*4+(integrated ? 2 : (noise ? 1 : 0))
             let cached:(PreparedGaussianKernel,MTLBuffer)
             if let existing=gaussianWeights[key] {cached=existing}
             else {
                 if gaussianWeights.count>=32 {gaussianWeights.removeAll(keepingCapacity:true)}
-                let kernel=try PreparedGaussianKernel(sigma:Float(radius),noise:noise)
+                let kernel=try PreparedGaussianKernel(sigma:Float(radius),noise:noise,integrated:integrated)
                 guard let buffer=kernel.weights.withUnsafeBytes({device.makeBuffer(bytes:$0.baseAddress!,length:$0.count,options:.storageModeShared)}) else {throw LabError.io("无法分配模糊权重")}
                 cached=(kernel,buffer);gaussianWeights[key]=cached
             }
@@ -210,7 +212,8 @@ public final class MetalRenderer: @unchecked Sendable {
                 correctionSeconds:lastWork.correctionSeconds,effectsSeconds:renderedAt-lastWork.inputPrepared,readbackSeconds:downloadedAt-renderedAt,
                 metadataSeconds:finished-downloadedAt,gpuSeconds:lastWork.gpuSeconds,
                 reusedInput:lastWork.uploads==0,reusedEffects:lastWork.prefixHits>0)
-            let manifest=RenderManifest(profileDigest:profileDigest,effectiveDigest:style.effectiveDigest,inputDigest:inputDigest,lutDigest:resources.lut?.sha256 ?? "identity",device:device.name,quality:request.maximumLongEdge == nil ? "final":"preview",correctionDigest:lastWork.correctionDigest,width:output.width,height:output.height,timing:timing,seconds:timing.totalSeconds,seed:request.seed,frameIndex:request.frameIndex,input:request.input,previewGlow:request.previewGlow,assumptions:image.provenance.merging(["opticalProcessingScales":"glow=1/\(request.glowScale.rawValue); halation=1/\(request.halationScale.rawValue); softening=1/\(request.softeningScale.rawValue)","sourceNoise":"not estimated","domain":"linear exposure/WB/matrix; encoded LUT/tone/detail; linear softening/vignette/bloom/halation/resize; encoded sensor-noise/film-grain","clipping":"intentional at bounded LUT/non-neutral tone and final output; no intermediate color clamp"]){_,v in v},peakWorkingSetEstimateBytes:max(image.width*image.height,output.width*output.height)*16*8)
+            let identity = try RenderIdentity.fromValidated(style:style,resources:resources,correction:correction,request:request,precision:.float32)
+            let manifest=RenderManifest(renderIdentity:identity,profileDigest:profileDigest,effectiveDigest:style.effectiveDigest,inputDigest:inputDigest,lutDigest:resources.lut?.sha256 ?? "identity",device:device.name,quality:request.maximumLongEdge == nil ? "final":"preview",correctionDigest:lastWork.correctionDigest,width:output.width,height:output.height,timing:timing,seconds:timing.totalSeconds,seed:request.seed,frameIndex:request.frameIndex,input:request.input,previewGlow:request.previewGlow,assumptions:image.provenance.merging(["opticalProcessingScales":"glow=1/\(request.glowScale.rawValue); halation=1/\(request.halationScale.rawValue); softening=1/\(request.softeningScale.rawValue)","sourceNoise":"not estimated","domain":"linear exposure/WB/matrix; encoded LUT/tone/detail; linear softening/vignette/bloom/halation/resize; encoded sensor-noise/film-grain","clipping":"intentional at bounded LUT/non-neutral tone and final output; no intermediate color clamp"]){_,v in v},peakWorkingSetEstimateBytes:max(image.width*image.height,output.width*output.height)*16*8)
             return RenderResult(image:output,glowLayer:glowImage,manifest:manifest)
         }
     }
@@ -236,7 +239,8 @@ public final class MetalRenderer: @unchecked Sendable {
                 correctionSeconds:lastWork.correctionSeconds,effectsSeconds:renderedAt-lastWork.inputPrepared,readbackSeconds:0,
                 metadataSeconds:finished-renderedAt,gpuSeconds:lastWork.gpuSeconds,
                 reusedInput:lastWork.uploads==0,reusedEffects:lastWork.prefixHits>0)
-            let manifest=RenderManifest(profileDigest:profileDigest,effectiveDigest:style.effectiveDigest,inputDigest:inputDigest,lutDigest:resources.lut?.sha256 ?? "identity",device:device.name,quality:request.maximumLongEdge == nil ? "final":"preview",correctionDigest:lastWork.correctionDigest,width:output.width,height:output.height,timing:timing,seconds:timing.totalSeconds,seed:request.seed,frameIndex:request.frameIndex,input:request.input,previewGlow:request.previewGlow,
+            let identity = try RenderIdentity.fromValidated(style:style,resources:resources,correction:correction,request:request,precision:.float32)
+            let manifest=RenderManifest(renderIdentity:identity,profileDigest:profileDigest,effectiveDigest:style.effectiveDigest,inputDigest:inputDigest,lutDigest:resources.lut?.sha256 ?? "identity",device:device.name,quality:request.maximumLongEdge == nil ? "final":"preview",correctionDigest:lastWork.correctionDigest,width:output.width,height:output.height,timing:timing,seconds:timing.totalSeconds,seed:request.seed,frameIndex:request.frameIndex,input:request.input,previewGlow:request.previewGlow,
                 assumptions:image.provenance.merging(["opticalProcessingScales":"glow=1/\(request.glowScale.rawValue); halation=1/\(request.halationScale.rawValue); softening=1/\(request.softeningScale.rawValue)","displayPath":"MTKView; GPU texture; no pixel readback","displayEncoding":"sRGB encoded; BGRA8 opaque; no additional transfer","domain":"linear exposure/WB/matrix; encoded LUT/tone/detail; linear softening/vignette/bloom/halation/resize; encoded sensor-noise/film-grain","clipping":"intentional at bounded LUT/non-neutral tone and final output; no intermediate color clamp"]){_,v in v},peakWorkingSetEstimateBytes:max(image.width*image.height,output.width*output.height)*16*8)
             return MetalPreviewFrame(texture:output,manifest:manifest)
         }
@@ -433,8 +437,8 @@ public final class MetalRenderer: @unchecked Sendable {
                     let h=p.halation,geometry=try OpticalProcessingGeometry(width:current.width,height:current.height,scale:request.halationScale.scale)
                     let reduced=request.halationScale != .full
                     let hi=reduced ? try pass("opticalReduce",current,[],[1,Float(h.threshold),Float(h.knee)],size:(geometry.width,geometry.height)):try pass("highlights",current,[],[Float(h.threshold),Float(h.knee)])
-                    let scattered=try blur(hi,sigma:h.sigma*scale,scaleX:geometry.scaleX,scaleY:geometry.scaleY)
-                    current=reduced ? try pass("halationCombineReduced",current,[scattered],CameraEffectUniforms.halation(h)+[Float(h.threshold),Float(h.knee)]):try pass("halationCombine",current,[hi,scattered],CameraEffectUniforms.halation(h))
+                    let scattered=try PreparedHalation(radius:h.radius).sigmas.map { try blur(hi,sigma:$0*scale,scaleX:geometry.scaleX,scaleY:geometry.scaleY,integrated:true) }
+                    current=reduced ? try pass("halationCombineReduced",current,scattered,CameraEffectUniforms.halation(h)+[Float(h.threshold),Float(h.knee)]):try pass("halationCombine",current,[hi]+scattered,CameraEffectUniforms.halation(h))
                 }
             }
             entry.prefix=CachedPrefix(key:prefixKey,image:current,layer:nil)
@@ -446,7 +450,25 @@ public final class MetalRenderer: @unchecked Sendable {
             luma=try blur(random,sigma:n.lumaSigma*scale,noise:true);chroma=try blur(random,sigma:n.chromaSigma*scale,noise:true)
         }
         current=try pass("finish",current,[luma,chroma],CameraEffectUniforms.noise(n))
-        if p.grain.isActive {current=try pass("filmGrain",current,[],CameraEffectUniforms.grain(p.grain,scale:scale,seed:request.seed,frameIndex:style.temporalPolicy.grain == .fixed ? 0:request.frameIndex))}
+        if p.grain.isActive {
+            let grain = p.grain
+            let prepared: PreparedGrain
+            if let cached = grainCalibration, cached.size == grain.size, cached.roughness == grain.roughness {
+                prepared = cached.value
+            } else {
+                prepared = PreparedGrain(size:grain.size,roughness:grain.roughness)
+                grainCalibration = (grain.size,grain.roughness,prepared)
+            }
+            let uniforms = CameraEffectUniforms.grain(grain,scale:scale,seed:request.seed,
+                frameIndex:style.temporalPolicy.grain == .fixed ? 0:request.frameIndex,prepared:prepared)
+            let factor = prepared.subdivision(scale:scale)
+            if factor > 1 {
+                let field = try pass("grainSubpixels",current,[],uniforms,size:(current.width*factor,current.height*factor))
+                current = try pass("grainReduce",current,[field],uniforms)
+            } else {
+                current = try pass("filmGrain",current,[],uniforms)
+            }
+        }
         try Task.checkCancellation()
         let result=try consume(current.texture,nil,command);succeeded=true;return result
     }

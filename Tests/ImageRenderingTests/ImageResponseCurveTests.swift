@@ -43,9 +43,15 @@ final class ResponseCurveTests:XCTestCase {
     func testGrainEnvelopeCanKeepDarkTextureAndDisableBrightTexture() throws {
         let h=try RenderHarness();var p=Profile.standard;p.parameters.grain.enabled=true;p.parameters.grain.amount=0.02
         p.parameters.grain.luminanceCurve = .init(knots:[.init(x:0,y:1),.init(x:0.4,y:1),.init(x:0.6,y:0),.init(x:1,y:0)])
-        let dark=try h.render(p,width:128,height:128,value:0.2),bright=try h.render(p,width:128,height:128,value:0.8)
-        let d=stride(from:0,to:dark.count,by:4).map{dark[$0]}
-        XCTAssertGreaterThan((d.max() ?? 0)-(d.min() ?? 0),0.03)
+        p.parameters.grain.chroma = 0
+        // At the reference pixel pitch, a unit envelope yields the configured RMS.
+        // Thumbnail pixels integrate the field and cannot be tested against the same amplitude.
+        let dark = try h.render(p,width:2048,height:32,value:0.2)
+        let bright = try h.render(p,width:2048,height:32,value:0.8)
+        let d = stride(from:0,to:dark.count,by:4).map { Double(dark[$0]) }
+        let mean = d.reduce(0,+)/Double(d.count)
+        let sigma = sqrt(d.reduce(0) { $0 + pow($1-mean,2) }/Double(d.count))
+        XCTAssertEqual(sigma,p.parameters.grain.amount,accuracy:0.001)
         let b=stride(from:0,to:bright.count,by:4).map{bright[$0]}
         XCTAssertEqual(b.max(),b.min());XCTAssertEqual(b[0],0.8,accuracy:0.001)
     }

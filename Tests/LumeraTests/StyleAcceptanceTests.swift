@@ -14,7 +14,11 @@ final class StyleAcceptanceTests:XCTestCase {
         }
     }
     func testPerEffectPerConditionAndScaleReport() throws {
-        let root=URL(fileURLWithPath:#filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("TestMaterials/Lumera-v1")
+        // The manifest and synthetic 16-bit images come from the versioned fixture generator.
+        // StyleAcceptance uses its own Double oracle for the expected output.
+        let root=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at:root) }
+        try AcceptanceFixtures.write(to:root)
         var p=try StylePresets.make("film-demo")
         p.parameters.noise.enabled=true;p.parameters.noise.curve = .init(knots:zip([0.0,0.18,0.5,0.85,1],[0.02,0.015,0.01,0.005,0.002]).map{.init(x:$0,y:$1)})
         p.parameters.detail.enabled=true;p.parameters.detail.fineGain=0.8;p.parameters.detail.sharpenAmount=0.1

@@ -51,21 +51,25 @@ private struct Batch:Codable {var inputs:[String]}
     static func run(_ input:[String]) throws {
         guard let command=input.first,command != "--help",command != "help" else {
             print("""
-            Lumera — offline camera texture renderer (schema 7)
+            Lumera — offline camera texture renderer (schema 8)
             preset export --name standard|digital-demo|film-demo --output profile.json
+            benchmark --profile <file> --width <px> --height <px> [--samples <count>] [--rounds <count>] [--sustain <seconds>]
             verify-style --profile profile.json --fixtures acceptance-kit [--conditions conditions.json] --output new-report-directory
             fixtures --output acceptance-kit
             fixtures --output-dir fixtures [--size 512] (legacy development fixtures)
             render --input image [--profile profile.json] --output result.png [--output-kind photo|reference] [--long-edge 1280] [--background 0,0,0] [--device-correction correction.json] [--lut look.cube] [--correction-lut correction.cube]
             batch --manifest inputs.json [--profile profile.json] --output-dir results [--output-kind photo|reference] [--device-correction correction.json] [--lut look.cube] [--correction-lut correction.cube]
             photo: 8-bit RGB; reference: 16-bit RGB PNG. Render/batch also write diagnostic JSON sidecars.
-            Old fit, validate and measure session commands are retired. No legacy JSON migration.
+            check-profile --profile <file>
+            Offline schema 7 conversion: tools/upgrade_profile_v1_1.py --help
             Overwrite requires --force; input files are always protected.
             """);return
         }
         if ["fit","validate","measure"].contains(command){throw LabError.unsupported("旧会话拟合/验证流程已停用；请使用手动工作台。新的识别与估计流程尚未实现。")}
         var remaining=Array(input.dropFirst());let allowed:Set<String>
         switch command {
+        case "benchmark":allowed=["--profile","--width","--height","--samples","--rounds","--sustain"]
+        case "check-profile":allowed=["--profile"]
         case "preset":guard remaining.first=="export" else{throw LabError.invalid("Expected preset export")};remaining.removeFirst();allowed=["--name","--output"]
         case "fixtures":allowed=["--output","--output-dir","--size"]
         case "verify-style":allowed=["--profile","--fixtures","--conditions","--output"]
@@ -75,12 +79,23 @@ private struct Batch:Codable {var inputs:[String]}
         }
         let a=try Arguments(remaining,allowed:allowed)
         switch command {
-        case "preset":try save(StylePresets.make(a.values["--name"] ?? "standard"),a.url("--output"),a.force)
+        case "benchmark":
+            guard let width = Int(try a.required("--width")), let height = Int(try a.required("--height")),
+                  let samples = Int(a.values["--samples"] ?? "120"), let rounds = Int(a.values["--rounds"] ?? "3"),
+                  let sustained = Double(a.values["--sustain"] ?? "60") else { throw LabError.invalid("无效的测量数值") }
+            try emit(RenderingBenchmark.run(profile:ProfileCodec.load(from:a.url("--profile")),width:width,height:height,
+                                             samples:samples,rounds:rounds,sustainedSeconds:sustained))
+        case "check-profile":
+            let profile = try ProfileCodec.load(from: a.url("--profile"))
+            print(try profile.effectDigest())
+        case "preset":
+            let profile = try StylePresets.make(a.values["--name"] ?? "standard")
+            try SafeFiles.write(ProfileCodec.encode(profile), to:a.url("--output"), overwrite:a.force)
         case "verify-style":
             guard !a.force else{throw LabError.invalid("验收报告需新目录，不支持--force")}
             let destination=try a.url("--output")
             guard !FileManager.default.fileExists(atPath:destination.path) else{throw LabError.io("验收输出目录已存在，请选择新目录")}
-            let profile=try JSON.load(Profile.self,from:a.url("--profile"))
+            let profile=try ProfileCodec.load(from: a.url("--profile"))
             let conditions: [CaptureConditions]
             if let path=a.values["--conditions"] {conditions=try JSON.load([CaptureConditions].self,from:URL(fileURLWithPath:path))}
             else {var iso=CaptureConditions();iso.iso=400;conditions=[CaptureConditions(),iso]}
@@ -104,7 +119,7 @@ private struct Batch:Codable {var inputs:[String]}
             let kind=a.values["--output-kind"] ?? "photo"
             guard ["photo","reference"].contains(kind) else{throw LabError.invalid("Invalid --output-kind")}
             let profileURL=a.values["--profile"].map{URL(fileURLWithPath:$0)}
-            let profile=try profileURL.map{try JSON.load(Profile.self,from:$0)} ?? .standard,renderer=try MetalRenderer()
+            let profile=try profileURL.map{try ProfileCodec.load(from:$0)} ?? .standard,renderer=try MetalRenderer()
             defer{renderer.releaseCaches()}
             let correctionURL=a.values["--device-correction"].map{URL(fileURLWithPath:$0)}
             let correction=try correctionURL.map{try JSON.load(DeviceCorrection.self,from:$0)}

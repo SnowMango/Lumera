@@ -2,7 +2,7 @@ import XCTest
 @testable import ImageRendering
 final class GaussianKernelTests:XCTestCase {
     func testRejectsInvalidKernelScales() {
-        for sigma:Float in [0,-1,.nan,.infinity,257] {XCTAssertThrowsError(try PreparedGaussianKernel(sigma:sigma,noise:false))}
+        for sigma:Float in [0,-1,.nan,.infinity,.greatestFiniteMagnitude] {XCTAssertThrowsError(try PreparedGaussianKernel(sigma:sigma,noise:false))}
     }
     func testOpticalWeightsPreserveConstantAndImpulseShape() throws {
         let kernel=try PreparedGaussianKernel(sigma:1,noise:false)

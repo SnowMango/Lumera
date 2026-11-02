@@ -63,7 +63,7 @@ final class StyleEvaluatorTests:XCTestCase {
         var c=CaptureConditions();c.iso=800
         XCTAssertEqual(try StyleEvaluator.evaluate(StyleEvaluator.compile(p),conditions:c).parameters,try StyleEvaluator.evaluate(StyleEvaluator.compile(copy),conditions:c).parameters)
         XCTAssertEqual(data,try JSON.encode(p))
-        var old=String(decoding:data,as:UTF8.self);old=old.replacingOccurrences(of:"\"schemaVersion\" : 7",with:"\"schemaVersion\" : 3")
+        var old=String(decoding:data,as:UTF8.self);old=old.replacingOccurrences(of:"\"schemaVersion\" : 8",with:"\"schemaVersion\" : 3")
         XCTAssertThrowsError(try JSONDecoder().decode(Profile.self,from:Data(old.utf8)))
     }
     func testUpperBoundPlateauRemainsValidAcrossContinuousISO() throws {
@@ -76,6 +76,18 @@ final class StyleEvaluatorTests:XCTestCase {
             XCTAssertEqual(result.parameters.grain.amount,0.1)
         }
     }
+    func testExposureCanReachSixOnlyAfterPhotoAdjustment() throws {
+        var profile = Profile()
+        profile.parameters.color.exposureEV = 3
+        var photo = StyleAdjustments()
+        photo.exposureEV = 3
+        let evaluated = try StyleEvaluator.evaluate(StyleEvaluator.compile(profile), adjustments: photo)
+        XCTAssertEqual(evaluated.parameters.color.exposureEV, 6)
+        XCTAssertEqual(try StyleEvaluator.freeze(profile, conditions: .init()).parameters.color.exposureEV, 3)
+        profile.parameters = evaluated.parameters
+        XCTAssertThrowsError(try profile.validate())
+    }
+
     func testNoRulesKeepsStaticParametersAndAdjustmentClampingIsReported() throws {
         var p=Profile.standard;p.parameters.noise.enabled=true;p.parameters.noise.curve = .init(knots:zip([0.0,0.18,0.5,0.85,1],[0.08,0.08,0.08,0.08,0.08]).map{.init(x:$0,y:$1)})
         let definition=try StyleEvaluator.compile(p)

@@ -4,11 +4,14 @@ import ImagingCore
 @testable import ImageAnalysis
 
 final class PrintedTargetIntegrationTests:XCTestCase {
-    private var materials:URL {
-        var url=URL(fileURLWithPath:#filePath)
-        for _ in 0..<5 {url.deleteLastPathComponent()}
-        return url.appendingPathComponent("TestMaterials/StyleGeneration-v1")
+    // Frozen synthetic print raster and independently specified layout shipped with ImageAnalysis.
+    private let materials=GenerationMaterials.folder
+
+    override func setUpWithError() throws {
+        try super.setUpWithError()
+        try GenerationMaterials.verify(materials)
     }
+
     func testPrintedLayoutMatchesCodeAndDetectsRealRaster() throws {
         let fileLayout=try JSON.load(TargetLayout.self,from:materials.appendingPathComponent("layout.json"))
         XCTAssertEqual(fileLayout.markers.map(\.id),TargetLayout.composite.markers.map(\.id))

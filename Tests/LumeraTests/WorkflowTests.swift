@@ -4,9 +4,9 @@ import ImagingCore
 import ImageRendering
 final class WorkflowTests:XCTestCase {
  func testCLIExportRenderAndNoOverwrite() throws {
-  let root=URL(fileURLWithPath:#filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+  let sibling=Bundle(for:Self.self).bundleURL.deletingLastPathComponent().appendingPathComponent("ccdlab")
   let binary=ProcessInfo.processInfo.environment["CCDCLI_BINARY"].map {URL(fileURLWithPath:$0)}
-    ?? root.appendingPathComponent(".build/debug/ccdlab")
+    ?? sibling
   let dir=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
   try FileManager.default.createDirectory(at:dir,withIntermediateDirectories:true)
   defer {try? FileManager.default.removeItem(at:dir)}

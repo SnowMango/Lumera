@@ -9,6 +9,7 @@ import ImagingCore
 /// independently owned, opaque sRGB SDR images. The texture overload only encodes GPU work.
 /// Inputs and prepared resources must not be mutated while an operation uses them.
 public final class LumeraRenderer: @unchecked Sendable {
+    let imageInputFormat: MTLPixelFormat
     let device: MTLDevice
     let queue: MTLCommandQueue
     let context: CIContext
@@ -21,6 +22,7 @@ public final class LumeraRenderer: @unchecked Sendable {
         guard let device, let queue = device.makeCommandQueue() else {
             throw LabError.unsupported("无法创建 Metal 图像渲染环境")
         }
+        self.imageInputFormat = precision == .float32 ? .rgba32Float : .rgba16Float
         self.device = device
         self.queue = queue
         self.encoder = try TextureEffectEncoder(device: device, precision: precision)

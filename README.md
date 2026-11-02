@@ -7,8 +7,6 @@ Lumera 是基于 Metal 的相机成片质感处理库，提供颜色变换、色
 - Swift 5.10 或更高版本。
 - iOS 17 或 macOS 14 及以上版本。
 - GPU 渲染需要支持 Metal 的设备。
-- 风格配置格式：`schemaVersion = 7`。
-- 渲染约定与空间尺度版本：`renderContractVersion = 1`、`spatialScaleVersion = 1`。
 
 ## 模块
 
@@ -29,7 +27,7 @@ Lumera 是基于 Metal 的相机成片质感处理库，提供颜色变换、色
 https://github.com/SnowMango/Lumera.git
 ```
 
-依赖规则选择 **Up to Next Major Version**，最低版本填写 `1.0.0`（对应标签 `v1.0.0`）。添加到应用目标时，选择 `ImagingCore` 和 `ImageRendering` 产品；在代码中分别使用 `import ImagingCore` 和 `import ImageRendering`，无需 `import Lumera`。
+依赖规则选择 **Up to Next Major Version**，最低版本填写 `1.1.0`（对应标签 `v1.1.0`）。添加到应用目标时，选择 `ImagingCore` 和 `ImageRendering` 产品；在代码中分别使用 `import ImagingCore` 和 `import ImageRendering`，无需 `import Lumera`。
 
 如果宿主项目使用 `Package.swift`，在包的 `dependencies` 中声明仓库，并在目标的 `dependencies` 中添加产品：
 
@@ -44,7 +42,7 @@ let package = Package(
         .library(name: "MyCameraFeature", targets: ["MyCameraFeature"])
     ],
     dependencies: [
-        .package(url: "https://github.com/SnowMango/Lumera.git", from: "1.0.0")
+        .package(url: "https://github.com/SnowMango/Lumera.git", from: "1.1.0")
     ],
     targets: [
         .target(
@@ -56,12 +54,6 @@ let package = Package(
         )
     ]
 )
-```
-
-本地联调时，将上述 `.package(url:from:)` 替换为以下声明，路径相对于宿主包目录，目标的产品依赖保持不变：
-
-```swift
-.package(path: "../Lumera")
 ```
 
 ## 数据模型
@@ -81,7 +73,32 @@ let package = Package(
 
 配置 JSON 不包含 LUT 样本数据。`DeviceCorrection` 和 `RenderRequest` 也不属于风格配置。配置及资源的选择、存储和关联由调用方管理。
 
-`ResolvedStyle.profileDigest` 标识参数来源；`effectiveDigest` 标识有效参数与时间策略。配置解码与 `validate()` 会拒绝不支持的版本或无效参数，不执行版本迁移。
+`ResolvedStyle.profileDigest` 标识来源配置的效果定义，`effectiveDigest` 标识按拍摄条件求值后的参数和时间策略。桌面报告的 `renderIdentity` 还包含算法修订、资源和渲染设置。成片缓存键应同时包含输入图像的摘要。
+
+### 配置文件格式
+
+Lumera v1.1.0 使用 Profile JSON schema 8。根对象必填 `schemaVersion`、`id` 和 `name`。`parameters` 缺省时使用中性参数，`responses` 缺省时使用空数组。以下是最小的固定配置。
+
+```json
+{
+  "schemaVersion": 8,
+  "id": "neutral",
+  "name": "中性"
+}
+```
+
+使用 `ProfileCodec.load(from:)` 从文件读取配置，或使用 `ProfileCodec.decode(_:)` 解码字节。`ProfileCodec.encode(_:)` 在输出中写入默认值。输入上限为 16 MiB，嵌套深度上限为 64 层。未知字段、重复键、`null` 和超出范围的参数会产生校验错误。
+
+### 从 schema 7 升级
+
+在仓库根目录构建 `ccdlab`，然后对指定文件运行预检。预检将逐字段变更报告写入标准输出，源文件保持原样。
+
+```sh
+swift build -c release --product ccdlab
+python3 tools/upgrade_profile_v1_1.py --validator .build/release/ccdlab --input profile-v7.json
+```
+
+要生成 schema 8 配置，在同一命令末尾添加 `--apply --output-dir upgraded`。`upgraded` 必须是尚不存在的目录。每份输出都经过 `ccdlab check-profile` 校验。报告中标为 `needsReview` 的配置还需用样图复核颗粒或染色光晕的表现。
 
 ## 输入约定
 
@@ -103,7 +120,7 @@ let package = Package(
 
 使用裸纹理入口时，P3、HLG、PQ、Apple Log 等输入须由调用方先转换到上述约定。仅修改颜色空间标签不构成像素转换。
 
-引擎不设置业务层的边长或总像素数上限。纹理分配仍受 Metal 设备能力和可用内存约束；超出能力时需要调用方缩放或分块。渲染器不提供自动分块。
+裸纹理的尺寸和分配受 Metal 设备能力与可用内存约束。大图的 `CIImage` 入口见下文「局部与分块输出」。
 
 ### 统一图像 API
 
@@ -136,9 +153,22 @@ let styledTexture = try renderer.render(
 
 三种入口共用 `RenderOptions`：整体尺寸、效果比例、随机种子与帧序号均可配置。`prepareCorrection` 和 `correction:` 提供独立设备校正；固定风格可由 `Profile` 或 `ResolvedStyle` 准备。纹理入口还支持 `CompiledStyleDefinition` 和 `FrameStyleParameters` 动态帧参数。
 
-高层图像入口将已标记的 SDR 颜色转换为 sRGB，透明区域合成到黑色背景，范围归一化到整数像素。未标记颜色的 RGB CVPixelBuffer 假定为 sRGB。CIImage 则遵循 Core Image 工作空间语义（此处为扩展线性 sRGB）；从编码像素创建 CIImage 时应附上实际颜色空间，不能靠补充 metadata 改变像素解释。CIImage 输出使用浮点 RGBA 存储（通常为 16 位；极端颜色变换可能使用 32 位），CVPixelBuffer 输出使用 8 位 BGRA，因此不保证保持输入像素格式或位深。支持 BGRA/ARGB、RGBA half/float 及 8/10 位双平面 YCbCr 输入；YCbCr 必须提供可解析的颜色附件。非全帧 clean aperture、非方形像素、隔行和原始传感器缓冲区需要先由调用方适配。
+高层图像入口将已标记的 SDR 颜色转换为 sRGB，透明区域合成到黑色背景，范围归一化到整数像素。未标记颜色的 RGB CVPixelBuffer 假定为 sRGB。CIImage 则遵循 Core Image 工作空间语义（此处为扩展线性 sRGB）；从编码像素创建 CIImage 时应附上实际颜色空间，不能靠补充 metadata 改变像素解释。CIImage 输出使用浮点 RGBA 存储（默认 Float16，显式指定 `.float32` 时输入与输出均使用 Float32，极端颜色变换也可能触发精度提升），CVPixelBuffer 输出使用 8 位 BGRA，因此不保证保持输入像素格式或位深。支持 BGRA/ARGB、RGBA half/float 及 8/10 位双平面 YCbCr 输入；YCbCr 必须提供可解析的颜色附件。非全帧 clean aperture、非方形像素、隔行和原始传感器缓冲区需要先由调用方适配。
 
 当前风格引擎输出 SDR。在 iOS 18／macOS 15 及以上，已知 headroom 的 HDR 输入通过系统滤镜映射到 SDR；无法可靠判断的 HDR 输入会报错，不能把此接口视为 HDR 保真通道。超出 SDR 色域/范围的颜色在适配边界裁切。
+
+### 局部与分块输出（CIImage）
+
+`renderRegion` 用于可见区域预览，`renderTiled` 用于完整照片导出。
+
+```swift
+let crop = try await renderer.renderRegion(inputImage, region: visiblePixelRect, style: style)
+let photo = try await renderer.renderTiled(inputImage, style: style, workingMemoryLimit: 128 * 1024 * 1024)
+```
+
+`visiblePixelRect` 使用方向归一并应用 `maximumLongEdge` 后的完整画面坐标，须为画面内的整数像素矩形。返回图像的原点为零。两种入口都用完整画面坐标计算颗粒、暗角和光晕，设备校正在整体缩放前执行。
+
+`renderTiled` 的默认 GPU 临时工作预算为 128 MiB。最小分块连同滤波所需的周边像素仍超出预算时，调用会报错。源图、解码器、常驻资源和最终的 CPU 位图另计。
 
 ### RAW／Apple ProRAW
 
@@ -215,7 +245,7 @@ final class StyleRenderer {
 
 `encode` 只编码 GPU 工作，不提交或等待 command buffer。调用方应在同一 command buffer 中消费输出，再提交执行。风格或 LUT 改变后重新准备对应资源。
 
-固定参数入口使用最终参数快照。需要按 ISO、快门等条件改变效果时，使用动态帧入口。
+固定参数入口使用最终参数快照。若要将动态风格固定在某次拍摄条件下，调用 `try StyleEvaluator.freeze(profile, conditions: conditions)`，再准备返回的 `Profile`。若每帧都需要按 ISO、快门等条件改变效果，使用下面的动态帧入口。
 
 ## 动态帧与条件响应
 
@@ -320,15 +350,19 @@ func encodeFrame(
 
 ### 空间尺度与时间策略
 
-空间参数以完整画面长边 2048 像素为基准。裁剪后的输入视为新的完整画面。光学模糊使用可分离高斯核，截断范围为 3σ；噪点模糊使用保方差权重。
+空间参数以完整画面长边 2048 像素为基准。裁剪后的输入视为新的完整画面，分块沿用原画面坐标。
 
-颗粒的实际最小尺度为 0.5 像素，因此不同分辨率之间不保证逐像素一致。颗粒是程序化相关噪声，染色光晕是亮源扩散近似，不属于胶片乳剂物理仿真。
+胶片颗粒按输出像素的覆盖面积采样。`grain.amount` 是参考尺度的亮度扰动 RMS，`grain.size` 是自相关降到一半的距离，`grain.roughness` 控制粗尺度成分的方差占比。缩小输出时，每个像素会平均更多颗粒细节。
+
+染色光晕的 `halation.radius` 是扩散核的径向 RMS 半径。三个高斯尺度分别按像素积分并截断到 4σ，各通道的混合权重决定色晕的空间分布。柔化、细节和数码噪声的高斯核截断到 3σ，噪声模糊使用保方差权重。
 
 `Profile.temporalPolicy` 分别控制数码噪点和胶片颗粒：`fixed` 忽略 `frameIndex`；`evolving` 结合 `seed` 与 `frameIndex` 产生可重放序列。默认数码噪点固定、胶片颗粒随帧变化。
 
 ## LUT 资源
 
 LUT 的输入和输出约定均为编码 sRGB。`LUTAsset` 独立保存样本与摘要；`content` 可声明 `colorOnly`、`colorAndTone` 或 `unspecified`，该描述不执行颜色空间转换。
+
+LUT 由调用方加载和管理。需要记录外部资源关联时，分别声明风格 LUT、设备校正与校正 LUT 的 `ResourceReferences`，并用 `RenderResources.validate(against:correction:)` 核对实际资源。
 
 ### 原始数值数据
 

@@ -9,16 +9,17 @@ final class SpatialReferenceTests:XCTestCase {
         let linear=(0..<(w*h)).map{AcceptanceReference.decode(Double(input.pixels[$0*4]))}
         for tinted in [false,true] {
             var p=Profile.standard
-            if tinted {p.parameters.halation.enabled=true;p.parameters.halation.amount=0.4;p.parameters.halation.sigma=32;p.parameters.halation.threshold=0.5;p.parameters.halation.knee=0.1}
+            if tinted {p.parameters.halation.enabled=true;p.parameters.halation.amount=0.4;p.parameters.halation.radius=32;p.parameters.halation.threshold=0.5;p.parameters.halation.knee=0.1}
             else {p.parameters.glow.enabled=true;p.parameters.glow.amount=0.4;p.parameters.glow.nearSigma=16;p.parameters.glow.farSigma=32;p.parameters.glow.threshold=0.5;p.parameters.glow.knee=0.1}
             let near=AcceptanceReference.gaussian(linear,width:w,height:h,sigma:(tinted ? 32:16)*scale)
             let far=AcceptanceReference.gaussian(linear,width:w,height:h,sigma:32*scale)
+            let halo=try HalationReference.kernel(radius:32).residual(linear,width:w,height:h,scaleX:scale,scaleY:scale)
             let out=try renderer.render(input,style:ResolvedStyle(profile:p),request:RenderRequest(input:input.descriptor)).image
             var referenceEnergy=0.0,energy=0.0,maxError=0.0
             var expectedRings=[Double](repeating:0,count:64),actualRings=expectedRings
             for i in 0..<(w*h) {
                 let spread=tinted ? far[i]:near[i]*0.75+far[i]*0.25
-                let residual=tinted ? max(0,spread-linear[i])*0.4:(spread-linear[i])*0.4
+                let residual=tinted ? halo[i].x*0.4:(spread-linear[i])*0.4
                 let expected=linear[i]+residual,actual=AcceptanceReference.decode(Double(out.pixels[i*4]))
                 maxError=max(maxError,abs(actual-expected))
                 let er=max(0,residual),ar=max(0,actual-linear[i]),r=min(63,Int(hypot(Double(i%w-32),Double(i/w-24))))

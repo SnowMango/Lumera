@@ -50,7 +50,7 @@ final class CurveFunctionTests:XCTestCase {
     func testNewProfileStoresOnlyNewCurveModel() throws {
         var p=Profile();p.parameters.noise.curve=ResponseCurve(function:.init(family:.bell,start:0,end:0.03))
         let data=try JSON.encode(p),text=String(decoding:data,as:UTF8.self)
-        XCTAssertEqual(p.schemaVersion,7)
+        XCTAssertEqual(p.schemaVersion,8)
         XCTAssertFalse(text.contains("\"sigmas\""));XCTAssertFalse(text.contains("\"nodes\""))
         XCTAssertEqual(try JSONDecoder().decode(Profile.self,from:data),p)
     }

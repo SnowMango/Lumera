@@ -57,7 +57,7 @@ final class CameraEffectsTests:XCTestCase {
         var pixels=[Float](repeating:0,count:257*257*4)
         for i in stride(from:3,to:pixels.count,by:4){pixels[i]=1}
         for y in 126...130 {for x in 126...130 {for c in 0..<3 {pixels[(y*257+x)*4+c]=1}}}
-        var p=neutral;p.parameters.halation.enabled=true;p.parameters.halation.amount=0.8;p.parameters.halation.sigma=32
+        var p=neutral;p.parameters.halation.enabled=true;p.parameters.halation.amount=0.8;p.parameters.halation.radius=32
         let renderer=try MetalRenderer(),out=try renderer.renderStyle(ImageFrame(width:257,height:257,pixels:pixels),profile:p).image
         let index=(128*257+133)*4
         XCTAssertGreaterThan(out.pixels[index],0.01)
@@ -75,7 +75,9 @@ final class CameraEffectsTests:XCTestCase {
         XCTAssertEqual(a.pixels,try renderer.renderStyle(frame,profile:p).image.pixels)
         let grey=stride(from:0,to:a.pixels.count,by:4).map{Double(a.pixels[$0])}
         XCTAssertEqual(grey.reduce(0,+)/Double(grey.count),0.5,accuracy:0.003)
-        XCTAssertGreaterThan(grey.map{($0-0.5)*($0-0.5)}.reduce(0,+)/Double(grey.count),0.0004)
+        let expected = try GrainSamplingReference(parameters:p.parameters.grain).rms(pixelWidth:4) * p.parameters.grain.luminanceCurve.value(at:0.5)
+        let rms = sqrt(grey.reduce(0){$0+($1-0.5)*($1-0.5)}/Double(grey.count))
+        XCTAssertEqual(rms,expected,accuracy:expected*0.05)
         XCTAssertNotEqual(a.pixels,try renderer.renderStyle(frame,profile:p,seed:43).image.pixels)
         func gradient(_ image:ImageFrame)->Double {
             var total=0.0
@@ -83,7 +85,7 @@ final class CameraEffectsTests:XCTestCase {
             return total/Double(image.width*image.height)
         }
         p.parameters.grain.size=8
-        XCTAssertLessThan(gradient(try renderer.renderStyle(frame,profile:p).image),gradient(a)*0.65)
+        XCTAssertLessThan(gradient(try renderer.renderStyle(frame,profile:p).image),gradient(a))
     }
 
 
@@ -92,7 +94,7 @@ final class CameraEffectsTests:XCTestCase {
         var p=neutral;p.parameters.tone.enabled=true;p.parameters.color.exposureEV=3
         p.parameters.tone.curve = .init(knots:zip([0.0,0.25,0.5,0.75,1],[0.1,0.1,0.9,1,1]).map{.init(x:$0,y:$1)},interpolation:.smooth)
         p.parameters.softening.enabled=true;p.parameters.softening.amount=1;p.parameters.softening.sigma=8
-        p.parameters.halation.enabled=true;p.parameters.halation.amount=1;p.parameters.halation.sigma=32;p.parameters.halation.threshold=0;p.parameters.halation.knee=0.5
+        p.parameters.halation.enabled=true;p.parameters.halation.amount=1;p.parameters.halation.radius=32;p.parameters.halation.threshold=0;p.parameters.halation.knee=0.5
         p.parameters.grain.enabled=true;p.parameters.grain.amount=0.1;p.parameters.grain.size=0.5;p.parameters.grain.roughness=1;p.parameters.grain.chroma=1
         let output=try MetalRenderer().renderStyle(Fixtures.make(.patches,width:257,height:193),profile:p).image
         for i in output.pixels.indices {

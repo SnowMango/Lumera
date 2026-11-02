@@ -72,6 +72,6 @@ public enum GlowSolver {
             guard output.clipped==0,limit.accepts(error),error<=prior+0.0001 else {throw LabError.measurement("\(inputs[i].step.pairKey)：RGB 扩散验证失败或比基准退化")}
             evidence.append(.init(algorithm:.glow,caseID:inputs[i].step.pairKey,status:.passed,measured:error,limit:limit,detail:training[i] ? "训练 RGB 环形分布":"未见低曝光/重复帧 RGB 验证"))
         }
-        return .init(profile:candidate,evidence:evidence,unresolved:["固定光晕尺度、门槛和染色；不代表真实镜头物理模型","光源孔径、距离与相机焦段必须按采集说明固定；仅凭照片不能证明这些物理条件相同"],resourceDigests:resources.digests,validatedModules:[.glow],sourceISO:inputs.first?.actualConditions.iso)
+        return .init(profile:candidate,evidence:evidence,unresolved:["固定三尺度光晕的径向 RMS 半径、门槛和通道增益；不代表真实镜头物理模型","光源孔径、距离与相机焦段必须按采集说明固定；仅凭照片不能证明这些物理条件相同"],resourceDigests:resources.digests,validatedModules:[.glow],sourceISO:inputs.first?.actualConditions.iso)
     }
 }

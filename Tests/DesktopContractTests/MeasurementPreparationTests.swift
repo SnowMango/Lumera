@@ -84,46 +84,6 @@ final class MeasurementPreparationTests: XCTestCase {
         try await task.value
     }
 
-    func testOptInReleaseMeasurementBenchmark() throws {
-        guard ProcessInfo.processInfo.environment["CCDLAB_BENCHMARK_MEASUREMENTS"] == "1" else {
-            throw XCTSkip("Set CCDLAB_BENCHMARK_MEASUREMENTS=1 and use swift test -c release --filter MeasurementPreparationTests/testOptInReleaseMeasurementBenchmark")
-        }
-        #if DEBUG
-        throw XCTSkip("Measurement benchmark requires a release build")
-        #else
-        // Fixture construction and equality checks are outside the timed interval.
-        // Alternating order reduces cache/order bias; report medians, not a threshold.
-        for (kind,fixture) in [(MeasurementKind.edge,Fixture.edge),(.noise,.texture),
-                               (.texture,.texture),(.vignette,.flat),(.glow,.point)] {
-            let image = try (kind == .noise || kind == .texture)
-                ? noisyImage(width:2048,height:1536)
-                : Fixtures.make(fixture,width:2048,height:1536)
-            let expected = try LegacyMeasurementEngine.measure(image,kind:kind)
-            assertEqual(try MeasurementEngine.measure(image,kind:kind),expected)
-            var oldTimes=[Double](),newTimes=[Double]()
-            for iteration in 0..<3 {
-                if iteration % 2 == 0 {
-                    oldTimes.append(try timed { try LegacyMeasurementEngine.measure(image,kind:kind) })
-                    newTimes.append(try timed { try MeasurementEngine.measure(image,kind:kind) })
-                } else {
-                    newTimes.append(try timed { try MeasurementEngine.measure(image,kind:kind) })
-                    oldTimes.append(try timed { try LegacyMeasurementEngine.measure(image,kind:kind) })
-                }
-            }
-            let old=oldTimes.sorted()[1],new=newTimes.sorted()[1]
-            print("MEASUREMENT_BENCHMARK kind=\(kind.rawValue) pixels=3145728 oldMedianSeconds=\(old) newMedianSeconds=\(new) ratio=\(old/new)")
-        }
-        #endif
-    }
-
-    private func timed(_ work:() throws -> ImageAnalysis.Measurement) rethrows -> Double {
-        let start=ProcessInfo.processInfo.systemUptime
-        let result=try work()
-        let elapsed=ProcessInfo.processInfo.systemUptime-start
-        XCTAssertTrue(result.metrics["mean"]!.isFinite)
-        return elapsed
-    }
-
     private func noisyImage(width:Int=131,height:Int=119) throws -> ImageFrame {
         var image=try ImageFrame.solid(width:width,height:height,value:0.5)
         var seed:UInt64=0xfeed1234

@@ -7,10 +7,11 @@ public enum ResponseTarget:String,Codable,CaseIterable,Sendable {
     case softeningAmount="softening.amount",softeningSigma="softening.sigma"
     case fineGain="detail.fineGain",midGain="detail.midGain",sharpenAmount="detail.sharpenAmount"
     case glowAmount="glow.amount",glowThreshold="glow.threshold",halationAmount="halation.amount",halationThreshold="halation.threshold"
+    case halationRadius="halation.radius"
     case vignetteAmount="vignette.amountEV"
     public var descriptor:ParameterDescriptor? {ParameterDescriptor.all.first{$0.id==rawValue}}
-    public var allowedOperations:[ResponseOperation] {self == .noiseGain ? [.multiply]:ResponseOperation.allCases}
-    public var unit:String {self == .noiseGain ? "倍率":(descriptor?.unit ?? "normalized")}
+    public var allowedOperations:[ResponseOperation] {descriptor?.allowedOperations ?? []}
+    public var unit:String {self == .noiseGain ? "倍率":(descriptor?.unit.rawValue ?? "normalized")}
     public var title:String {self == .noiseGain ? "数码噪点整体倍率":(descriptor?.title ?? rawValue)}
     /// Legal editing range for this response, given the current base parameters.
     public func responseRange(operation:ResponseOperation,parameters:StyleParameters)->ClosedRange<Double> {

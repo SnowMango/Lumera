@@ -3,6 +3,7 @@ import ImagingCore
 /// Owns static resources until released by the caller; one instance per compiled style.
 public final class PreparedStyleDefinition:@unchecked Sendable {
     public let definition:CompiledStyleDefinition
+    public var preparationStatistics: StylePreparationStatistics { fixed.preparationStatistics }
     let fixed:PreparedCameraStyle
     init(definition:CompiledStyleDefinition,fixed:PreparedCameraStyle){self.definition=definition;self.fixed=fixed}
 }
@@ -16,4 +17,9 @@ public struct StaticResourceStatistics:Sendable {
 }
 public struct RenderCacheStatistics:Sendable {
     public let kernelCount:Int,textureBytes:Int,kernelBytes:Int
+}
+
+/// Number of expensive preparations performed by this prepared style, across all callers.
+public struct StylePreparationStatistics: Sendable {
+    public let colors: Int, grains: Int, halations: Int
 }

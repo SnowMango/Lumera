@@ -7,20 +7,24 @@ public struct StyleParameters: Codable, Equatable, Sendable {
     public var noise=Noise(), grain=FilmGrain()
     public init() {}
     public func validate(resolved: Bool = false) throws {
-        guard noise.gain.isFinite,(0...8).contains(noise.gain) else {throw LabError.invalid("噪点倍率须为0–8") }
-        try tone.curve.validate(kind:.tone)
-        try noise.curve.validate(kind:.noise)
-        try grain.luminanceCurve.validate(kind:.grain)
-        try color.validate(resolved:resolved) // Validate array lengths before indexed key paths.
+        try validateField("$.parameters.tone.curve") { try tone.curve.validate(kind: .tone) }
+        try validateField("$.parameters.noise.curve") { try noise.curve.validate(kind: .noise) }
+        try validateField("$.parameters.grain.luminanceCurve") { try grain.luminanceCurve.validate(kind: .grain) }
+        // Validate array lengths before indexed key paths.
+        try validateField("$.parameters.color.matrix.values") { try color.matrix.validate() }
+        try validateField("$.parameters.color.whiteBalance.source") { try color.whiteBalance.source.validate() }
+        try validateField("$.parameters.color.whiteBalance.destination") { try color.whiteBalance.destination.validate() }
         for item in ParameterDescriptor.all {
             let value=self[keyPath:item.keyPath]
-            let range: ClosedRange<Double> = resolved && item.id == "color.exposureEV" ? -6...6 : item.range
-            guard value.isFinite, range.contains(value) else { throw LabError.invalid("参数“\(item.title)”超出有效范围") }
+            let range: ClosedRange<Double> = resolved ? item.effectiveRange : item.baseRange
+            guard value.isFinite, range.contains(value) else { throw LabError.invalid("$.parameters.\(item.id): 参数“\(item.title)”超出有效范围") }
         }
-        guard detail.midSigma >= detail.fineSigma, glow.farSigma >= glow.nearSigma else {
-            throw LabError.invalid("模糊尺度顺序无效")
+        guard detail.midSigma >= detail.fineSigma else {
+            throw LabError.invalid("$.parameters.detail.midSigma: 小于 fineSigma")
         }
-        try color.validate(resolved:resolved)
+        guard glow.farSigma >= glow.nearSigma else {
+            throw LabError.invalid("$.parameters.glow.farSigma: 小于 nearSigma")
+        }
 
     }
 }

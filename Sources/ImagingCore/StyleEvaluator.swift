@@ -26,17 +26,35 @@ public struct EvaluatedStyle:Sendable {
     public func resolvedStyle() throws -> ResolvedStyle {try ResolvedStyle(parameters:parameters,profileDigest:definitionIdentity,temporalPolicy:temporalPolicy)}
 }
 public enum StyleEvaluator {
+    public static func freeze(_ profile: Profile, conditions: CaptureConditions) throws -> Profile {
+        let result = try evaluate(compile(profile), conditions: conditions)
+        var frozen = profile
+        frozen.parameters = result.parameters
+        frozen.responses = []
+        try frozen.validate()
+        return frozen
+    }
+
     public static func compile(_ profile:Profile) throws -> CompiledStyleDefinition {
         try profile.validate();return try CompiledStyleDefinition(profile)
     }
     static func validateResponses(_ responses:[ConditionBinding],parameters:StyleParameters) throws {
-        guard responses.count<=ResponseTarget.allCases.count,Set(responses.map(\.target)).count==responses.count else {throw LabError.invalid("每个效果参数最多绑定一条条件响应")}
-        for binding in responses {
-            try binding.curve.validate(axis:binding.axis)
-            for value in [binding.curve.outputRange.lowerBound,binding.curve.outputRange.upperBound] {
-                var p=parameters
-                try binding.target.apply(value,operation:binding.operation,to:&p)
-                try p.validate()
+        var seen = Set<ResponseTarget>()
+        for (index, binding) in responses.enumerated() {
+            let path = "$.responses[\(index)]"
+            guard seen.insert(binding.target).inserted else {
+                throw LabError.invalid("\(path).target: 每个参数最多绑定一条响应")
+            }
+            guard binding.target.allowedOperations.contains(binding.operation) else {
+                throw LabError.invalid("\(path).operation: 该参数不支持此操作")
+            }
+            try validateField(path + ".curve") {
+                try binding.curve.validate(axis: binding.axis)
+                for value in [binding.curve.outputRange.lowerBound,binding.curve.outputRange.upperBound] {
+                    var p = parameters
+                    try binding.target.apply(value, operation: binding.operation, to: &p)
+                    try p.validate()
+                }
             }
         }
     }

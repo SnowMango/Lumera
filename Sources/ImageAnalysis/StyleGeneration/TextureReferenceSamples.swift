@@ -52,28 +52,20 @@ extension TextureReferenceSamples {
             var baseline=Profile.standard;baseline.parameters.noise.chromaRatio=0;baseline.parameters.grain.chroma=0;baseline.parameters.grain.size=8
             let plan=try CaptureProtocol(input:.init(id:"oracle-input",isoLevels:[100,400,1600],baseExposureSeconds:0.01),target:.init(id:"oracle-target",isoLevels:[100,400,1600],baseExposureSeconds:0.01))
             var frames=[FrameMeasurements]()
+            var film = baseline.parameters.grain
+            film.amount = 0.1
+            let grainReference = try GrainSamplingReference(parameters:film)
             for step in plan.steps where step.target == .flat && (allConditions || step.conditionIndex==0) {
               try autoreleasepool {
                 let mean=step.exposureEV == -1 ? 0.2:(step.exposureEV == 0 ? 0.45:0.7)
-                // Two independently sampled Gaussian grids, interpolated in Double.
-                var grids=[[Double]]();let gridSide=300
-                if model == .film && step.role == .target {for _ in 0..<2 {grids.append((0..<(gridSide*gridSide)).map{_ in normal()})}}
-                func field(_ x:Double,_ y:Double,_ grid:[Double])->Double {
-                    let ix=Int(floor(x)),iy=Int(floor(y)),fx=x-floor(x),fy=y-floor(y),u=fx*fx*(3-2*fx),v=fy*fy*(3-2*fy)
-                    let weights=[(1-u)*(1-v),u*(1-v),(1-u)*v,u*v]
-                    let values=[grid[iy*gridSide+ix],grid[iy*gridSide+ix+1],grid[(iy+1)*gridSide+ix],grid[(iy+1)*gridSide+ix+1]]
-                    return zip(values,weights).reduce(0){$0+$1.0*$1.1}/sqrt(weights.reduce(0){$0+$1*$1})
-                }
+                let filmPlane = model == .film && step.role == .target
+                    ? grainReference.luminancePlane(side:side,pixelWidth:2048/Double(side),seed:UInt32(truncatingIfNeeded:state))
+                    : []
                 var pixels=[Float](repeating:1,count:side*side*4)
                 for y in 0..<side {for x in 0..<side {
                     var value=mean+0.01*sin(Double(x)*0.12)+0.003*normal()
                     if step.role == .target {
-                        let n:Double
-                        if model == .digital {n=normal()}
-                        else {
-                            let u=(Double(x)+0.5)/2,v=(Double(y)+0.5)/2
-                            n=(0.65*field(u,v,grids[0])+0.35*field(u*0.4+13.7,v*0.4+29.1,grids[1]))/sqrt(0.65*0.65+0.35*0.35)
-                        }
+                        let n = model == .digital ? normal() : filmPlane[y*side+x]/film.amount
                         let amplitude=allConditions ? (0.02+Double(step.conditionIndex)*0.005)*(step.conditionIndex==1 ? middleMultiplier:1):0.025
                         value += amplitude*n
                     }

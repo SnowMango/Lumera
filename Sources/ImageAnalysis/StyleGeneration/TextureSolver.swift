@@ -119,6 +119,7 @@ public enum TextureSolver {
             }
         }
         let limit=GenerationLimits.cases(for:.texture).first{$0.caseID=="variance"}!
-        return .init(profile:profile,evidence:[.init(algorithm:.texture,caseID:"held-out-repeats-and-exposure",status:.passed,measured:actualWorst,limit:limit,detail:"独立重复对与未参与选择的中间曝光均验证；固定空间纹理不计入随机强度")],unresolved:["仅建议新增随机质感及线性亮度响应；尺度、彩色比例固定并检查频谱。不能移除原图噪声，也不反演胶片物理过程。"],resourceDigests:resources.digests,validatedModules:[.texture],sourceISO:frames.first{$0.step.role == .input}?.actualConditions.iso)
+        let fixedShape = options.model == .film ? "颗粒 size、roughness、chroma" : "数码噪点空间尺度、色度比例及相关性"
+        return .init(profile:profile,evidence:[.init(algorithm:.texture,caseID:"held-out-repeats-and-exposure",status:.passed,measured:actualWorst,limit:limit,detail:"独立重复对与留出的中间曝光通过逐帧 GPU 验证。单位响应在照片的实际输出尺寸上测量；固定空间纹理不计入新增方差")],unresolved:["只拟合新增随机强度与线性亮度响应。平场提供的方差、频带和色差用于检验既定形状；\(fixedShape) 保留基线值。源噪声超过目标时拒绝拟合。"],resourceDigests:resources.digests,validatedModules:[.texture],sourceISO:frames.first{$0.step.role == .input}?.actualConditions.iso)
     }
 }

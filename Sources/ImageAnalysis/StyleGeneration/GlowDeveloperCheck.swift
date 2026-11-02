@@ -9,7 +9,7 @@ enum GlowDeveloperCheck {
         let side=512,n=side*side,center=Double(side-1)/2
         var profile=Profile.standard
         profile.parameters.glow.nearSigma=8;profile.parameters.glow.farSigma=24;profile.parameters.glow.threshold=0.08;profile.parameters.glow.knee=0.03
-        profile.parameters.halation.sigma=16;profile.parameters.halation.threshold=0.08;profile.parameters.halation.knee=0.03
+        profile.parameters.halation.radius=16;profile.parameters.halation.threshold=0.08;profile.parameters.halation.knee=0.03
         func encoded(_ v:Double)->Double{v<=0.0031308 ? 12.92*v:1.055*pow(v,1/2.4)-0.055}
         func linear(_ v:Double)->Double{v<=0.04045 ? v/12.92:pow((v+0.055)/1.055,2.4)}
         func highlight(_ v:Double)->Double{let t=min(1,max(0,(v-0.05)/0.06));return v*t*t*(3-2*t)}
@@ -42,8 +42,8 @@ enum GlowDeveloperCheck {
                     let hi=source.map(highlight),near=blur(hi,2),far=blur(hi,6)
                     let amount=(s.repeatIndex<2 && s.exposureEV != -1) ? (trainingGlow ?? glow):glow
                     let neutral=source.indices.map{source[$0]+amount*(near[$0]*0.75+far[$0]*0.25-hi[$0])}
-                    let h=neutral.map(highlight),scatter=blur(h,4)
-                    values=source.indices.flatMap{i->[Float] in let halo=max(0,scatter[i]-h[i])*halation;return [1.0,0.2,0.04].map{Float(encoded(neutral[i]+halo*$0))}+[1]}
+                    let h=neutral.map(highlight),scatter=try HalationReference.kernel(radius:profile.parameters.halation.radius).residual(h,width:side,height:side,scaleX:0.25,scaleY:0.25)
+                    values=source.indices.flatMap{i->[Float] in let halo=scatter[i]*halation*SIMD3(1.0,0.2,0.04);return (0..<3).map{Float(encoded(neutral[i]+halo[$0]))}+[1]}
                 }
                 let url=folder.appendingPathComponent(s.id+".png"),image=try ImageFrame(width:side,height:side,pixels:values),data=try ImageCodec.encodeReference(image);try data.write(to:url)
                 var conditions=CaptureConditions();conditions.iso=s.expectedISO;conditions.exposureDurationSeconds=s.expectedExposureSeconds

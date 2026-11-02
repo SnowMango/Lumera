@@ -4,8 +4,8 @@ import ImageAnalysis
 
 final class DeviceCorrectionWorkflowTests:XCTestCase {
     func testCLIValidInvalidBatchAndInputProtection() throws {
-        let root=URL(fileURLWithPath:#filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        let binary=ProcessInfo.processInfo.environment["CCDCLI_BINARY"].map{URL(fileURLWithPath:$0)} ?? root.appendingPathComponent(".build/debug/ccdlab")
+        let sibling=Bundle(for:Self.self).bundleURL.deletingLastPathComponent().appendingPathComponent("ccdlab")
+        let binary=ProcessInfo.processInfo.environment["CCDCLI_BINARY"].map{URL(fileURLWithPath:$0)} ?? sibling
         let dir=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at:dir,withIntermediateDirectories:true);defer{try? FileManager.default.removeItem(at:dir)}
         func run(_ args:[String]) throws -> Int32 {

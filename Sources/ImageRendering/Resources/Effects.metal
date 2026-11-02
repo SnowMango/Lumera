@@ -55,12 +55,31 @@ kernel void highlights(texture2d<float,access::read> src[[texture(0)]],texture2d
 kernel void glowCombine(texture2d<float,access::read> src[[texture(0)]],texture2d<float,access::write> dst[[texture(1)]],texture2d<float,access::read> hi[[texture(2)]],texture2d<float,access::read> near[[texture(3)]],texture2d<float,access::read> far[[texture(4)]],constant float* p[[buffer(0)]],uint2 id[[thread_position_in_grid]]){
  if(outside(id,dst))return;float3 b=mix(near.read(id).rgb,far.read(id).rgb,p[1]);float3 c=p[2]>0?b:src.read(id).rgb+p[0]*(b-hi.read(id).rgb);dst.write(float4(c,1),id);
 }
-kernel void resizeLinear(texture2d<float,access::sample> src[[texture(0)]],texture2d<float,access::write> dst[[texture(1)]],constant float* p[[buffer(0)]],uint2 id[[thread_position_in_grid]]){
- if(outside(id,dst))return;constexpr sampler s(coord::normalized,address::clamp_to_edge,filter::linear);
- // Area supersampling prevents the worst aliasing when reducing photos.
- float2 dstSize=float2(dst.get_width(),dst.get_height());int steps=min(8,max(1,int(ceil(max(float(src.get_width())/dst.get_width(),float(src.get_height())/dst.get_height())))));
- float4 sum=0;for(int y=0;y<steps;y++)for(int x=0;x<steps;x++)sum+=src.sample(s,(float2(id)+(float2(x,y)+0.5)/steps)/dstSize);
- dst.write(float4((sum/float(steps*steps)).rgb,1),id);
+// Compute interpolation weights in full-frame pixel coordinates. Texture sampler
+// rounding depends on the size of its bound texture, which changes between tiles.
+float3 resizePixel(texture2d<float,access::read> source, float2 position, int2 origin) {
+    int2 base = int2(floor(position)) - origin;
+    int2 last = int2(source.get_width()-1, source.get_height()-1);
+    uint2 lo = uint2(clamp(base, int2(0), last)), hi = uint2(clamp(base+1, int2(0), last));
+    float2 f = fract(position);
+    float3 a = mix(source.read(lo).rgb, source.read(uint2(hi.x,lo.y)).rgb, f.x);
+    float3 b = mix(source.read(uint2(lo.x,hi.y)).rgb, source.read(hi).rgb, f.x);
+    return mix(a,b,f.y);
+}
+float3 resizeSample(texture2d<float,access::read> source, uint2 pixel, float2 sourceSize,
+                    float2 destinationSize, int2 sourceOrigin) {
+    int steps = min(8,max(1,int(ceil(max(sourceSize.x/destinationSize.x,sourceSize.y/destinationSize.y)))));
+    float3 sum = 0;
+    for (int y=0; y<steps; ++y) for (int x=0; x<steps; ++x) {
+        float2 position = ((float2(pixel)+(float2(x,y)+0.5)/steps)/destinationSize)*sourceSize - 0.5;
+        sum += resizePixel(source,position,sourceOrigin);
+    }
+    return sum/float(steps*steps);
+}
+kernel void resizeLinear(texture2d<float,access::read> src[[texture(0)]],texture2d<float,access::write> dst[[texture(1)]],uint2 id[[thread_position_in_grid]]) {
+    if(outside(id,dst)) return;
+    float3 value = resizeSample(src,id,float2(src.get_width(),src.get_height()),float2(dst.get_width(),dst.get_height()),int2(0));
+    dst.write(float4(value,1),id);
 }
 uint hashValue(uint v){v^=v>>16;v*=0x7feb352d;v^=v>>15;v*=0x846ca68b;return v^(v>>16);}
 float gaussianRandom(uint v){float a=(float(hashValue(v)>>8)+0.5)/16777216.0;float b=(float(hashValue(v^0x9e3779b9)>>8)+0.5)/16777216.0;return sqrt(-2*log(a))*cos(6.28318530718*b);}
@@ -110,34 +129,105 @@ kernel void toneResponse(texture2d<float,access::read> src[[texture(0)]],texture
 kernel void softenCombine(texture2d<float,access::read> src[[texture(0)]],texture2d<float,access::write> dst[[texture(1)]],texture2d<float,access::read> blurred[[texture(2)]],constant float* p[[buffer(0)]],uint2 id[[thread_position_in_grid]]) {
  if(outside(id,dst))return;dst.write(float4(mix(src.read(id).rgb,blurred.read(id).rgb,p[0]),1),id);
 }
-kernel void halationCombine(texture2d<float,access::read> src[[texture(0)]],texture2d<float,access::write> dst[[texture(1)]],texture2d<float,access::read> sourceLight[[texture(2)]],texture2d<float,access::read> scatteredLight[[texture(3)]],constant float* p[[buffer(0)]],uint2 id[[thread_position_in_grid]]) {
+float3 halationResidual(float3 scales, float light) {
+ float3 spread=float3(dot(scales,float3(.2,.3,.5)),dot(scales,float3(.3,.5,.2)),dot(scales,float3(.5,.4,.1)));
+ return max(0.0f,spread-light);
+}
+kernel void halationCombine(texture2d<float,access::read> src[[texture(0)]],texture2d<float,access::write> dst[[texture(1)]],texture2d<float,access::read> sourceLight[[texture(2)]],texture2d<float,access::read> near[[texture(3)]],texture2d<float,access::read> mid[[texture(4)]],texture2d<float,access::read> far[[texture(5)]],constant float* p[[buffer(0)]],uint2 id[[thread_position_in_grid]]) {
  if(outside(id,dst))return;
- float halo=max(0.0f,luminance(scatteredLight.read(id).rgb)-luminance(sourceLight.read(id).rgb));
+ float3 scales=float3(luminance(near.read(id).rgb),luminance(mid.read(id).rgb),luminance(far.read(id).rgb));
+ float3 halo=halationResidual(scales,luminance(sourceLight.read(id).rgb));
  dst.write(float4(src.read(id).rgb+halo*p[0]*float3(p[1],p[2],p[3]),1),id);
 }
-// Variance-normalized value noise, with continuous spatial correlation and no bitmap upload.
-float grainField(float2 xy,uint seed) {
- int2 base=int2(floor(xy));float2 f=fract(xy);f=f*f*(3-2*f);
- float4 w=float4((1-f.x)*(1-f.y),f.x*(1-f.y),(1-f.x)*f.y,f.x*f.y);
- uint x=uint(base.x),y=uint(base.y);
- float4 n=float4(gaussianRandom(hashValue(x)^hashValue(y+0x91e10da5u)^seed),
- gaussianRandom(hashValue(x+1)^hashValue(y+0x91e10da5u)^seed),
- gaussianRandom(hashValue(x)^hashValue(y+1+0x91e10da5u)^seed),
- gaussianRandom(hashValue(x+1)^hashValue(y+1+0x91e10da5u)^seed));
- return dot(n,w)/sqrt(max(dot(w,w),1e-6f));
+// Integral of the centered cubic B-spline from -infinity to x.
+float grainCDF(float x) {
+    float t=max(0.0f,2.0f-abs(x)), u=max(0.0f,t-1.0f);
+    float t2=t*t, u2=u*u, tail=(t2*t2-4*u2*u2)/24.0f;
+    return x>0 ? 1-tail : tail;
 }
-float filmField(float2 xy,uint seed,float roughness) {
- float a=grainField(xy,seed),b=grainField(xy*0.4f+float2(13.7f,29.1f),seed^0xa341316cu);
- return mix(a,b,roughness)/sqrt((1-roughness)*(1-roughness)+roughness*roughness);
+// A random affine permutation of F_257 followed by cubing (also a permutation).
+// A 16x16 block uses 256 distinct entries. Its exact sum is the negative of the
+// missing entry plus its independent block mean. The mean cancels the negative
+// covariance of sampling without replacement, preserving a white unit-variance lattice.
+struct GrainBlock { uint a,b; float mean; };
+GrainBlock grainBlock(uint key) {
+    uint permutation=hashValue(key);
+    float uniform=(float(hashValue(key^0x149b1aadu)>>8)+0.5f)/16777216.0f;
+    return {1u+(permutation&255u),(permutation>>8)%257u,
+            (uniform-0.5f)*(3.46410161514f*0.06237828616f)};
+}
+float grainEntry(GrainBlock block,uint index) {
+    uint u=(block.a*index+block.b)%257u;
+    return (float((u*u*u)%257u)-128.0f)*0.01345284717f;
+}
+float3 grainBlockValue(GrainBlock y,GrainBlock cb,GrainBlock cr,uint index,bool colored,bool complete) {
+    float3 detail=float3(grainEntry(y,index),0,0);
+    if (colored) detail.yz=float2(grainEntry(cb,index),grainEntry(cr,index));
+    float3 mean=float3(y.mean,cb.mean,cr.mean);
+    return complete ? 256*mean-detail : mean+detail;
+}
+float3 grainLayer(float2 pixel,float latticeWidth,float gain,uint seed,bool colored) {
+    if (gain==0) return 0;
+    float2 lo=pixel*latticeWidth;
+    int2 base=int2(floor(lo)), first=base-1;
+    float2 phase=fract(lo);
+    int2 last=base+int2(ceil(phase+latticeWidth))+1;
+    float3 sum=0;
+    for (int by=first.y>>4;by<=(last.y>>4);++by) {
+        for (int bx=first.x>>4;bx<=(last.x>>4);++bx) {
+            uint key=hashValue(uint(bx))^hashValue(uint(by)+0x91e10da5u)^seed;
+            GrainBlock y=grainBlock(key), cb=y, cr=y;
+            if (colored) { cb=grainBlock(key^0x68bc21ebu); cr=grainBlock(key^0x02e5be93u); }
+            int2 origin=int2(bx,by)*16;
+            float2 start=float2(origin-base)-phase;
+            if (all(start>=2) && all(start+17<=latticeWidth)) {
+                sum+=grainBlockValue(y,cb,cr,256u,colored,true);
+                continue;
+            }
+            for (int j=max(first.y,origin.y);j<=min(last.y,origin.y+15);++j) {
+                float dy=phase.y-float(j-base.y);
+                float wy=grainCDF(dy+latticeWidth)-grainCDF(dy);
+                for (int i=max(first.x,origin.x);i<=min(last.x,origin.x+15);++i) {
+                    float dx=phase.x-float(i-base.x);
+                    float w=wy*(grainCDF(dx+latticeWidth)-grainCDF(dx));
+                    uint index=uint((j-origin.y)*16+i-origin.x);
+                    sum+=w*grainBlockValue(y,cb,cr,index,colored,false);
+                }
+            }
+        }
+    }
+    return sum*(gain/(latticeWidth*latticeWidth));
+}
+float3 grainIntegral(float2 pixel, constant float* p, float factor) {
+    uint seed=as_type<uint>(p[6]);
+    return grainLayer(pixel,p[1]/factor,p[3],seed,p[5]>0)
+          +grainLayer(pixel,p[2]/factor,p[4],seed^0xa341316cu,p[5]>0);
+}
+float4 applyGrain(float3 c, float3 v, constant float* p) {
+    float cb=v.y*p[5],cr=v.z*p[5];
+    float amplitude=p[0]*responseValue(clamp(luminance(c),0.0f,1.0f),p+10);
+    c+=amplitude*float3(v.x+1.5748f*cr,v.x-0.187324f*cb-0.468124f*cr,v.x+1.8556f*cb);
+    return float4(clamp(c,0.0f,1.0f),1);
 }
 kernel void filmGrain(texture2d<float,access::read> src[[texture(0)]],texture2d<float,access::write> dst[[texture(1)]],constant float* p[[buffer(0)]],uint2 id[[thread_position_in_grid]]) {
- if(outside(id,dst))return;
- float3 c=src.read(id).rgb;float y=clamp(luminance(c),0.0f,1.0f);
- float2 xy=(float2(id)+0.5f)/max(p[1],0.5f);uint seed=as_type<uint>(p[4]);
- float n=filmField(xy,seed,p[2]),cb=filmField(xy,seed^0x68bc21ebu,p[2])*p[3],cr=filmField(xy,seed^0x02e5be93u,p[2])*p[3];
- float amplitude=p[0]*responseValue(y,p+5);
- c+=amplitude*float3(n+1.5748f*cr,n-0.187324f*cb-0.468124f*cr,n+1.8556f*cb);
- dst.write(float4(clamp(c,0.0f,1.0f),1),id);
+    if(outside(id,dst)) return;
+    float2 pixel=float2(id)+float2(p[7],p[8]);
+    dst.write(applyGrain(src.read(id).rgb,grainIntegral(pixel,p,1),p),id);
+}
+kernel void grainSubpixels(texture2d<float,access::write> dst[[texture(1)]],constant float* p[[buffer(0)]],uint2 id[[thread_position_in_grid]]) {
+    if(outside(id,dst)) return;
+    float factor=p[9];
+    float2 pixel=float2(id)+float2(p[7],p[8])*factor;
+    dst.write(float4(grainIntegral(pixel,p,factor),1),id);
+}
+kernel void grainReduce(texture2d<float,access::read> src[[texture(0)]],texture2d<float,access::write> dst[[texture(1)]],
+                        texture2d<float,access::read> field[[texture(2)]],constant float* p[[buffer(0)]],uint2 id[[thread_position_in_grid]]) {
+    if(outside(id,dst)) return;
+    uint factor=uint(p[9]);
+    float3 sum=0;
+    for (uint y=0;y<factor;++y) for (uint x=0;x<factor;++x)
+        sum+=field.read(id*factor+uint2(x,y)).rgb;
+    dst.write(applyGrain(src.read(id).rgb,sum/float(factor*factor),p),id);
 }
 
 // Decode -> exposure -> chromatic adaptation -> creative matrix -> encode.
@@ -151,35 +241,96 @@ kernel void colorResponse(texture2d<float,access::read> src[[texture(0)]],textur
 
 // Exact area-weighted reduction. Threshold is applied BEFORE averaging so subpixel
 // bright sources contribute even when their average falls below the threshold.
+float3 areaReduced(texture2d<float,access::read> src, uint2 cell, float2 sourceSize,
+                   float2 gridSize, int2 origin, constant float* params) {
+    float2 ratio = sourceSize/gridSize;
+    float2 lower = float2(cell)*ratio, upper = min((float2(cell)+1)*ratio,sourceSize);
+    uint2 end = uint2(ceil(upper));
+    int2 last = int2(src.get_width()-1,src.get_height()-1);
+    float3 sum = 0; float weight = 0;
+    for(uint y=uint(lower.y); y<end.y; ++y) for(uint x=uint(lower.x); x<end.x; ++x) {
+        float w = max(0.0f,min(upper.x,float(x+1))-max(lower.x,float(x)))
+                * max(0.0f,min(upper.y,float(y+1))-max(lower.y,float(y)));
+        float3 color = src.read(uint2(clamp(int2(x,y)-origin,int2(0),last))).rgb;
+        if(params[0]>0) color *= smoothstep(params[1]-params[2],params[1]+params[2],luminance(color));
+        sum += w*color; weight += w;
+    }
+    return sum/max(weight,1e-12f);
+}
 kernel void opticalReduce(texture2d<float,access::read> src[[texture(0)]],texture2d<float,access::write> dst[[texture(1)]],constant float* p[[buffer(0)]],uint2 id[[thread_position_in_grid]]) {
- if(outside(id,dst))return;
- float2 ratio=float2(src.get_width(),src.get_height())/float2(dst.get_width(),dst.get_height());
- float2 lower=float2(id)*ratio,upper=min((float2(id)+1)*ratio,float2(src.get_width(),src.get_height()));
- uint2 begin=uint2(floor(lower)),end=min(uint2(ceil(upper)),uint2(src.get_width(),src.get_height()));
- float3 sum=0;float weight=0;
- for(uint y=begin.y;y<end.y;y++)for(uint x=begin.x;x<end.x;x++) {
-   float w=max(0.0f,min(upper.x,float(x+1))-max(lower.x,float(x)))*max(0.0f,min(upper.y,float(y+1))-max(lower.y,float(y)));
-   float3 c=src.read(uint2(x,y)).rgb;
-   if(p[0]>0) c*=smoothstep(p[1]-p[2],p[1]+p[2],luminance(c));
-   sum+=w*c;weight+=w;
- }
- dst.write(float4(sum/max(weight,1e-12f),1),id);
+    if(outside(id,dst)) return;
+    dst.write(float4(areaReduced(src,id,float2(src.get_width(),src.get_height()),float2(dst.get_width(),dst.get_height()),int2(0),p),1),id);
 }
-kernel void softenCombineReduced(texture2d<float,access::read> src[[texture(0)]],texture2d<float,access::write> dst[[texture(1)]],texture2d<float,access::sample> blurred[[texture(2)]],constant float* p[[buffer(0)]],uint2 id[[thread_position_in_grid]]) {
- if(outside(id,dst))return;constexpr sampler s(coord::normalized,address::clamp_to_edge,filter::linear);
- float2 uv=(float2(id)+0.5)/float2(dst.get_width(),dst.get_height());
- dst.write(float4(mix(src.read(id).rgb,blurred.sample(s,uv).rgb,p[0]),1),id);
+kernel void softenCombineReduced(texture2d<float,access::read> src[[texture(0)]],texture2d<float,access::write> dst[[texture(1)]],texture2d<float,access::read> blurred[[texture(2)]],constant float* p[[buffer(0)]],uint2 id[[thread_position_in_grid]]) {
+    if(outside(id,dst)) return;
+    float2 scale = float2(blurred.get_width(),blurred.get_height())/float2(dst.get_width(),dst.get_height());
+    float2 position = (float2(id)+0.5)*scale-0.5;
+    int2 origin = int2(0);
+    float3 color = src.read(id).rgb;
+    dst.write(float4(mix(color,resizePixel(blurred,position,origin),p[0]),1),id);
 }
-kernel void glowCombineReduced(texture2d<float,access::read> src[[texture(0)]],texture2d<float,access::write> dst[[texture(1)]],texture2d<float,access::sample> near[[texture(2)]],texture2d<float,access::sample> far[[texture(3)]],constant float* p[[buffer(0)]],uint2 id[[thread_position_in_grid]]) {
- if(outside(id,dst))return;constexpr sampler s(coord::normalized,address::clamp_to_edge,filter::linear);
- float2 uv=(float2(id)+0.5)/float2(dst.get_width(),dst.get_height());float3 c=src.read(id).rgb;
- float3 hi=c*smoothstep(p[2]-p[3],p[2]+p[3],luminance(c));
- dst.write(float4(c+p[0]*(mix(near.sample(s,uv).rgb,far.sample(s,uv).rgb,p[1])-hi),1),id);
+kernel void glowCombineReduced(texture2d<float,access::read> src[[texture(0)]],texture2d<float,access::write> dst[[texture(1)]],texture2d<float,access::read> near[[texture(2)]],texture2d<float,access::read> far[[texture(3)]],constant float* p[[buffer(0)]],uint2 id[[thread_position_in_grid]]) {
+    if(outside(id,dst)) return;
+    float2 scale = float2(near.get_width(),near.get_height())/float2(dst.get_width(),dst.get_height());
+    float2 position = (float2(id)+0.5)*scale-0.5;
+    int2 origin = int2(0);
+    float3 color = src.read(id).rgb;
+    float3 hi = color*smoothstep(p[2]-p[3],p[2]+p[3],luminance(color));
+    float3 spread = mix(resizePixel(near,position,origin),resizePixel(far,position,origin),p[1]);
+    dst.write(float4(color+p[0]*(spread-hi),1),id);
 }
-kernel void halationCombineReduced(texture2d<float,access::read> src[[texture(0)]],texture2d<float,access::write> dst[[texture(1)]],texture2d<float,access::sample> scattered[[texture(2)]],constant float* p[[buffer(0)]],uint2 id[[thread_position_in_grid]]) {
- if(outside(id,dst))return;constexpr sampler s(coord::normalized,address::clamp_to_edge,filter::linear);
- float2 uv=(float2(id)+0.5)/float2(dst.get_width(),dst.get_height());float3 c=src.read(id).rgb;
- float hi=luminance(c)*smoothstep(p[4]-p[5],p[4]+p[5],luminance(c));
- float halo=max(0.0f,luminance(scattered.sample(s,uv).rgb)-hi);
- dst.write(float4(c+halo*p[0]*float3(p[1],p[2],p[3]),1),id);
+kernel void halationCombineReduced(texture2d<float,access::read> src[[texture(0)]],texture2d<float,access::write> dst[[texture(1)]],texture2d<float,access::read> near[[texture(2)]],texture2d<float,access::read> mid[[texture(3)]],texture2d<float,access::read> far[[texture(4)]],constant float* p[[buffer(0)]],uint2 id[[thread_position_in_grid]]) {
+    if(outside(id,dst)) return;
+    float2 scale = float2(near.get_width(),near.get_height())/float2(dst.get_width(),dst.get_height());
+    float2 position = (float2(id)+0.5)*scale-0.5;
+    int2 origin = int2(0);
+    float3 color = src.read(id).rgb;
+    float hi = luminance(color)*smoothstep(p[4]-p[5],p[4]+p[5],luminance(color));
+    float3 scales = float3(luminance(resizePixel(near,position,origin)),luminance(resizePixel(mid,position,origin)),luminance(resizePixel(far,position,origin)));
+    dst.write(float4(color+halationResidual(scales,hi)*p[0]*float3(p[1],p[2],p[3]),1),id);
+}
+
+// Regional kernels use complete-frame coordinates and local texture storage.
+kernel void vignetteRegion(texture2d<float,access::read> src[[texture(0)]],texture2d<float,access::write> dst[[texture(1)]],constant float* p[[buffer(0)]],constant float* g[[buffer(2)]],uint2 id[[thread_position_in_grid]]){
+ if(outside(id,dst))return;float2 size=float2(g[2],g[3]);float r=min(1.0,length(float2(id)+float2(g[0],g[1])+0.5-size*float2(p[3],p[4]))/(length(size)*0.5));float curve=pow(smoothstep(p[1],1.0,r),p[2]);dst.write(float4(src.read(id).rgb*exp2(-p[0]*curve),1),id);
+}
+kernel void randomFieldRegion(texture2d<float,access::read> src[[texture(0)]],texture2d<float,access::write> dst[[texture(1)]],constant float* p[[buffer(0)]],constant float* g[[buffer(2)]],uint2 id[[thread_position_in_grid]]){
+ if(outside(id,dst))return;uint v=hashValue(id.x+uint(g[0])+(id.y+uint(g[1]))*uint(g[2]))^as_type<uint>(p[0]);dst.write(float4(gaussianRandom(v),gaussianRandom(v^0x68bc21eb),gaussianRandom(v^0x02e5be93),1),id);
+}
+kernel void resizeLinearRegion(texture2d<float,access::read> src[[texture(0)]],texture2d<float,access::write> dst[[texture(1)]],constant float* g[[buffer(2)]],uint2 id[[thread_position_in_grid]]) {
+    if(outside(id,dst)) return;
+    float3 value = resizeSample(src,id+uint2(g[0],g[1]),float2(g[4],g[5]),float2(g[2],g[3]),int2(g[6],g[7]));
+    dst.write(float4(value,1),id);
+}
+kernel void softenCombineReducedRegion(texture2d<float,access::read> src[[texture(0)]],texture2d<float,access::write> dst[[texture(1)]],texture2d<float,access::read> blurred[[texture(2)]],constant float* p[[buffer(0)]],constant float* g[[buffer(2)]],uint2 id[[thread_position_in_grid]]) {
+    if(outside(id,dst)) return;
+    float2 scale = float2(g[4],g[5]);
+    float2 position = (float2(id+uint2(g[0],g[1]))+0.5)*scale-0.5;
+    int2 origin = int2(g[6],g[7]);
+    float3 color = src.read(id).rgb;
+    dst.write(float4(mix(color,resizePixel(blurred,position,origin),p[0]),1),id);
+}
+kernel void glowCombineReducedRegion(texture2d<float,access::read> src[[texture(0)]],texture2d<float,access::write> dst[[texture(1)]],texture2d<float,access::read> near[[texture(2)]],texture2d<float,access::read> far[[texture(3)]],constant float* p[[buffer(0)]],constant float* g[[buffer(2)]],uint2 id[[thread_position_in_grid]]) {
+    if(outside(id,dst)) return;
+    float2 scale = float2(g[4],g[5]);
+    float2 position = (float2(id+uint2(g[0],g[1]))+0.5)*scale-0.5;
+    int2 origin = int2(g[6],g[7]);
+    float3 color = src.read(id).rgb;
+    float3 hi = color*smoothstep(p[2]-p[3],p[2]+p[3],luminance(color));
+    float3 spread = mix(resizePixel(near,position,origin),resizePixel(far,position,origin),p[1]);
+    dst.write(float4(color+p[0]*(spread-hi),1),id);
+}
+kernel void halationCombineReducedRegion(texture2d<float,access::read> src[[texture(0)]],texture2d<float,access::write> dst[[texture(1)]],texture2d<float,access::read> near[[texture(2)]],texture2d<float,access::read> mid[[texture(3)]],texture2d<float,access::read> far[[texture(4)]],constant float* p[[buffer(0)]],constant float* g[[buffer(2)]],uint2 id[[thread_position_in_grid]]) {
+    if(outside(id,dst)) return;
+    float2 scale = float2(g[4],g[5]);
+    float2 position = (float2(id+uint2(g[0],g[1]))+0.5)*scale-0.5;
+    int2 origin = int2(g[6],g[7]);
+    float3 color = src.read(id).rgb;
+    float hi = luminance(color)*smoothstep(p[4]-p[5],p[4]+p[5],luminance(color));
+    float3 scales = float3(luminance(resizePixel(near,position,origin)),luminance(resizePixel(mid,position,origin)),luminance(resizePixel(far,position,origin)));
+    dst.write(float4(color+halationResidual(scales,hi)*p[0]*float3(p[1],p[2],p[3]),1),id);
+}
+kernel void opticalReduceRegion(texture2d<float,access::read> src[[texture(0)]],texture2d<float,access::write> dst[[texture(1)]],constant float* p[[buffer(0)]],constant float* g[[buffer(2)]],uint2 id[[thread_position_in_grid]]) {
+    if(outside(id,dst)) return;
+    dst.write(float4(areaReduced(src,id+uint2(g[6],g[7]),float2(g[2],g[3]),float2(g[8],g[9]),int2(g[0],g[1]),p),1),id);
 }

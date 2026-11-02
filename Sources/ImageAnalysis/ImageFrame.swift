@@ -45,7 +45,8 @@ public struct RenderTiming:Codable,Sendable {
     public var totalSeconds:Double {waitAndValidationSeconds+styleSeconds+readbackSeconds+metadataSeconds}
 }
 public struct RenderManifest: Codable, Sendable {
-    public var engineVersion=Profile.engineVersion
+    public var engineVersion=LumeraVersion.rendererRevision
+    public var renderIdentity: String? = nil
     public var profileDigest: String, effectiveDigest:String, inputDigest: String, lutDigest: String, device: String, quality: String
     public var correctionDigest:String = "identity"
     public var width: Int, height: Int
@@ -55,7 +56,7 @@ public struct RenderManifest: Codable, Sendable {
     public var frameIndex:UInt32
     public var input:InputDescriptor
     public var previewGlow:Bool
-    public var precision="RGBA float32; Gaussian truncated at 3 sigma; reflected boundary for noise, clamped for optics"
+    public var precision="RGBA float32; Gaussian support 3 sigma; integrated halation support 4 sigma; reflected boundary for noise, clamped for optics"
     public var assumptions: [String:String]
     public var peakWorkingSetEstimateBytes: Int
 }

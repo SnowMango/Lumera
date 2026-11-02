@@ -42,32 +42,12 @@ extension LumeraRenderer {
                        style: PreparedCameraStyle, options: RenderOptions = .init(),
                        correction: PreparedDeviceCorrection? = nil) async throws -> CIImage {
         try Task.checkCancellation()
-        let sourceProperties = LumeraImageMetadata.merge(image.properties, supplement: metadata)
-        let oriented = image.oriented(orientation ?? LumeraImageMetadata.orientation(image.properties))
-        let extent = oriented.extent
-        guard !extent.isInfinite, !extent.isNull, !extent.isEmpty,
-              extent.minX.isFinite, extent.minY.isFinite,
-              extent.maxX.isFinite, extent.maxY.isFinite else {
-            throw LabError.invalid("图像需要有限且非空的像素范围")
-        }
-        let integral = extent.integral
-        guard integral.width < Double(Int.max), integral.height < Double(Int.max) else {
-            throw LabError.invalid("图像尺寸超出整数范围")
-        }
-        let width = Int(integral.width), height = Int(integral.height)
+        let (normalized, bounds, sourceProperties) = try normalizedSource(image, metadata: metadata, orientation: orientation)
+        let width = Int(bounds.width), height = Int(bounds.height)
         let request = options.makeRequest(input: InputDescriptor(width: width, height: height))
         try request.validate()
         try TextureDimensions.validate(width: width, height: height, device: device)
-        var normalized = try sdrImage(oriented)
-        normalized = normalized.transformed(by: CGAffineTransform(translationX: -integral.minX, y: -integral.minY))
-        let bounds = CGRect(x: 0, y: 0, width: width, height: height)
-        let black = CIImage(color: CIColor(red: 0, green: 0, blue: 0, alpha: 1)).cropped(to: bounds)
-        normalized = normalized.composited(over: black).cropped(to: bounds)
-        // Explicit SDR gamut/range boundary after source color management in linear sRGB.
-        normalized = normalized.applyingFilter("CIColorClamp", parameters: [
-            "inputMinComponents": CIVector(x: 0, y: 0, z: 0, w: 0),
-            "inputMaxComponents": CIVector(x: 1, y: 1, z: 1, w: 1)])
-        let inputDescriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba16Float,
+        let inputDescriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: imageInputFormat,
             width: width, height: height, mipmapped: false)
         inputDescriptor.usage = [.shaderRead, .shaderWrite]
         inputDescriptor.storageMode = .private
@@ -144,6 +124,34 @@ extension LumeraRenderer {
         return output
     }
 
+    func normalizedSource(_ image: CIImage, metadata: [String: Any]?, orientation: CGImagePropertyOrientation?) throws
+        -> (image: CIImage, bounds: CGRect, properties: [String: Any]) {
+        let sourceProperties = LumeraImageMetadata.merge(image.properties, supplement: metadata)
+        let oriented = image.oriented(orientation ?? LumeraImageMetadata.orientation(image.properties))
+        let extent = oriented.extent
+        guard !extent.isInfinite, !extent.isNull, !extent.isEmpty,
+              extent.minX.isFinite, extent.minY.isFinite,
+              extent.maxX.isFinite, extent.maxY.isFinite else {
+            throw LabError.invalid("图像需要有限且非空的像素范围")
+        }
+        let integral = extent.integral
+        guard integral.width < Double(Int.max), integral.height < Double(Int.max) else {
+            throw LabError.invalid("图像尺寸超出整数范围")
+        }
+        let width = Int(integral.width), height = Int(integral.height)
+        var normalized = try sdrImage(oriented)
+        normalized = normalized.transformed(by: CGAffineTransform(translationX: -integral.minX, y: -integral.minY))
+        let bounds = CGRect(x: 0, y: 0, width: width, height: height)
+        let black = CIImage(color: CIColor(red: 0, green: 0, blue: 0, alpha: 1)).cropped(to: bounds)
+        normalized = normalized.composited(over: black).cropped(to: bounds)
+        // Explicit SDR gamut/range boundary after source color management in linear sRGB.
+        normalized = normalized.applyingFilter("CIColorClamp", parameters: [
+            "inputMinComponents": CIVector(x: 0, y: 0, z: 0, w: 0),
+            "inputMaxComponents": CIVector(x: 1, y: 1, z: 1, w: 1)])
+        _ = try ImageDimensions.pixelCount(width: width, height: height)
+        return (normalized, bounds, sourceProperties)
+    }
+
     private func sdrImage(_ image: CIImage) throws -> CIImage {
         let taggedHDR = image.colorSpace.map { CGColorSpaceUsesITUR_2100TF($0) } ?? false
         if #available(iOS 18, macOS 15, *) {
@@ -160,7 +168,7 @@ extension LumeraRenderer {
         return image
     }
 
-    private func complete(_ command: MTLCommandBuffer) async throws {
+    func complete(_ command: MTLCommandBuffer) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             command.addCompletedHandler { completed in
                 if let error = completed.error { continuation.resume(throwing: error) }
