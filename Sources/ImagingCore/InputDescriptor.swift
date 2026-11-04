@@ -15,7 +15,7 @@ public struct InputDescriptor: Codable, Equatable, Sendable {
     public func validate() throws {
         _=try ImageDimensions.pixelCount(width:width,height:height)
         guard primaries == .sRGB,transfer == .sRGB,reference == .display,alphaMode == .opaque,orientationNormalized else {
-            throw LabError.unsupported("运行入口需要已转为标准方向、不透明、编码 sRGB 的 SDR 成片纹理")
+            throw LabError.unsupported("运行入口需要已转为标准方向、不透明、编码 sRGB 的成片纹理；动态范围由渲染请求声明")
         }
     }
 }

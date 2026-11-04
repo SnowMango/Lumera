@@ -3,6 +3,8 @@ import Foundation
 /// Pixel-processing settings shared by texture, Core Image, pixel-buffer and RAW entry points.
 /// These settings do not describe the source color space and never overwrite capture EXIF values.
 public struct RenderOptions: Codable, Equatable, Sendable {
+    /// Explicit opt-in to extended-range input/output. Existing callers remain SDR.
+    public var dynamicRange: RenderDynamicRange = .sdr
     /// Optional output long-edge limit. Nil preserves dimensions; a limit must be positive.
     public var maximumLongEdge: Int?
     /// Base seed used by the style's temporal noise/grain policy.
@@ -35,6 +37,22 @@ public struct RenderOptions: Codable, Equatable, Sendable {
         request.glowScale = glowScale
         request.halationScale = halationScale
         request.softeningScale = softeningScale
+        request.dynamicRange = dynamicRange
         return request
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case dynamicRange, maximumLongEdge, seed, frameIndex, previewGlow, glowScale, halationScale, softeningScale
+    }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        dynamicRange = try c.decodeIfPresent(RenderDynamicRange.self, forKey: .dynamicRange) ?? .sdr
+        maximumLongEdge = try c.decodeIfPresent(Int.self, forKey: .maximumLongEdge)
+        seed = try c.decode(UInt32.self, forKey: .seed)
+        frameIndex = try c.decode(UInt32.self, forKey: .frameIndex)
+        previewGlow = try c.decode(Bool.self, forKey: .previewGlow)
+        glowScale = try c.decode(EffectResolution.self, forKey: .glowScale)
+        halationScale = try c.decode(EffectResolution.self, forKey: .halationScale)
+        softeningScale = try c.decode(EffectResolution.self, forKey: .softeningScale)
     }
 }

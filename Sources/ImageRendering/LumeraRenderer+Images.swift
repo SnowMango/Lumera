@@ -13,9 +13,11 @@ extension LumeraRenderer {
     /// normalizes the extent origin and applies orientation once. Untagged CIImage pixels follow
     /// Core Image working-space semantics (extended linear sRGB here), not an encoded-sRGB guess.
     /// Tag encoded source pixels with their actual color space when constructing the CIImage.
-    /// The result is opaque sRGB SDR with floating-point RGBA storage (normally half-float), even for a neutral style.
-    /// Known HDR headroom is tone-mapped on iOS 18/macOS 15 or newer. HDR that cannot be
-    /// reliably mapped on the running OS throws; this API does not preserve HDR output.
+    /// By default the result is opaque sRGB SDR (normally half-float); known HDR headroom
+    /// is tone-mapped on iOS 18/macOS 15 or newer, otherwise unsupported HDR throws.
+    /// With `options.dynamicRange = .edr`, preserve extended values and return Float32
+    /// encoded extended sRGB without SDR tone mapping. Output content headroom is unknown
+    /// after styling; display/encoding and any headroom measurement belong to the caller.
     ///
     /// - Parameters:
     ///   - image: An image with a finite, nonempty extent. Keep externally backed pixels alive
@@ -42,19 +44,20 @@ extension LumeraRenderer {
                        style: PreparedCameraStyle, options: RenderOptions = .init(),
                        correction: PreparedDeviceCorrection? = nil) async throws -> CIImage {
         try Task.checkCancellation()
-        let (normalized, bounds, sourceProperties) = try normalizedSource(image, metadata: metadata, orientation: orientation)
+        let (normalized, bounds, sourceProperties) = try normalizedSource(image, metadata: metadata, orientation: orientation, dynamicRange: options.dynamicRange)
+        let outputSpace = Self.colorSpace(for: options.dynamicRange)
         let width = Int(bounds.width), height = Int(bounds.height)
         let request = options.makeRequest(input: InputDescriptor(width: width, height: height))
         try request.validate()
         try TextureDimensions.validate(width: width, height: height, device: device)
-        let inputDescriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: imageInputFormat,
+        let inputDescriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: inputFormat(for: options.dynamicRange),
             width: width, height: height, mipmapped: false)
         inputDescriptor.usage = [.shaderRead, .shaderWrite]
         inputDescriptor.storageMode = .private
         guard let input = device.makeTexture(descriptor: inputDescriptor), let command = queue.makeCommandBuffer() else {
             throw LabError.io("无法分配图像输入纹理或 GPU 任务")
         }
-        context.render(normalized, to: input, commandBuffer: command, bounds: bounds, colorSpace: Self.sRGB)
+        context.render(normalized, to: input, commandBuffer: command, bounds: bounds, colorSpace: outputSpace)
         let rendered = try encoder.encode(input, style: style, correction: correction, request: request, commandBuffer: command)
         let ownedDescriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: rendered.pixelFormat,
             width: rendered.width, height: rendered.height, mipmapped: false)
@@ -69,14 +72,17 @@ extension LumeraRenderer {
                   to: owned, destinationSlice: 0, destinationLevel: 0, destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
         blit.endEncoding()
         try await complete(command)
-        guard let result = CIImage(mtlTexture: owned, options: [.colorSpace: Self.sRGB]) else {
+        var imageOptions: [CIImageOption: Any] = [.colorSpace: outputSpace]
+        if #available(iOS 18, macOS 15, *), options.dynamicRange == .edr { imageOptions[.contentHeadroom] = 0 }
+        guard let result = CIImage(mtlTexture: owned, options: imageOptions) else {
             throw LabError.io("无法创建 Core Image 输出")
         }
         return result.settingProperties(LumeraImageMetadata.output(sourceProperties,
-            width: owned.width, height: owned.height, depth: owned.pixelFormat == .rgba32Float ? 32 : 16))
+            width: owned.width, height: owned.height, depth: owned.pixelFormat == .rgba32Float ? 32 : 16, dynamicRange: options.dynamicRange))
     }
 
-    /// Renders a pixel buffer to an independently owned, completed BGRA8 sRGB SDR pixel buffer.
+    /// Renders a pixel buffer to independently owned BGRA8 sRGB SDR, or RGBA Float32
+    /// extended sRGB when `options.dynamicRange = .edr`. This is not an HDR video encoder.
     ///
     /// Core Image decodes supported RGB/YCbCr buffers using their color attachments. Untagged
     /// RGB assumes sRGB; YCbCr requires a resolvable attached color space. Clean apertures other
@@ -86,7 +92,7 @@ extension LumeraRenderer {
     /// Both attachment modes are used to interpret source geometry and orientation, but only
     /// propagating capture attachments are eligible for output. Known ImageIO capture dictionaries survive;
     /// stale YCbCr, ICC/gamma, HDR, geometry, camera-calibration and unknown attachments are not
-    /// copied. New RGB color attachments match the BGRA8 output. Metadata and orientation overrides
+    /// copied. New RGB color attachments match the output encoding and range. Metadata and orientation overrides
     /// follow the CIImage overload. CVPixelBuffer does not carry CMSampleBuffer timing: keep timing
     /// separately when rebuilding a sample buffer. Keep the input unchanged until completion.
     ///
@@ -116,15 +122,18 @@ extension LumeraRenderer {
         let width = Int(rendered.extent.width), height = Int(rendered.extent.height)
         var output: CVPixelBuffer?
         let attributes: [CFString: Any] = [kCVPixelBufferIOSurfacePropertiesKey: [:], kCVPixelBufferMetalCompatibilityKey: true]
-        guard CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32BGRA, attributes as CFDictionary, &output) == kCVReturnSuccess,
+        let extended = options.dynamicRange == .edr
+        let format = extended ? kCVPixelFormatType_128RGBAFloat : kCVPixelFormatType_32BGRA
+        let outputSpace = Self.colorSpace(for: options.dynamicRange)
+        guard CVPixelBufferCreate(nil, width, height, format, attributes as CFDictionary, &output) == kCVReturnSuccess,
               let output else { throw LabError.io("无法分配输出像素缓冲区") }
-        context.render(rendered, to: output, bounds: rendered.extent, colorSpace: Self.sRGB)
-        LumeraImageMetadata.attach(LumeraImageMetadata.output(rendered.properties, width: width, height: height, depth: 8), to: output)
+        context.render(rendered, to: output, bounds: rendered.extent, colorSpace: outputSpace)
+        LumeraImageMetadata.attach(LumeraImageMetadata.output(rendered.properties, width: width, height: height, depth: extended ? 32 : 8, dynamicRange: options.dynamicRange), to: output, dynamicRange: options.dynamicRange)
         try Task.checkCancellation()
         return output
     }
 
-    func normalizedSource(_ image: CIImage, metadata: [String: Any]?, orientation: CGImagePropertyOrientation?) throws
+    func normalizedSource(_ image: CIImage, metadata: [String: Any]?, orientation: CGImagePropertyOrientation?, dynamicRange: RenderDynamicRange = .sdr) throws
         -> (image: CIImage, bounds: CGRect, properties: [String: Any]) {
         let sourceProperties = LumeraImageMetadata.merge(image.properties, supplement: metadata)
         let oriented = image.oriented(orientation ?? LumeraImageMetadata.orientation(image.properties))
@@ -139,15 +148,17 @@ extension LumeraRenderer {
             throw LabError.invalid("图像尺寸超出整数范围")
         }
         let width = Int(integral.width), height = Int(integral.height)
-        var normalized = try sdrImage(oriented)
+        var normalized = dynamicRange == .edr ? oriented : try sdrImage(oriented)
         normalized = normalized.transformed(by: CGAffineTransform(translationX: -integral.minX, y: -integral.minY))
         let bounds = CGRect(x: 0, y: 0, width: width, height: height)
         let black = CIImage(color: CIColor(red: 0, green: 0, blue: 0, alpha: 1)).cropped(to: bounds)
         normalized = normalized.composited(over: black).cropped(to: bounds)
         // Explicit SDR gamut/range boundary after source color management in linear sRGB.
-        normalized = normalized.applyingFilter("CIColorClamp", parameters: [
-            "inputMinComponents": CIVector(x: 0, y: 0, z: 0, w: 0),
-            "inputMaxComponents": CIVector(x: 1, y: 1, z: 1, w: 1)])
+        if dynamicRange == .sdr {
+            normalized = normalized.applyingFilter("CIColorClamp", parameters: [
+                "inputMinComponents": CIVector(x: 0, y: 0, z: 0, w: 0),
+                "inputMaxComponents": CIVector(x: 1, y: 1, z: 1, w: 1)])
+        }
         _ = try ImageDimensions.pixelCount(width: width, height: height)
         return (normalized, bounds, sourceProperties)
     }

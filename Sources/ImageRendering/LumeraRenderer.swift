@@ -6,7 +6,7 @@ import ImagingCore
 /// A shared Metal renderer with native texture, CIImage, CVPixelBuffer and RAW entry points.
 ///
 /// Prepare styles once and reuse this renderer. Native image overloads return completed,
-/// independently owned, opaque sRGB SDR images. The texture overload only encodes GPU work.
+/// independently owned, opaque images (SDR by default; extended sRGB with `.edr`). The texture overload only encodes GPU work.
 /// Inputs and prepared resources must not be mutated while an operation uses them.
 public final class LumeraRenderer: @unchecked Sendable {
     let imageInputFormat: MTLPixelFormat
@@ -15,6 +15,13 @@ public final class LumeraRenderer: @unchecked Sendable {
     let context: CIContext
     let encoder: TextureEffectEncoder
     static let sRGB = CGColorSpace(name: CGColorSpace.sRGB)!
+    static let extendedSRGB = CGColorSpace(name: CGColorSpace.extendedSRGB)!
+    static func colorSpace(for range: RenderDynamicRange) -> CGColorSpace {
+        range == .edr ? extendedSRGB : sRGB
+    }
+    func inputFormat(for range: RenderDynamicRange) -> MTLPixelFormat {
+        range == .edr ? .rgba32Float : imageInputFormat
+    }
 
     /// Creates a renderer on the supplied device, or the system default device.
     /// Throws if Metal, a command queue or the rendering kernels cannot be created.
@@ -53,9 +60,10 @@ public final class LumeraRenderer: @unchecked Sendable {
 
     /// Encodes a fixed style into the caller's command buffer without committing or waiting.
     ///
-    /// Input pixels must already be orientation-normalized, opaque, display-referred SDR,
+    /// Input pixels must already be orientation-normalized, opaque and display-referred,
     /// with sRGB primaries and sRGB encoded values in a supported non-sRGB Metal format.
-    /// `inputDescriptor` declares these facts; it does not perform color conversion.
+    /// With `.edr`, supply extended encoded sRGB in a floating-point texture; SDR white retains
+    /// the same reference level. `inputDescriptor` declares the color encoding; it does not perform color conversion.
     /// No metadata is read or returned by this overload.
     ///
     /// - Important: Consume or copy the result in the same command buffer before committing.

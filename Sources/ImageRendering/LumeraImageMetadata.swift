@@ -2,6 +2,7 @@ import Foundation
 import CoreImage
 import CoreVideo
 import ImageIO
+import ImagingCore
 
 /// Internal, deliberately conservative policy: capture facts survive; derived/opaque data do not.
 enum LumeraImageMetadata {
@@ -21,12 +22,12 @@ enum LumeraImageMetadata {
         return CGImagePropertyOrientation(rawValue: value) ?? .up
     }
 
-    static func output(_ source: [String: Any], width: Int, height: Int, depth: Int) -> [String: Any] {
+    static func output(_ source: [String: Any], width: Int, height: Int, depth: Int, dynamicRange: RenderDynamicRange = .sdr) -> [String: Any] {
         var result: [String: Any] = [
             kCGImagePropertyPixelWidth as String: width, kCGImagePropertyPixelHeight as String: height,
             kCGImagePropertyOrientation as String: 1, kCGImagePropertyDepth as String: depth,
             kCGImagePropertyColorModel as String: kCGImagePropertyColorModelRGB,
-            kCGImagePropertyProfileName as String: "sRGB IEC61966-2.1",
+            kCGImagePropertyProfileName as String: dynamicRange == .edr ? "Extended sRGB" : "sRGB IEC61966-2.1",
             kCGImagePropertyHasAlpha as String: true]
         func selected(_ dictionary: CFString, _ keys: [CFString]) -> [String: Any] {
             let values = source[dictionary as String] as? [String: Any] ?? [:]
@@ -49,7 +50,7 @@ enum LumeraImageMetadata {
             kCGImagePropertyExifUserComment, kCGImagePropertyExifCameraOwnerName])
         exif[kCGImagePropertyExifPixelXDimension as String] = width
         exif[kCGImagePropertyExifPixelYDimension as String] = height
-        exif[kCGImagePropertyExifColorSpace as String] = 1
+        exif[kCGImagePropertyExifColorSpace as String] = dynamicRange == .edr ? 65535 : 1
         result[kCGImagePropertyExifDictionary as String] = exif
         var tiff = selected(kCGImagePropertyTIFFDictionary, [
             kCGImagePropertyTIFFMake, kCGImagePropertyTIFFModel, kCGImagePropertyTIFFDateTime,
@@ -62,11 +63,11 @@ enum LumeraImageMetadata {
         return result
     }
 
-    static func attach(_ properties: [String: Any], to buffer: CVPixelBuffer) {
+    static func attach(_ properties: [String: Any], to buffer: CVPixelBuffer, dynamicRange: RenderDynamicRange = .sdr) {
         for (key, value) in properties {
             CVBufferSetAttachment(buffer, key as CFString, value as CFTypeRef, .shouldPropagate)
         }
-        CVBufferSetAttachment(buffer, kCVImageBufferCGColorSpaceKey, LumeraRenderer.sRGB, .shouldPropagate)
+        CVBufferSetAttachment(buffer, kCVImageBufferCGColorSpaceKey, LumeraRenderer.colorSpace(for: dynamicRange), .shouldPropagate)
         CVBufferSetAttachment(buffer, kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_709_2, .shouldPropagate)
         CVBufferSetAttachment(buffer, kCVImageBufferTransferFunctionKey, kCVImageBufferTransferFunction_sRGB, .shouldPropagate)
     }

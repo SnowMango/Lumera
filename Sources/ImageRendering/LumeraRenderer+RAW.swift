@@ -7,9 +7,8 @@ extension LumeraRenderer {
     /// Develops a RAW/Apple ProRAW file and renders it to a completed CIImage.
     ///
     /// Uses the system CIRAWFilter decoder, not an embedded preview. The default keeps system
-    /// as-shot white balance and development settings, disables draft mode and requests SDR.
-    /// Supported cameras/DNG encodings depend on the running OS. Output is a developed sRGB SDR
-    /// image, not an editable RAW/DNG; retain the original file separately.
+    /// as-shot white balance and development settings, disables draft mode and requests SDR, or default EDR when `options.dynamicRange = .edr`.
+    /// Supported cameras/DNG encodings depend on the running OS. Output is a developed sRGB image (extended sRGB in EDR mode), not an editable RAW/DNG; retain the original file separately.
     ///
     /// - Parameters:
     ///   - url: A readable local RAW file. No network download or security-scoped access is performed.
@@ -50,7 +49,7 @@ extension LumeraRenderer {
     private func renderRAW(_ filter: CIRAWFilter, style: PreparedCameraStyle, options: RenderOptions,
                            correction: PreparedDeviceCorrection?, configureRAW: ((CIRAWFilter) throws -> Void)?) async throws -> CIImage {
         filter.isDraftModeEnabled = false
-        filter.extendedDynamicRangeAmount = 0
+        filter.extendedDynamicRangeAmount = options.dynamicRange == .edr ? 1 : 0
         try configureRAW?(filter)
         try Task.checkCancellation()
         guard let image = filter.outputImage else { throw LabError.unsupported("系统 RAW 显影失败") }

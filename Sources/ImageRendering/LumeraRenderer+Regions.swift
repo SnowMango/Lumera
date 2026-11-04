@@ -25,7 +25,8 @@ extension LumeraRenderer {
     private func renderTiles(_ image: CIImage, region: CGRect?, metadata: [String: Any]?, orientation: CGImagePropertyOrientation?,
                              style: PreparedCameraStyle, options: RenderOptions, correction: PreparedDeviceCorrection?, budget: Int) async throws -> CIImage {
         try Task.checkCancellation()
-        let source = try normalizedSource(image, metadata: metadata, orientation: orientation)
+        let source = try normalizedSource(image, metadata: metadata, orientation: orientation, dynamicRange: options.dynamicRange)
+        let outputSpace = Self.colorSpace(for: options.dynamicRange)
         let planner = try TilePlanner(width: Int(source.bounds.width), height: Int(source.bounds.height),
                                       style: style.style.parameters, options: options, budget: budget,
                                       preparedGrain: style.style.parameters.grain.isActive ? style.executionPlan.grain(for: style.style.parameters.grain) : nil)
@@ -40,7 +41,7 @@ extension LumeraRenderer {
             if [tile.sourceArea.width, tile.sourceArea.height, tile.area.width, tile.area.height].contains(where: { $0 > maximumEdge }) {
                 throw TileAllocationLimit()
             }
-            let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat:imageInputFormat,
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat:inputFormat(for: options.dynamicRange),
                 width:Int(tile.sourceArea.width),height:Int(tile.sourceArea.height),mipmapped:false)
             descriptor.storageMode = .private; descriptor.usage = [.shaderRead, .shaderWrite]
             let workingSet = TileWorkingSet(limit:budget)
@@ -48,7 +49,7 @@ extension LumeraRenderer {
             guard let input = device.makeTexture(descriptor: descriptor), let command = queue.makeCommandBuffer() else {
                 throw LabError.io("分块输入纹理或 GPU 任务分配失败")
             }
-            context.render(source.image, to: input, commandBuffer: command, bounds: tile.sourceArea, colorSpace: Self.sRGB)
+            context.render(source.image, to: input, commandBuffer: command, bounds: tile.sourceArea, colorSpace: outputSpace)
             let geometry = RenderGeometry(fullWidth: planner.fullWidth, fullHeight: planner.fullHeight,
                 area: tile.area, sourceWidth: planner.sourceWidth, sourceHeight: planner.sourceHeight, sourceArea: tile.sourceArea)
             let request = options.makeRequest(input: .init(width: input.width, height: input.height))
@@ -82,7 +83,7 @@ extension LumeraRenderer {
         }
         try Task.checkCancellation()
         let result = CIImage(bitmapData: bytes, bytesPerRow: width * pixelSize, size: roi.size,
-                             format: pixelSize == 16 ? .RGBAf : .RGBAh, colorSpace: Self.sRGB)
-        return result.settingProperties(LumeraImageMetadata.output(source.properties,width:width,height:height,depth:pixelSize * 2))
+                             format: pixelSize == 16 ? .RGBAf : .RGBAh, colorSpace: outputSpace)
+        return result.settingProperties(LumeraImageMetadata.output(source.properties,width:width,height:height,depth:pixelSize * 2,dynamicRange:options.dynamicRange))
     }
 }

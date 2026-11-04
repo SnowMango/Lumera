@@ -3,6 +3,8 @@ import ImagingCore
 
 public enum LUTContent:String,Sendable {case colorOnly,colorAndTone,unspecified}
 public struct LUTAsset:Equatable,Sendable {
+    /// Sampling behavior; does not alter the source samples or their SHA-256 digest.
+    public var boundaryPolicy: LUTBoundaryPolicy = .automatic
     public var name:String,cubeText:String,sha256:String
     private var rawCube:CubeLUT?
     private var rawDigest:String?

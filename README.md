@@ -111,10 +111,12 @@ python3 tools/upgrade_profile_v1_1.py --validator .build/release/ccdlab --input 
 | 纹理类型 | `.type2D` |
 | 像素格式 | `.rgba8Unorm`、`.bgra8Unorm`、`.rgba16Float` 或 `.rgba32Float` |
 | 色度与传递函数 | sRGB 色度、sRGB 编码值 |
-| 动态范围 | SDR、显示参考 |
+| 动态范围 | 默认 SDR；`options.dynamicRange = .edr` 时为扩展范围，均为显示参考 |
 | 透明度 | 不透明 |
 | 方向 | 像素方向已标准化 |
 | 尺寸 | 正整数，与 `InputDescriptor` 一致，存储大小计算不溢出 |
+
+EDR 纹理必须使用 `.rgba16Float` 或 `.rgba32Float`，数值为扩展编码 sRGB（包含负值与大于 1 的值），参考白与 SDR 相同。
 
 硬件 `_sRGB` 纹理格式不属于支持范围，以避免重复执行传递函数。`InputDescriptor` 是声明与校验信息，不执行颜色转换，也不会扫描整张纹理来验证像素内容。
 
@@ -139,7 +141,7 @@ options.glowScale = .half
 // CIImage → CIImage：GPU 执行完成后返回，输出拥有独立存储。
 let styledImage = try await renderer.render(inputImage, style: style, options: options)
 
-// CVPixelBuffer → CVPixelBuffer：输出固定为 BGRA8、sRGB SDR、不透明。
+// CVPixelBuffer → CVPixelBuffer：默认输出 BGRA8、sRGB SDR、不透明。
 let styledBuffer = try await renderer.render(inputBuffer, style: style, options: options)
 
 // MTLTexture → MTLTexture：只编码，不提交或等待 command buffer。
@@ -151,11 +153,31 @@ let styledTexture = try renderer.render(
 )
 ```
 
-三种入口共用 `RenderOptions`：整体尺寸、效果比例、随机种子与帧序号均可配置。`prepareCorrection` 和 `correction:` 提供独立设备校正；固定风格可由 `Profile` 或 `ResolvedStyle` 准备。纹理入口还支持 `CompiledStyleDefinition` 和 `FrameStyleParameters` 动态帧参数。
+三种入口共用 `RenderOptions`：动态范围、整体尺寸、效果比例、随机种子与帧序号均可配置。`prepareCorrection` 和 `correction:` 提供独立设备校正；固定风格可由 `Profile` 或 `ResolvedStyle` 准备。纹理入口还支持 `CompiledStyleDefinition` 和 `FrameStyleParameters` 动态帧参数。
 
-高层图像入口将已标记的 SDR 颜色转换为 sRGB，透明区域合成到黑色背景，范围归一化到整数像素。未标记颜色的 RGB CVPixelBuffer 假定为 sRGB。CIImage 则遵循 Core Image 工作空间语义（此处为扩展线性 sRGB）；从编码像素创建 CIImage 时应附上实际颜色空间，不能靠补充 metadata 改变像素解释。CIImage 输出使用浮点 RGBA 存储（默认 Float16，显式指定 `.float32` 时输入与输出均使用 Float32，极端颜色变换也可能触发精度提升），CVPixelBuffer 输出使用 8 位 BGRA，因此不保证保持输入像素格式或位深。支持 BGRA/ARGB、RGBA half/float 及 8/10 位双平面 YCbCr 输入；YCbCr 必须提供可解析的颜色附件。非全帧 clean aperture、非方形像素、隔行和原始传感器缓冲区需要先由调用方适配。
+高层图像入口将已标记的 SDR 颜色转换为 sRGB，透明区域合成到黑色背景，范围归一化到整数像素。未标记颜色的 RGB CVPixelBuffer 假定为 sRGB。CIImage 则遵循 Core Image 工作空间语义（此处为扩展线性 sRGB）；从编码像素创建 CIImage 时应附上实际颜色空间，不能靠补充 metadata 改变像素解释。CIImage 输出使用浮点 RGBA 存储（默认 Float16，显式指定 `.float32` 或启用 EDR 时输入与输出均使用 Float32，极端颜色变换也可能触发精度提升），默认 SDR 的 CVPixelBuffer 输出使用 8 位 BGRA，因此不保证保持输入像素格式或位深。支持 BGRA/ARGB、RGBA half/float 及 8/10 位双平面 YCbCr 输入；YCbCr 必须提供可解析的颜色附件。非全帧 clean aperture、非方形像素、隔行和原始传感器缓冲区需要先由调用方适配。
 
-当前风格引擎输出 SDR。在 iOS 18／macOS 15 及以上，已知 headroom 的 HDR 输入通过系统滤镜映射到 SDR；无法可靠判断的 HDR 输入会报错，不能把此接口视为 HDR 保真通道。超出 SDR 色域/范围的颜色在适配边界裁切。
+默认 `.sdr` 保留原有行为：在 iOS 18／macOS 15 及以上，已知 headroom 的 HDR 输入通过系统滤镜映射到 SDR；无法可靠判断的 HDR 输入会报错。超出 SDR 色域/范围的颜色在适配边界裁切。
+
+#### EDR 输入与输出
+
+```swift
+var options = RenderOptions()
+options.dynamicRange = .edr
+let lut = try LUTImporter.load(url: lutURL) // 默认 automatic：EDR 外推，SDR 裁切
+let style = try renderer.prepare(profile, lut: lut)
+let output = try await renderer.render(inputImage, style: style, options: options)
+```
+
+EDR 模式跳过输入的 SDR 色调映射与颜色裁切，输出编码 **extended sRGB**。`CIImage` 与 `CVPixelBuffer` 输出为 RGBA Float32，PixelBuffer 附件标记实际颜色空间；不再输出 BGRA8。EDR 原生适配层和有处理操作的中间纹理使用 Float32，避免把未知幅度的扩展值降到半精度；裸纹理的无操作路径仍可能直接返回输入。该模式不生成 HDR 细节、不调整曝光，也不以当前屏幕 headroom 裁切成片。非有限输入或浮点范围以外的数据不属于支持范围。
+
+LUT 默认外推；色调曲线在 `0…1` 内保持原样，在两端以单位斜率延伸端点偏移，保留扩展高光的亮度差异。噪声和颗粒的亮度权重仍限制在曲线定义范围，最终 RGB 不裁切。柔化、暗角与光晕仍在线性域执行。现有 EV 行为保持不变。
+
+`renderRegion`、`renderTiled` 和动态纹理入口使用相同的 EDR 选项。RAW 入口在 EDR 模式下将 `extendedDynamicRangeAmount` 默认设为 `1`，调用方仍可通过 `configureRAW` 覆盖；实际高光恢复取决于系统解码器与源文件。
+
+输出内容 headroom 在风格处理后未知，不复制输入的亮度统计或 HDR mastering 元数据。显示端负责转换到需要的线性显示空间、启用 EDR 和适配屏幕；视频编码端负责转成目标 PQ/HLG/YCbCr 格式及生成相应元数据。本接口返回像素数据，不是 HDR 文件/视频编码器。
+
+`ImageAnalysis.MetalRenderer` 及离线标定流程仍是 SDR 契约，显式 EDR 请求会报错；应用的 EDR 处理使用 `LumeraRenderer` / `TextureEffectEncoder`。旧的序列化选项和请求没有 `dynamicRange` 字段时按 `.sdr` 解码。
 
 ### 局部与分块输出（CIImage）
 
@@ -305,9 +327,9 @@ func encodeFrame(
 1. sRGB 解码，执行曝光、Bradford 白点适应和线性 RGB 矩阵。
 2. sRGB 编码，执行风格 LUT、色调曲线、亮度细节与锐化。
 3. sRGB 解码，执行柔化、暗角、高光光晕和染色光晕。
-4. sRGB 编码，执行数码噪点与胶片颗粒，输出 SDR 图像。
+4. sRGB 编码，执行数码噪点与胶片颗粒，按请求输出 SDR 或扩展范围图像。
 
-中间颜色运算允许扩展范围；LUT 有限域和最终输出的裁切不可逆。白点校正使用 CIE xy，不等同于传感器原始通道增益。
+中间颜色运算允许扩展范围；SDR 路径的 LUT 有限域和最终输出裁切不可逆。EDR 路径默认使用 LUT 外推并保留最终扩展值。白点校正使用 CIE xy，不等同于传感器原始通道增益。
 
 ### 设备校正
 
@@ -362,6 +384,16 @@ func encodeFrame(
 
 LUT 的输入和输出约定均为编码 sRGB。`LUTAsset` 独立保存样本与摘要；`content` 可声明 `colorOnly`、`colorAndTone` 或 `unspecified`，该描述不执行颜色空间转换。
 
+`LUTAsset.boundaryPolicy` 与颜色编码独立，支持：
+
+- `.automatic`（默认）：SDR 请求裁切输入坐标，EDR 请求外推。
+- `.clamp`：始终将查表坐标限制在 `0…1`，即使输出为 EDR。
+- `.extrapolate`：在编码 sRGB 中延伸最近边界网格单元的三线性函数；面、边与角均使用这条规则。输出可以为负或大于 `1`，最终是否裁切由渲染动态范围决定。
+
+外推并非原 LUT 作者定义的 HDR 效果，也不保证等同于 Apple 的外推算法；边界平坦的 LUT 仍可能输出平坦高光，多通道外推也可能放大边界变化。它不是 shaper，本版不支持 shaper 或扩展域 cube 导入。普通 LUT 样本和文件格式仍为原有 `0…1` 约定。
+
+显式外推即使配合 SDR 输出，也使用 Float32 中间纹理，避免范围外结果在后续颜色变换前溢出。修改越界策略后重新准备资源。源文件/样本摘要保持不变，渲染身份与准备缓存另行区分策略；SDR 默认身份不因新增可选设置而改变。风格 LUT 与设备校正 LUT 均可独立选择策略。
+
 LUT 由调用方加载和管理。需要记录外部资源关联时，分别声明风格 LUT、设备校正与校正 LUT 的 `ResourceReferences`，并用 `RenderResources.validate(against:correction:)` 核对实际资源。
 
 ### 原始数值数据
@@ -410,6 +442,7 @@ CIColorCube 与 CIColorCubeWithColorSpace 的 cube 数组布局对应 `.rgbaFloa
 
 | 字段 | 默认值 | 含义 |
 | --- | --- | --- |
+| `dynamicRange` | `.sdr` | `.edr` 保留扩展输入输出；不自动推测范围 |
 | `maximumLongEdge` | `nil` | 可选整体缩放；正整数，不放大输入 |
 | `previewGlow` | `true` | 为 `false` 时跳过高光光晕和染色光晕，不影响柔化 |
 | `glowScale` | `.full` | 高光光晕中间层的每轴比例 |

@@ -8,19 +8,21 @@ public final class PreparedCameraStyle: @unchecked Sendable {
     fileprivate let curves:PreparedResponseCurves
     fileprivate let color: PreparedColorTransform
     fileprivate let lut: MTLTexture?
+    fileprivate let lutBoundaryPolicy: LUTBoundaryPolicy
     public var preparationStatistics: StylePreparationStatistics {
         let counts = executionPlan.counts
         return .init(colors:counts.colors, grains:counts.grains, halations:counts.halations)
     }
     let executionPlan: PreparedExecutionPlan
     fileprivate let deviceID: UInt64
-    fileprivate init(style: ResolvedStyle, color:PreparedColorTransform, lut: MTLTexture?, deviceID: UInt64) {
+    fileprivate init(style: ResolvedStyle, color:PreparedColorTransform, lut: MTLTexture?, deviceID: UInt64, boundaryPolicy: LUTBoundaryPolicy) {
+        self.lutBoundaryPolicy = boundaryPolicy
         self.executionPlan = PreparedExecutionPlan(parameters: style.parameters, color: color)
         self.curves=PreparedResponseCurves(style.parameters);self.style=style; self.color=color; self.lut=lut; self.deviceID=deviceID
     }
 }
 
-/// Encodes the CCDLab SDR pipeline into the caller's command buffer without submitting or waiting.
+/// Encodes the SDR or extended-sRGB pipeline into the caller's command buffer without submitting or waiting.
 /// Consume the returned texture in that same command buffer; scratch storage is recycled after completion.
 public final class TextureEffectEncoder: @unchecked Sendable {
     private let device: MTLDevice
@@ -56,7 +58,7 @@ public final class TextureEffectEncoder: @unchecked Sendable {
         self.device=device;self.precision=precision
         let library=try RenderingResources.makeLibrary(device:device)
         var compiled=[String:MTLComputePipelineState]()
-        for name in ["transfer","lutMap","gaussianPrepared","detailCombine","sharpen","vignette","highlights","glowCombine","resizeLinear","randomField","finish"] + CameraEffectUniforms.kernels + ["opticalReduceRegion", "softenCombineReducedRegion", "glowCombineReducedRegion", "halationCombineReducedRegion", "randomFieldRegion", "vignetteRegion", "resizeLinearRegion"] {
+        for name in ["lutMapExtrapolated","toneResponseExtended","finishExtended","filmGrainExtended","grainReduceExtended","transfer","lutMap","gaussianPrepared","detailCombine","sharpen","vignette","highlights","glowCombine","resizeLinear","randomField","finish"] + CameraEffectUniforms.kernels + ["opticalReduceRegion", "softenCombineReducedRegion", "glowCombineReducedRegion", "halationCombineReducedRegion", "randomFieldRegion", "vignetteRegion", "resizeLinearRegion"] {
             guard let function=library.makeFunction(name:name) else {throw LabError.io("缺少 风格处理函数："+name)}
             compiled[name]=try device.makeComputePipelineState(function:function)
         }
@@ -66,7 +68,7 @@ public final class TextureEffectEncoder: @unchecked Sendable {
     private func prepareLUT(_ asset:LUTAsset?) throws -> PreparedLUT? {
         guard let asset else{return nil};try asset.validate()
         lutLock.lock();defer{lutLock.unlock()}
-        if let index=preparedLUTs.firstIndex(where:{$0.digest==asset.sha256}) {
+        if let index=preparedLUTs.firstIndex(where:{$0.digest==asset.sha256 && $0.boundaryPolicy==asset.boundaryPolicy}) {
             let cached=preparedLUTs.remove(at:index);preparedLUTs.append(cached);return cached
         }
         let prepared=try PreparedLUT.prepare(asset,device:device)
@@ -77,7 +79,7 @@ public final class TextureEffectEncoder: @unchecked Sendable {
     }
     public func prepare(_ style:ResolvedStyle,lut:LUTAsset?=nil) throws -> PreparedCameraStyle {
         try style.parameters.validate(resolved:true)
-        return PreparedCameraStyle(style:style,color:try ColorTransform.prepare(style.parameters.color),lut:try prepareLUT(lut)?.texture,deviceID:device.registryID)
+        return PreparedCameraStyle(style:style,color:try ColorTransform.prepare(style.parameters.color),lut:try prepareLUT(lut)?.texture,deviceID:device.registryID,boundaryPolicy:lut?.boundaryPolicy ?? .automatic)
     }
 
     public func prepareCorrection(_ correction:DeviceCorrection?,lut:LUTAsset?=nil) throws -> PreparedDeviceCorrection? {
@@ -86,13 +88,13 @@ public final class TextureEffectEncoder: @unchecked Sendable {
 
     public func encode(_ input: MTLTexture, style: PreparedCameraStyle, correction:PreparedDeviceCorrection? = nil, request:RenderRequest,
                        commandBuffer: MTLCommandBuffer) throws -> MTLTexture {
-        try encodeFrame(input,executionPlan:style.executionPlan,parameters:style.style.parameters,color:style.color,curves:style.curves,lut:style.lut,styleDeviceID:style.deviceID,
+        try encodeFrame(input,executionPlan:style.executionPlan,parameters:style.style.parameters,color:style.color,curves:style.curves,lut:style.lut,lutBoundaryPolicy:style.lutBoundaryPolicy,styleDeviceID:style.deviceID,
                         temporal:style.style.temporalPolicy,correction:correction,request:request,commandBuffer:commandBuffer)
     }
     func encodeRegion(_ input: MTLTexture, style: PreparedCameraStyle, correction: PreparedDeviceCorrection?,
                       request: RenderRequest, geometry: RenderGeometry, workingSet: TileWorkingSet, commandBuffer: MTLCommandBuffer) throws -> MTLTexture {
         try encodeFrame(input, executionPlan: style.executionPlan, parameters: style.style.parameters, color: style.color,
-            curves: style.curves, lut: style.lut, styleDeviceID: style.deviceID, temporal: style.style.temporalPolicy,
+            curves: style.curves, lut: style.lut, lutBoundaryPolicy:style.lutBoundaryPolicy, styleDeviceID: style.deviceID, temporal: style.style.temporalPolicy,
             correction: correction, request: request, geometry: geometry, workingSet: workingSet, commandBuffer: commandBuffer)
     }
     public func prepare(_ definition:CompiledStyleDefinition,lut:LUTAsset?=nil) throws -> PreparedStyleDefinition {
@@ -104,10 +106,10 @@ public final class TextureEffectEncoder: @unchecked Sendable {
         let values=parameters.evaluated
         guard values.definitionIdentity==style.definition.identity else {throw LabError.invalid("帧参数不属于此已准备风格定义")}
         return try encodeFrame(input,executionPlan:style.fixed.executionPlan,parameters:values.parameters,color:style.fixed.executionPlan.color(for: values.parameters.color),
-                               curves:style.fixed.curves,lut:style.fixed.lut,styleDeviceID:style.fixed.deviceID,temporal:values.temporalPolicy,
+                               curves:style.fixed.curves,lut:style.fixed.lut,lutBoundaryPolicy:style.fixed.lutBoundaryPolicy,styleDeviceID:style.fixed.deviceID,temporal:values.temporalPolicy,
                                correction:correction,request:request,commandBuffer:commandBuffer)
     }
-    private func encodeFrame(_ input:MTLTexture,executionPlan:PreparedExecutionPlan,parameters p:StyleParameters,color:PreparedColorTransform,curves:PreparedResponseCurves,lut:MTLTexture?,
+    private func encodeFrame(_ input:MTLTexture,executionPlan:PreparedExecutionPlan,parameters p:StyleParameters,color:PreparedColorTransform,curves:PreparedResponseCurves,lut:MTLTexture?,lutBoundaryPolicy:LUTBoundaryPolicy,
                              styleDeviceID:UInt64,temporal:TemporalPolicy,correction:PreparedDeviceCorrection?,
                              request:RenderRequest,geometry:RenderGeometry? = nil,workingSet:TileWorkingSet? = nil,commandBuffer:MTLCommandBuffer) throws -> MTLTexture {
         try request.validate()
@@ -118,6 +120,10 @@ public final class TextureEffectEncoder: @unchecked Sendable {
               input.textureType == .type2D, input.width==request.input.width,input.height==request.input.height,
               [.rgba8Unorm,.bgra8Unorm,.rgba16Float,.rgba32Float].contains(input.pixelFormat) else {
             throw LabError.invalid("纹理尺寸、格式或设备与请求不符；请传入保留资源引用且尚未提交的 command buffer")
+        }
+        let extended = request.dynamicRange == .edr
+        if extended && ![MTLPixelFormat.rgba16Float, .rgba32Float].contains(input.pixelFormat) {
+            throw LabError.invalid("EDR 纹理需要 RGBA16Float 或 RGBA32Float；数值使用扩展编码 sRGB")
         }
         let limit = min(request.maximumLongEdge ?? max(input.width,input.height), max(input.width,input.height))
         let ratio = Double(limit) / Double(max(input.width,input.height))
@@ -135,7 +141,11 @@ public final class TextureEffectEncoder: @unchecked Sendable {
         let correctionBound=correction?.color.maximumGain ?? 1
         let combinedBound=max(correctionBound,colorBound*(correction?.lutTexture == nil ? correctionBound:1))
         guard combinedBound.isFinite,combinedBound < Double(Float.greatestFiniteMagnitude)/1024 else {throw LabError.invalid("组合颜色变换超出浮点安全范围")}
-        let format:MTLPixelFormat=(precision == .float32 || combinedBound>256) ? .rgba32Float:.rgba16Float
+        // Extrapolation can exceed half-float even from bounded SDR source pixels after
+        // color correction. A later transform may bring the result back into SDR.
+        let extrapolating = (lut != nil && lutBoundaryPolicy.extrapolates(in: request.dynamicRange)) ||
+            (correction?.lutTexture != nil && correction!.lutBoundaryPolicy.extrapolates(in: request.dynamicRange))
+        let format:MTLPixelFormat=(precision == .float32 || extended || extrapolating || combinedBound>256) ? .rgba32Float:.rgba16Float
         poolLock.lock()
         let arena = geometry == nil ? (available.popLast() ?? Arena(device:device)) : Arena(device:device, workingSet:workingSet)
         let generation=cacheGeneration
@@ -191,7 +201,7 @@ public final class TextureEffectEncoder: @unchecked Sendable {
         var current=input
         if let correction {
             if correction.colorIsActive {current=try pass("colorResponse",current,[],correction.color.uniforms)}
-            if let lut=correction.lutTexture {let next=try pass("lutMap",current,[lut]);arena.release(current);current=next}
+            if let lut=correction.lutTexture {let next=try pass(correction.lutBoundaryPolicy.extrapolates(in: request.dynamicRange) ? "lutMapExtrapolated" : "lutMap",current,[lut]);arena.release(current);current=next}
         }
         if needsResize {
             let linear=try pass("transfer",current,[],[-1]);arena.release(current)
@@ -200,8 +210,8 @@ public final class TextureEffectEncoder: @unchecked Sendable {
         }
         let scale=EffectScale.factor(width:frameGeometry.fullWidth,height:frameGeometry.fullHeight)
         if p.color.isActive {let next=try pass("colorResponse",current,[],color.uniforms);arena.release(current);current=next}
-        if let lut {let next=try pass("lutMap",current,[lut]);arena.release(current);current=next}
-        if p.tone.isActive {let next=try pass("toneResponse",current,[],curves.tone);arena.release(current);current=next}
+        if let lut {let next=try pass(lutBoundaryPolicy.extrapolates(in: request.dynamicRange) ? "lutMapExtrapolated" : "lutMap",current,[lut]);arena.release(current);current=next}
+        if p.tone.isActive {let next=try pass(extended ? "toneResponseExtended" : "toneResponse",current,[],curves.tone);arena.release(current);current=next}
         if p.detail.isActive {
             let fine=try blur(current,p.detail.fineSigma*scale),mid=try blur(current,p.detail.midSigma*scale)
             let next=try pass("detailCombine",current,[fine,mid],[Float(p.detail.fineGain),Float(p.detail.midGain)])
@@ -259,7 +269,7 @@ public final class TextureEffectEncoder: @unchecked Sendable {
                 arena.noise=NoiseField(key:key,luma:luma,chroma:chroma)
             }
         }
-        let result=try pass("finish",current,[luma,chroma],CameraEffectUniforms.noise(p.noise,envelope:curves.noise))
+        let result=try pass(extended ? "finishExtended" : "finish",current,[luma,chroma],CameraEffectUniforms.noise(p.noise,envelope:curves.noise))
         if p.grain.isActive {
             let prepared = executionPlan.grain(for:p.grain)
             let uniforms = CameraEffectUniforms.grain(p.grain,scale:scale,seed:request.seed,
@@ -269,10 +279,10 @@ public final class TextureEffectEncoder: @unchecked Sendable {
             let grained: MTLTexture
             if factor > 1 {
                 let subpixels = try pass("grainSubpixels",result,[],uniforms,size:(result.width*factor,result.height*factor))
-                grained = try pass("grainReduce",result,[subpixels],uniforms)
+                grained = try pass(extended ? "grainReduceExtended" : "grainReduce",result,[subpixels],uniforms)
                 arena.release(subpixels)
             } else {
-                grained = try pass("filmGrain",result,[],uniforms)
+                grained = try pass(extended ? "filmGrainExtended" : "filmGrain",result,[],uniforms)
             }
             arena.release(result);return grained
         }

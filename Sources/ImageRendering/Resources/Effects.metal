@@ -8,14 +8,28 @@ bool outside(uint2 id,texture2d<float,access::write> out){return id.x>=out.get_w
 kernel void transfer(texture2d<float,access::read> src[[texture(0)]],texture2d<float,access::write> dst[[texture(1)]],constant float* p[[buffer(0)]],uint2 id[[thread_position_in_grid]]){
  if(outside(id,dst))return;float3 c=src.read(id).rgb;dst.write(float4(p[0]>0?encodeRGB(c):decodeRGB(c),1),id);
 }
-kernel void lutMap(texture2d<float,access::read> src[[texture(0)]],texture2d<float,access::write> dst[[texture(1)]],texture3d<float,access::read> lut[[texture(2)]],constant float* p[[buffer(0)]],uint2 id[[thread_position_in_grid]]){
- if(outside(id,dst))return;
- float3 coord=clamp(src.read(id).rgb,0.0,1.0)*float(lut.get_width()-1);uint3 lo=uint3(floor(coord)),hi=min(lo+1,uint3(lut.get_width()-1));float3 f=fract(coord);
+float3 sampleCube(float3 value,texture3d<float,access::read> lut,bool extrapolate) {
+ float3 coord=(extrapolate ? value : clamp(value,0.0,1.0))*float(lut.get_width()-1);
+ // Clamp indices BEFORE integer conversion, but retain out-of-range weights.
+ // This continues the boundary cell's trilinear function on faces, edges and corners.
+ uint3 lo,hi;float3 f;
+ if(extrapolate) {
+  lo=uint3(clamp(floor(coord),0.0f,float(lut.get_width()-2)));hi=lo+1;f=coord-float3(lo);
+ } else {
+  // Keep the original SDR endpoint sampling and rounding unchanged.
+  lo=uint3(floor(coord));hi=min(lo+1,uint3(lut.get_width()-1));f=fract(coord);
+ }
  float3 a=mix(lut.read(uint3(lo.x,lo.y,lo.z)).rgb,lut.read(uint3(hi.x,lo.y,lo.z)).rgb,f.x);
  float3 b=mix(lut.read(uint3(lo.x,hi.y,lo.z)).rgb,lut.read(uint3(hi.x,hi.y,lo.z)).rgb,f.x);
  float3 c=mix(lut.read(uint3(lo.x,lo.y,hi.z)).rgb,lut.read(uint3(hi.x,lo.y,hi.z)).rgb,f.x);
  float3 d=mix(lut.read(uint3(lo.x,hi.y,hi.z)).rgb,lut.read(uint3(hi.x,hi.y,hi.z)).rgb,f.x);
- dst.write(float4(mix(mix(a,b,f.y),mix(c,d,f.y),f.z),1),id);
+ return mix(mix(a,b,f.y),mix(c,d,f.y),f.z);
+}
+kernel void lutMap(texture2d<float,access::read> src[[texture(0)]],texture2d<float,access::write> dst[[texture(1)]],texture3d<float,access::read> lut[[texture(2)]],constant float* p[[buffer(0)]],uint2 id[[thread_position_in_grid]]){
+ if(outside(id,dst))return;dst.write(float4(sampleCube(src.read(id).rgb,lut,false),1),id);
+}
+kernel void lutMapExtrapolated(texture2d<float,access::read> src[[texture(0)]],texture2d<float,access::write> dst[[texture(1)]],texture3d<float,access::read> lut[[texture(2)]],constant float* p[[buffer(0)]],uint2 id[[thread_position_in_grid]]){
+ if(outside(id,dst))return;dst.write(float4(sampleCube(src.read(id).rgb,lut,true),1),id);
 }
 int reflected(int v,int n){if(n<=1)return 0;int period=2*n-2;v=((v%period)+period)%period;return v<n?v:period-v;}
 kernel void gaussian(texture2d<float,access::read> src[[texture(0)]],texture2d<float,access::write> dst[[texture(1)]],constant float* p[[buffer(0)]],uint2 id[[thread_position_in_grid]]){
@@ -108,11 +122,17 @@ float responseValue(float x,constant float* p) {
  float t2=t*t,t3=t2*t;
  return clamp((2*t3-3*t2+1)*p[a+1]+(t3-2*t2+t)*h*p[a+2]+(-2*t3+3*t2)*p[b+1]+(t3-t2)*h*p[b+2],min(p[a+1],p[b+1]),max(p[a+1],p[b+1]));
 }
-kernel void finish(texture2d<float,access::read> src[[texture(0)]],texture2d<float,access::write> dst[[texture(1)]],texture2d<float,access::read> luma[[texture(2)]],texture2d<float,access::read> chroma[[texture(3)]],constant float* p[[buffer(0)]],uint2 id[[thread_position_in_grid]]){
- if(outside(id,dst))return;float3 c=encodeRGB(src.read(id).rgb);
+float3 finishColor(float3 linear,texture2d<float,access::read> luma,texture2d<float,access::read> chroma,constant float* p,uint2 id) {
+ float3 c=encodeRGB(linear);
  if(p[0]>0){float sigma=clamp(responseValue(luminance(c),p+4)*p[3],0.0f,0.1f);
  float dn=luma.read(id).r*sigma;float2 z=chroma.read(id).gb;float cb=z.x*sigma*p[1],cr=(p[2]*z.x+sqrt(1-p[2]*p[2])*z.y)*sigma*p[1];c+=float3(dn+1.5748*cr,dn-0.187324*cb-0.468124*cr,dn+1.8556*cb);
- }dst.write(float4(clamp(c,0.0,1.0),1),id);
+ }return c;
+}
+kernel void finish(texture2d<float,access::read> src[[texture(0)]],texture2d<float,access::write> dst[[texture(1)]],texture2d<float,access::read> luma[[texture(2)]],texture2d<float,access::read> chroma[[texture(3)]],constant float* p[[buffer(0)]],uint2 id[[thread_position_in_grid]]){
+ if(outside(id,dst))return;dst.write(float4(clamp(finishColor(src.read(id).rgb,luma,chroma,p,id),0.0,1.0),1),id);
+}
+kernel void finishExtended(texture2d<float,access::read> src[[texture(0)]],texture2d<float,access::write> dst[[texture(1)]],texture2d<float,access::read> luma[[texture(2)]],texture2d<float,access::read> chroma[[texture(3)]],constant float* p[[buffer(0)]],uint2 id[[thread_position_in_grid]]){
+ if(outside(id,dst))return;dst.write(float4(finishColor(src.read(id).rgb,luma,chroma,p,id),1),id);
 }
 
 // Display-only packing: values are already sRGB encoded by finish. No second transfer.
@@ -125,6 +145,15 @@ kernel void previewDisplay(texture2d<float,access::read> src[[texture(0)]],textu
 kernel void toneResponse(texture2d<float,access::read> src[[texture(0)]],texture2d<float,access::write> dst[[texture(1)]],constant float* p[[buffer(0)]],uint2 id[[thread_position_in_grid]]) {
  if(outside(id,dst))return;float3 c=src.read(id).rgb;
  dst.write(float4(responseValue(c.r,p),responseValue(c.g,p),responseValue(c.b,p),1),id);
+}
+float extendedTone(float x,constant float* p) {
+ // Preserve endpoint offsets with unit slope outside the authored SDR range.
+ // Do not use this for noise/grain envelopes, whose weights intentionally stay bounded.
+ return responseValue(x,p)+(x<0 ? x : max(0.0f,x-1.0f));
+}
+kernel void toneResponseExtended(texture2d<float,access::read> src[[texture(0)]],texture2d<float,access::write> dst[[texture(1)]],constant float* p[[buffer(0)]],uint2 id[[thread_position_in_grid]]) {
+ if(outside(id,dst))return;float3 c=src.read(id).rgb;
+ dst.write(float4(extendedTone(c.r,p),extendedTone(c.g,p),extendedTone(c.b,p),1),id);
 }
 kernel void softenCombine(texture2d<float,access::read> src[[texture(0)]],texture2d<float,access::write> dst[[texture(1)]],texture2d<float,access::read> blurred[[texture(2)]],constant float* p[[buffer(0)]],uint2 id[[thread_position_in_grid]]) {
  if(outside(id,dst))return;dst.write(float4(mix(src.read(id).rgb,blurred.read(id).rgb,p[0]),1),id);
@@ -203,16 +232,21 @@ float3 grainIntegral(float2 pixel, constant float* p, float factor) {
     return grainLayer(pixel,p[1]/factor,p[3],seed,p[5]>0)
           +grainLayer(pixel,p[2]/factor,p[4],seed^0xa341316cu,p[5]>0);
 }
-float4 applyGrain(float3 c, float3 v, constant float* p) {
+float4 applyGrain(float3 c, float3 v, constant float* p, bool extended=false) {
     float cb=v.y*p[5],cr=v.z*p[5];
     float amplitude=p[0]*responseValue(clamp(luminance(c),0.0f,1.0f),p+10);
     c+=amplitude*float3(v.x+1.5748f*cr,v.x-0.187324f*cb-0.468124f*cr,v.x+1.8556f*cb);
-    return float4(clamp(c,0.0f,1.0f),1);
+    return float4(extended ? c : clamp(c,0.0f,1.0f),1);
 }
 kernel void filmGrain(texture2d<float,access::read> src[[texture(0)]],texture2d<float,access::write> dst[[texture(1)]],constant float* p[[buffer(0)]],uint2 id[[thread_position_in_grid]]) {
     if(outside(id,dst)) return;
     float2 pixel=float2(id)+float2(p[7],p[8]);
     dst.write(applyGrain(src.read(id).rgb,grainIntegral(pixel,p,1),p),id);
+}
+kernel void filmGrainExtended(texture2d<float,access::read> src[[texture(0)]],texture2d<float,access::write> dst[[texture(1)]],constant float* p[[buffer(0)]],uint2 id[[thread_position_in_grid]]) {
+    if(outside(id,dst)) return;
+    float2 pixel=float2(id)+float2(p[7],p[8]);
+    dst.write(applyGrain(src.read(id).rgb,grainIntegral(pixel,p,1),p,true),id);
 }
 kernel void grainSubpixels(texture2d<float,access::write> dst[[texture(1)]],constant float* p[[buffer(0)]],uint2 id[[thread_position_in_grid]]) {
     if(outside(id,dst)) return;
@@ -228,6 +262,13 @@ kernel void grainReduce(texture2d<float,access::read> src[[texture(0)]],texture2
     for (uint y=0;y<factor;++y) for (uint x=0;x<factor;++x)
         sum+=field.read(id*factor+uint2(x,y)).rgb;
     dst.write(applyGrain(src.read(id).rgb,sum/float(factor*factor),p),id);
+}
+kernel void grainReduceExtended(texture2d<float,access::read> src[[texture(0)]],texture2d<float,access::write> dst[[texture(1)]],
+                        texture2d<float,access::read> field[[texture(2)]],constant float* p[[buffer(0)]],uint2 id[[thread_position_in_grid]]) {
+    if(outside(id,dst)) return;
+    uint factor=uint(p[9]);float3 sum=0;
+    for (uint y=0;y<factor;++y) for (uint x=0;x<factor;++x) sum+=field.read(id*factor+uint2(x,y)).rgb;
+    dst.write(applyGrain(src.read(id).rgb,sum/float(factor*factor),p,true),id);
 }
 
 // Decode -> exposure -> chromatic adaptation -> creative matrix -> encode.

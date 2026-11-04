@@ -48,7 +48,7 @@ public final class MetalRenderer: @unchecked Sendable {
         cacheLimitBytes=min(recommended,requested ?? recommended)
         pool=TexturePool(device:device,limit:min(536_870_912,cacheLimitBytes/2))
         let library=try RenderingResources.makeLibrary(device:device)
-        for name in ["transfer","lutMap","gaussian","gaussianPrepared","detailCombine","sharpen","vignette","highlights","glowCombine","resizeLinear","randomField","finish","previewDisplay"] + CameraEffectUniforms.kernels {
+        for name in ["lutMapExtrapolated","transfer","lutMap","gaussian","gaussianPrepared","detailCombine","sharpen","vignette","highlights","glowCombine","resizeLinear","randomField","finish","previewDisplay"] + CameraEffectUniforms.kernels {
             guard let f=library.makeFunction(name:name) else {throw LabError.io("缺少图像处理函数： \(name)")}
             pipelines[name]=try device.makeComputePipelineState(function:f)
         }
@@ -117,7 +117,7 @@ public final class MetalRenderer: @unchecked Sendable {
         if let correction {
             let started=ProcessInfo.processInfo.systemUptime,before=lastWork.dispatches
             if correction.colorIsActive {texture=try pass("colorResponse",texture,[],correction.color.uniforms)}
-            if let lut=correction.lutTexture {texture=try pass("lutMap",texture,lut:lut)}
+            if let lut=correction.lutTexture {texture=try pass(correction.lutBoundaryPolicy.extrapolates(in: .sdr) ? "lutMapExtrapolated" : "lutMap",texture,lut:lut)}
             lastWork.correctionDispatches=lastWork.dispatches-before
             lastWork.correctionSeconds += ProcessInfo.processInfo.systemUptime-started
         }
@@ -190,13 +190,14 @@ public final class MetalRenderer: @unchecked Sendable {
     }
     private func applyLUT(_ input:TextureLease,_ ref:LUTAsset?) throws -> TextureLease {
         guard let ref else{return input}
-        if let cached=lutCache,cached.0==ref.sha256 {return try pass("lutMap",input,lut:cached.1)}
+        let kernel=ref.boundaryPolicy.extrapolates(in: .sdr) ? "lutMapExtrapolated" : "lutMap"
+        if let cached=lutCache,cached.0==ref.sha256 {return try pass(kernel,input,lut:cached.1)}
         let cube=try ref.decodedCube()
         let d=MTLTextureDescriptor();d.textureType = .type3D;d.pixelFormat = .rgba32Float;d.width=cube.size;d.height=cube.size;d.depth=cube.size;d.storageMode = .shared;d.usage = .shaderRead
         guard let t=device.makeTexture(descriptor:d) else {throw LabError.io("无法为 LUT 分配内存，请重试或使用较小尺寸的 LUT")}
         cube.rgba.withUnsafeBytes{t.replace(region:MTLRegionMake3D(0,0,0,cube.size,cube.size,cube.size),mipmapLevel:0,slice:0,withBytes:$0.baseAddress!,bytesPerRow:cube.size*16,bytesPerImage:cube.size*cube.size*16)}
         lutCache=(ref.sha256,t)
-        return try pass("lutMap",input,lut:t)
+        return try pass(kernel,input,lut:t)
     }
     public func render(_ image:ImageFrame,style:ResolvedStyle,correction:DeviceCorrection? = nil,resources:RenderResources = .init(),request:RenderRequest) throws -> RenderResult {
         let started=ProcessInfo.processInfo.systemUptime
@@ -351,6 +352,9 @@ public final class MetalRenderer: @unchecked Sendable {
                                  consume:(MTLTexture,MTLTexture?,MTLCommandBuffer)throws->T) throws -> T {
         lock.lock();defer{lock.unlock()};try Task.checkCancellation()
         try request.validate();try image.descriptor.validate();try style.parameters.validate(resolved:true);try resources.validate()
+        guard request.dynamicRange == .sdr else {
+            throw LabError.unsupported("离线标定/分析渲染只支持 SDR；EDR 请使用 LumeraRenderer 或 TextureEffectEncoder")
+        }
         let preparedColor=try ColorTransform.prepare(style.parameters.color)
         guard request.input==image.descriptor,request.input.width==image.width,request.input.height==image.height,
               image.pixels.count==image.width*image.height*4 else {throw LabError.invalid("图像与输入声明不一致")}
@@ -359,11 +363,11 @@ public final class MetalRenderer: @unchecked Sendable {
         let correctionStart=ProcessInfo.processInfo.systemUptime
         let preparedCorrection:PreparedDeviceCorrection?
         if correction != nil || resources.correctionLUT != nil {
-            let correctionKey=(try correction?.effectDigest() ?? "identity")+":"+(resources.correctionLUT?.sha256 ?? "identity")
+            let correctionKey=(try correction?.effectDigest() ?? "identity")+":"+(resources.correctionLUT.map { $0.sha256+":"+$0.boundaryPolicy.rawValue } ?? "identity")
             if let cached=correctionCache,cached.0==correctionKey {preparedCorrection=cached.1}
             else {
                 if let asset=resources.correctionLUT {
-                    if correctionLUTCache?.digest != asset.sha256 {correctionLUTCache=try PreparedLUT.prepare(asset,device:device)}
+                    if correctionLUTCache?.digest != asset.sha256 || correctionLUTCache?.boundaryPolicy != asset.boundaryPolicy {correctionLUTCache=try PreparedLUT.prepare(asset,device:device)}
                 } else {correctionLUTCache=nil}
                 preparedCorrection=try PreparedDeviceCorrection.prepare(correction,preparedLUT:correctionLUTCache,device:device)
                 correctionCache=(correctionKey,preparedCorrection)
@@ -402,7 +406,7 @@ public final class MetalRenderer: @unchecked Sendable {
         let entry=try input(image,key:key,correction:preparedCorrection);entry.checkedRenderInput=true
         lastWork.inputPrepared=ProcessInfo.processInfo.systemUptime
         let p=style.parameters,scale=EffectScale.factor(width:entry.texture.width,height:entry.texture.height)
-        let prefixKey=PrefixKey(parameters:p,lut:resources.lut?.sha256,previewGlow:request.previewGlow,glowScale:request.glowScale,halationScale:request.halationScale,softeningScale:request.softeningScale)
+        let prefixKey=PrefixKey(parameters:p,lut:resources.lut.map { $0.sha256+":"+$0.boundaryPolicy.rawValue },previewGlow:request.previewGlow,glowScale:request.glowScale,halationScale:request.halationScale,softeningScale:request.softeningScale)
         var current=entry.texture
         let active=preparedCorrection != nil || p.color.isActive || resources.lut != nil || p.tone.isActive || p.detail.isActive || p.softening.isActive || p.vignette.isActive || (request.previewGlow && (p.glow.isActive || p.halation.isActive)) || p.noise.isActive || p.grain.isActive
         if !active {

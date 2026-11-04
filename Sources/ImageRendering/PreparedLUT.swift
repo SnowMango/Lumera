@@ -5,9 +5,11 @@ import ImagingCore
 /// Immutable upload, independent of creative parameters and device white balance/matrix.
 public final class PreparedLUT:@unchecked Sendable {
     public let digest:String,deviceID:UInt64
+    public let boundaryPolicy: LUTBoundaryPolicy
     package let texture:MTLTexture
     package let isExactIdentity:Bool
-    private init(digest:String,texture:MTLTexture,identity:Bool,device:MTLDevice) {
+    private init(digest:String,texture:MTLTexture,identity:Bool,device:MTLDevice,boundaryPolicy:LUTBoundaryPolicy) {
+        self.boundaryPolicy=boundaryPolicy
         self.digest=digest;self.texture=texture;isExactIdentity=identity;deviceID=device.registryID
     }
     public static func prepare(_ asset:LUTAsset,device:MTLDevice) throws -> PreparedLUT {
@@ -21,6 +23,6 @@ public final class PreparedLUT:@unchecked Sendable {
             let i=((b*cube.size+g)*cube.size+r)*4
             if cube.rgba[i] != Float(r)/Float(cube.size-1) || cube.rgba[i+1] != Float(g)/Float(cube.size-1) || cube.rgba[i+2] != Float(b)/Float(cube.size-1) {identity=false}
         }}}
-        return PreparedLUT(digest:asset.sha256,texture:t,identity:identity,device:device)
+        return PreparedLUT(digest:asset.sha256,texture:t,identity:identity,device:device,boundaryPolicy:asset.boundaryPolicy)
     }
 }

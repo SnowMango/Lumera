@@ -20,6 +20,8 @@ public enum RenderIdentity {
             let size: InputDescriptor, limit: Int?, glow: Bool, scales: [EffectResolution]
             let grainSeed: UInt32?, noiseSeed: UInt32?
             let styleLUT: String?, correctionLUT: String?, correction: String?
+            let dynamicRange: RenderDynamicRange?
+            let styleLUTBoundary: LUTBoundaryPolicy?, correctionLUTBoundary: LUTBoundaryPolicy?
         }
         try request.validate()
         if let region {
@@ -36,7 +38,10 @@ public enum RenderIdentity {
             grainSeed: style.parameters.grain.isActive ? style.temporalPolicy.grain.seed(request.seed, frameIndex: request.frameIndex) : nil,
             noiseSeed: style.parameters.noise.isActive ? style.temporalPolicy.noise.seed(request.seed, frameIndex: request.frameIndex) : nil,
             styleLUT: resources.lut?.sha256, correctionLUT: resources.correctionLUT?.sha256,
-            correction: try correction?.effectDigest())
+            correction: try correction?.effectDigest(),
+            dynamicRange: request.dynamicRange == .sdr ? nil : request.dynamicRange,
+            styleLUTBoundary: resources.lut.flatMap { $0.boundaryPolicy == .automatic ? nil : $0.boundaryPolicy },
+            correctionLUTBoundary: resources.correctionLUT.flatMap { $0.boundaryPolicy == .automatic ? nil : $0.boundaryPolicy })
         return Digest.data(try JSON.encode(settings))
     }
 }
