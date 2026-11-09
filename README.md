@@ -1,6 +1,8 @@
 # Lumera
 
-Lumera 是基于 Metal 的相机成片质感处理库，提供颜色变换、色调曲线、细节、柔化、暗角、光晕、数码噪点和胶片颗粒处理。风格参数、拍摄条件响应、设备校正与 LUT 资源分别管理。
+版本：**0.3.0**。产品版本、相机模型 schema 和固定风格 schema 分别管理。
+
+Lumera 是基于 Metal 的照片与视频成片引擎。它以相机模型描述目标外观，根据输入观测和拍摄条件计算参数，并执行颜色、色调曲线、细节、柔化、暗角、光晕、数码噪点和胶片颗粒处理。输入校正、目标模型、用户编辑和执行资源独立管理；模型可由配对样本拟合，也可手动制作。
 
 ## 环境要求
 
@@ -28,7 +30,7 @@ Lumera 是基于 Metal 的相机成片质感处理库，提供颜色变换、色
 https://github.com/SnowMango/Lumera.git
 ```
 
-`v0.2.2` 标签发布后，依赖规则选择 **Up to Next Major Version**，最低版本填写 `0.2.2`。添加到应用目标时，选择 `ImagingCore` 和 `ImageRendering` 产品；在代码中分别使用 `import ImagingCore` 和 `import ImageRendering`，无需 `import Lumera`。
+版本依赖使用 `0.3.0`，要求仓库存在对应的 `v0.3.0` 标签；标签发布前，可对包含 v0.3.0 实现的本地检出使用路径依赖 `.package(path: "../Lumera")`。添加到应用目标时，选择 `ImagingCore` 和 `ImageRendering`；使用照片/视频协调器时再添加 `ImagingRuntime`。各产品分别导入，没有名为 `Lumera` 的模块。
 
 如果宿主项目使用 `Package.swift`，在包的 `dependencies` 中声明仓库，并在目标的 `dependencies` 中添加产品：
 
@@ -43,7 +45,7 @@ let package = Package(
         .library(name: "MyCameraFeature", targets: ["MyCameraFeature"])
     ],
     dependencies: [
-        .package(url: "https://github.com/SnowMango/Lumera.git", from: "0.2.2")
+        .package(url: "https://github.com/SnowMango/Lumera.git", from: "0.3.0")
     ],
     targets: [
         .target(
@@ -59,7 +61,7 @@ let package = Package(
 
 ## 相机模型与自动成片
 
-开发分支新增 `CameraModel` schema 1；原 `Profile` schema 8 和固定风格入口保留。相机模型描述一个明确的机型、模式及设置组合，包含基础外观、条件响应、编辑权限和时间策略。人工制作模型、结构有效模型和经独立实拍验证的模型是不同状态；演示预设没有具体机型资格。
+`CameraModel` schema 1 是相机模型入口；`Profile` schema 8 提供固定风格及其条件响应接口。相机模型描述一个明确的机型、模式及设置组合，包含基础外观、条件响应、编辑权限和时间策略。人工制作模型、结构有效模型和经独立实拍验证的模型是不同状态；演示预设没有具体机型资格。
 
 | 层次 | 职责与边界 |
 | --- | --- |
@@ -68,7 +70,14 @@ let package = Package(
 | 像素执行：`ImageRendering` | 输入准备与独立校正、完整输入统计、预算和资源准备、唯一效果流水线、两档浮点存储及拥有型输出 |
 | 可选协调：`ImagingRuntime` | `PhotoProcessor` 串接照片阶段；`CameraSession` 管理视频顺序、背压、取消、重置及回放记录；不包含新的图像算法 |
 
-宿主负责采集、曝光/白平衡控制、显示、视频编码、文件存储和界面。运行应用只需链接 Core、Rendering，并可选择 Runtime；不会链接离线拟合器。HDR 显示/编码仍由宿主完成。
+宿主负责采集、曝光/白平衡控制、显示、视频编码、文件存储和界面。运行应用只需链接 Core、Rendering，并可选择 Runtime；不会链接离线拟合器。HDR 显示与编码由宿主完成。
+
+### 条件响应、时间适应与编辑
+
+- `ResponseProgram` 支持常量、单轴节点和双轴网格。条件轴可引用源拍摄条件、目标相机条件或声明的图像特征；响应目标包括色调曲线、颜色矩阵、LUT 权重及效果参数。
+- 边界策略明确选择夹持或拒绝。缺测策略可拒绝、使用常量或在限定时间内保持值；同一目标不能由多个响应程序重复拥有。
+- `AdaptationReducer` 按模型策略处理自动参数的时间变化，状态与会话绑定。噪点和颗粒的随机种子策略独立于自动参数适应。
+- `EditResolver` 根据模型声明的编辑权限合成输入曝光/白平衡、视觉偏移、参数覆盖、锁定和强度。拍摄与照片编辑可共用模型；临时编辑不写回模型定义。
 
 ### 输入、照片与视频
 
@@ -99,15 +108,15 @@ let edited = try await photos.render(result.snapshot, edits: userEdits,
 
 `ExecutionProfile` 的输出尺寸、内存预算和最多在途帧数由宿主明确提供。照片区域、分块和导出复用完整输入统计和自动决策；真正裁剪或更换拍摄输入时重新 `process`。从 Float16 预览切换到 Float32 导出会重新读取/显影快照持有的原始源，不能通过提升半精度纹理恢复丢失精度。源 CIImage/CVPixelBuffer 在快照存活期间必须保持不可变；外部 RAW 文件会重新校验字节摘要。重复导出和不同执行精度共用模型预算；更换预算须建立新任务。
 
-`CameraSession.enqueue(preparedInput, stamp:edits:)` 接收已准备好的完整输入。宿主保留采集序号和 PTS，丢帧不重新编号。会话内部按源顺序逐帧提交，自动适应先于用户编辑；`.wait` 有界等待，`.dropUnsubmitted` 只替换尚未提交的帧。过多同时等待的生产者明确报错，宿主应等待 admission 形成背压。输入准备、宿主采集队列和独立旧入口各自需要预算，模型预算不是整个进程 RSS 上限。
+`CameraSession.enqueue(preparedInput, stamp:edits:)` 接收已准备好的完整输入。宿主保留采集序号和 PTS，丢帧不重新编号。会话内部按源顺序逐帧提交，自动适应先于用户编辑；`.wait` 有界等待，`.dropUnsubmitted` 只替换尚未提交的帧。过多同时等待的生产者明确报错，宿主应等待 admission 形成背压。输入准备、宿主采集队列和独立固定风格入口各自需要预算，模型预算不是整个进程 RSS 上限。
 
 同帧模式等待本帧统计；声明的延迟模式使用同一个旧观测包，并按年龄、曝光/色温等事实变化整包校验。失效时进入模型声明的缺测策略，不能拼接旧特征和新元数据。当前完整统计和效果可共享命令缓冲区。延迟模式可能错过尚未发现的场景突变，宿主可通过 `reset(.reset(.sceneCut))` 明确通知。
 
-取消在真实提交边界前生效；已提交帧不会回滚数学历史。GPU 失败、seek 或源变化需要重置，旧代次完成回调不会覆盖新输出。自动回放使用 `DecisionRecord` 和 `DecisionReplay`；最终参数冻结使用 `FrameDecision`。会话记录是有界环，宿主应及时 `takeRecords()` 并检查 `discardedRecordCount`；提交记录不等同于成功成片。解锁同时改变强度、非零视觉偏移或同目标 override 目前明确不支持，需分开提交；没有默默近似该组合。
+取消在真实提交边界前生效；已提交帧不会回滚数学历史。GPU 失败、seek 或源变化需要重置，旧代次完成回调不会覆盖新输出。自动回放使用 `DecisionRecord` 和 `DecisionReplay`；最终参数冻结使用 `FrameDecision`。会话记录是有界环，宿主应及时 `takeRecords()` 并检查 `discardedRecordCount`；提交记录不等同于成功成片。解锁与强度变化、非零视觉偏移或同目标 override 不能在同一请求中提交；此类组合返回错误，调用方需分开提交。
 
 ### 制作、发布与证据
 
-C1 项目按场景/序列分离 train、tune 和 acceptance，保存文件字节摘要、配对、对齐、排除区域、来源配方和实际条件。输入校准只对独立参考拟合；目标拟合固定曝光/WB，先生成矩阵与单调曲线，再由调参集决定是否需要残差 LUT。已有 LUT 始终前向参与，不求逆。合成数据的低误差只验证实现，不能授予真实机型资格。
+`CalibrationProject` 按场景/序列分离 train、tune 和 acceptance，保存文件字节摘要、配对、对齐、排除区域、来源配方和实际条件。输入校准只对独立参考拟合；目标拟合固定曝光/WB，先生成矩阵与单调曲线，再由调参集决定是否需要残差 LUT。已有 LUT 始终前向参与，不求逆。合成数据的低误差只验证实现，不能授予真实机型资格。
 
 `ModelBuilder` 是唯一发布构建器；包包含模型 JSON、资源内容、输入配方/校正和身份清单，不包含源照片。制作者通过显式基础外观或响应锚点修订复用 `EditResolver` 的视觉映射，记录幅度、理由和父包摘要；用户 session edits 不自动写回发布包。每次修改都产生新身份并重新验证。
 
@@ -125,13 +134,45 @@ ccdlab camera-model replay --model fitted.json --records decisions.json --output
 
 `--condition-design` 对应 `ConditionFitDesign`，显式列出候选条件轴、受控条件和源/目标条件配对；当前自动拟合最多两条 source/target 元数据条件轴，要求足够的独立样本和受控变量；特征驱动响应可手工定义，尚未纳入自动拟合。条件拟合不读取 acceptance 像素。时间拟合通过 `TemporalResponseFitter` API 接收带实际时间戳、采集延迟及不确定度的序列，CLI 回放本身不执行时间拟合。已有文件须显式 `--force`，输入文件不能作为输出覆盖。
 
-Float16 是默认存储格式，着色器计算仍使用 Float32；可显式选择 Float32 存储。合成 HDR 颜色测试测得两者最大通道差约 0.00675（扩展 sRGB 编码输出约 4.24），超过该测试原定质量参考；独立舍入分析能解释误差，但不代表无损或真实相机质量达标。高光精度要求严格的交付应单独验收两档精度。
+Float16 是默认存储格式，着色器计算使用 Float32；调用方可显式选择 Float32 存储。半精度存储会引入输入及中间阶段的舍入误差，不能保证与 Float32 位级一致。高光精度要求严格的交付需要分别评估两档精度。
 
 `DeliverySpecification` 明确设备/系统、输入路径、照片或视频规格、帧率、动态范围、精度、延迟、持续时长、内存和丢帧门槛。`AcceptanceRun` 检查宿主提供的分阶段计时、持续吞吐、端到端延迟、内存与温升记录。当前没有实拍目标包或 iPhone 15 交付性能结论；桌面精度/回归测试不能代替这些验收。
 
-本次不包含 LUT 逆变换、光谱/胶片化学模拟、镜头物理模拟、新增空间/时域降噪、语义识别、局部色调映射、跨风格渐变、HDR 标定或新的高光/色域算法。Glow 仍是唯一 Bloom 类模块。已有 EDR 支持与 SDR 自动拟合保持各自边界。
+### 能力范围
+
+运行时支持 SDR 和 EDR 像素处理；离线外观拟合与参考验证使用 SDR。高光光晕由 `Glow` 提供。引擎不提供 LUT 逆变换、光谱或胶片化学模拟、镜头物理模拟、独立空间或时域降噪、语义识别、局部色调映射、跨风格渐变及 HDR 标定。HDR 显示适配、输出色域映射和 PQ/HLG 编码由宿主负责。
 
 ## 数据模型
+
+### 相机模型
+
+| 类型 | 职责 |
+| --- | --- |
+| `CameraModel` | 目标身份、基础外观、观测需求、条件响应、时间适应、编辑权限及适用范围 |
+| `CompiledCameraModel` | 经校验、编译的相机模型与响应程序 |
+| `SourceDescriptor`、`InputRecipe` | 输入来源与实际解码/重建配方 |
+| `InputCalibration` | 与输入身份、配方和参考呈现绑定的独立校正 |
+| `FrameObservations` | 同一观测包中的拍摄条件、图像特征及来源信息 |
+| `EditRequest`、`ResolvedControls` | 用户编辑请求及完成自动适应与编辑合成后的参数 |
+| `ExecutionProfile` | 输出尺寸、精度、统计延迟和资源预算 |
+| `CameraModelPackage` | 离线构建的模型、资源、输入配方/校正及身份清单 |
+
+原生模型通过 `CameraModelCodec` 编解码。模型 schema、参数语义与响应语义当前均为 1；文件中的资源描述与实际资源内容分别校验。通过 Swift 初始化并编码可生成完整默认声明：
+
+```swift
+import ImagingCore
+
+let model = CameraModel(identity: TargetIdentity(
+    id: "example-camera-mode", camera: "Example Camera", mode: "Standard"))
+let data = try CameraModelCodec.encode(model)
+let compiled = try CameraModelCompiler.compile(CameraModelCodec.decode(data))
+```
+
+初始化器生成的是基础外观定义，不具备特定相机的实拍验证资格。`CameraModelCodec` 接受不超过 16 MiB 的 JSON；完整资源包由 `ModelBuilder` 构建。目标身份与输入设备身份独立，模型编辑不会改变输入校正。
+
+### 固定风格与兼容接口
+
+`Profile` 保留独立的编译、求值与渲染路径。需要显式桥接时可调用 `LegacyProfileAdapter.adapt`；桥接模型保留 `legacyProfile` 语义，不等价于通过原生响应程序制作的相机模型。宿主可限制仅接受原生模型。
 
 | 类型 | 用途 |
 | --- | --- |
@@ -144,27 +185,27 @@ Float16 是默认存储格式，着色器计算仍使用 Float32；可显式选�
 | `CaptureConditions` | ISO、曝光时间、曝光补偿、色温与色调等拍摄条件 |
 | `RenderRequest` | 输入声明、整体尺寸策略、效果处理比例与随机序列设置 |
 
-`Profile.standard` 是中性起点。`StylePresets` 提供数码与胶片效果演示，不代表特定相机的标定结果。
+`Profile.standard` 提供基础配置。`StylePresets` 提供数码与胶片效果演示，不代表特定相机的标定结果。
 
 配置 JSON 不包含 LUT 样本数据。`DeviceCorrection` 和 `RenderRequest` 也不属于风格配置。配置及资源的选择、存储和关联由调用方管理。
 
 `ResolvedStyle.profileDigest` 标识来源配置的效果定义，`effectiveDigest` 标识按拍摄条件求值后的参数和时间策略。桌面报告的 `renderIdentity` 还包含算法修订、资源和渲染设置。成片缓存键应同时包含输入图像的摘要。
 
-### 配置文件格式
+### Profile 配置文件格式
 
-Lumera 0.2.2 使用 Profile JSON schema 8。根对象必填 `schemaVersion`、`id` 和 `name`。`parameters` 缺省时使用中性参数，`responses` 缺省时使用空数组。以下是最小的固定配置。
+Lumera 0.3.0 的固定风格接口使用 `Profile` JSON schema 8；此格式与 `CameraModel` schema 1 分别解码。根对象必填 `schemaVersion`、`id` 和 `name`。`parameters` 缺省时使用基础参数，`responses` 缺省时使用空数组。以下是最小的固定配置。
 
 ```json
 {
   "schemaVersion": 8,
-  "id": "neutral",
-  "name": "中性"
+  "id": "basic",
+  "name": "基础配置"
 }
 ```
 
 使用 `ProfileCodec.load(from:)` 从文件读取配置，或使用 `ProfileCodec.decode(_:)` 解码字节。`ProfileCodec.encode(_:)` 在输出中写入默认值。输入上限为 16 MiB，嵌套深度上限为 64 层。未知字段、重复键、`null` 和超出范围的参数会产生校验错误。
 
-### 从 schema 7 升级
+### Profile schema 7 升级
 
 在仓库根目录构建 `ccdlab`，然后对指定文件运行预检。预检将逐字段变更报告写入标准输出，源文件保持原样。
 
@@ -232,7 +273,7 @@ let styledTexture = try renderer.render(
 
 高层图像入口将已标记的 SDR 颜色转换为 sRGB，透明区域合成到黑色背景，范围归一化到整数像素。未标记颜色的 RGB CVPixelBuffer 假定为 sRGB。CIImage 则遵循 Core Image 工作空间语义（此处为扩展线性 sRGB）；从编码像素创建 CIImage 时应附上实际颜色空间，不能靠补充 metadata 改变像素解释。CIImage 输出使用浮点 RGBA 存储（SDR/EDR 均默认 Float16，显式指定 `.float32` 使用 Float32；无法证明半精度安全的组合报错，不自动提升精度），默认 SDR 的 CVPixelBuffer 输出使用 8 位 BGRA，因此不保证保持输入像素格式或位深。支持 BGRA/ARGB、RGBA half/float 及 8/10 位双平面 YCbCr 输入；YCbCr 必须提供可解析的颜色附件。非全帧 clean aperture、非方形像素、隔行和原始传感器缓冲区需要先由调用方适配。
 
-默认 `.sdr` 保留原有行为：在 iOS 18／macOS 15 及以上，已知 headroom 的 HDR 输入通过系统滤镜映射到 SDR；无法可靠判断的 HDR 输入会报错。超出 SDR 色域/范围的颜色在适配边界裁切。
+默认使用 `.sdr`：在 iOS 18／macOS 15 及以上，已知 headroom 的 HDR 输入通过系统滤镜映射到 SDR；无法可靠判断的 HDR 输入会报错。超出 SDR 色域/范围的颜色在适配边界裁切。
 
 #### EDR 输入与输出
 
@@ -247,13 +288,13 @@ let output = try await renderer.render(inputImage, style: style, options: option
 
 EDR 模式跳过输入的 SDR 色调映射与颜色裁切，输出编码 **extended sRGB**。`CIImage` 与 `CVPixelBuffer` 使用所选 RGBA 浮点精度，默认 Float16，可显式选择 Float32；EDR PixelBuffer 分别采用 64RGBAHalf / 128RGBAFloat，附件标记实际颜色空间与位深。高层 Float16 入口先通过有界 Float32 临时纹理与 GPU 归约测量完整输入范围，再检查各中间存储阶段；该测量有额外成本，不代表效果被静默升为 Float32。区域/分块共用完整源范围。裸纹理仅在无需处理且输入格式匹配时直接返回输入。该模式不生成 HDR 细节、不调整曝光，也不以当前屏幕 headroom 裁切成片。非有限输入或浮点范围以外的数据不属于支持范围。
 
-LUT 默认外推；色调曲线在 `0…1` 内保持原样，在两端以单位斜率延伸端点偏移，保留扩展高光的亮度差异。噪声和颗粒的亮度权重仍限制在曲线定义范围，最终 RGB 不裁切。柔化、暗角与光晕仍在线性域执行。现有 EV 行为保持不变。
+EDR 请求中，`.automatic` LUT 边界策略使用外推；原生模型资源按各自声明的 `outOfRange` 处理。色调曲线在 `0…1` 内保持原样，在两端以单位斜率延伸端点偏移，保留扩展高光的亮度差异。噪声和颗粒的亮度权重仍限制在曲线定义范围，最终 RGB 不裁切。柔化、暗角与光晕仍在线性域执行。曝光 EV 在线性颜色变换阶段生效。
 
 `renderRegion`、`renderTiled` 和动态纹理入口使用相同的 EDR 选项。RAW 入口在 EDR 模式下将 `extendedDynamicRangeAmount` 默认设为 `1`，调用方仍可通过 `configureRAW` 覆盖；实际高光恢复取决于系统解码器与源文件。
 
 输出内容 headroom 在风格处理后未知，不复制输入的亮度统计或 HDR mastering 元数据。显示端负责转换到需要的线性显示空间、启用 EDR 和适配屏幕；视频编码端负责转成目标 PQ/HLG/YCbCr 格式及生成相应元数据。本接口返回像素数据，不是 HDR 文件/视频编码器。
 
-`ImageAnalysis.MetalRenderer` 及离线标定流程仍是 SDR 契约，显式 EDR 请求会报错；应用的 EDR 处理使用 `LumeraRenderer` / `TextureEffectEncoder`。旧的序列化选项和请求没有 `dynamicRange` 字段时按 `.sdr` 解码。
+`ImageAnalysis.MetalRenderer` 及离线标定流程使用 SDR 契约，显式 EDR 请求会报错；应用的 EDR 处理使用 `LumeraRenderer` / `TextureEffectEncoder`。旧的序列化选项和请求没有 `dynamicRange` 字段时按 `.sdr` 解码。
 
 ### 局部与分块输出（CIImage）
 
@@ -292,7 +333,7 @@ let externallyDeveloped = try await renderer.render(
 )
 ```
 
-RAW／ProRAW 兼容性取决于系统解码器；不使用内嵌预览作为失败回退。输出是显影后的 CIImage，不是保留 RAW 可编辑能力的 DNG；需另外保存原始文件。`configureRAW` 为本次调用独占配置闭包，不要保留并并发修改 filter。曝光等显影修改不覆盖原始拍摄 EXIF。
+RAW／ProRAW 兼容性取决于系统解码器；不使用内嵌预览作为失败回退。输出是显影后的 CIImage，不是保留 RAW 可编辑能力的 DNG；需另外保存原始文件。`configureRAW` 为单次调用独占的配置闭包，不要保留并并发修改 filter。曝光等显影修改不覆盖原始拍摄 EXIF。
 
 ### 图像与拍摄元数据
 
@@ -306,7 +347,7 @@ CVPixelBuffer 使用两种传播模式的附件解析输入几何和方向，只
 
 需要按拍摄条件评估风格时，仍独立提供 `CaptureConditions`；metadata 保留不等于自动执行条件响应。未知拍摄条件保持为空。
 
-## 固定参数渲染
+## 固定风格参数渲染
 
 创建渲染器并准备风格后，可复用准备结果处理多帧。以下封装接收调用方创建的设备、输入纹理和 command buffer：
 
@@ -345,9 +386,11 @@ final class StyleRenderer {
 
 固定参数入口使用最终参数快照。若要将动态风格固定在某次拍摄条件下，调用 `try StyleEvaluator.freeze(profile, conditions: conditions)`，再准备返回的 `Profile`。若每帧都需要按 ISO、快门等条件改变效果，使用下面的动态帧入口。
 
-## 动态帧与条件响应
+## Profile 动态帧与条件响应
 
-初始化或切换风格时调用：
+本节适用于 `Profile` / `StyleEvaluator` 接口。相机模型的多轴响应、缺测策略及时间适应使用 `CameraModelCompiler`、`CameraModelEvaluator` 和 `AdaptationReducer`。
+
+初始化或切换固定风格时调用：
 
 1. `StyleEvaluator.compile(profile)` 校验并编译定义。
 2. `encoder.prepare(definition, lut: lut)` 准备静态 GPU 资源。
@@ -466,9 +509,9 @@ LUT 的输入和输出约定均为编码 sRGB。`LUTAsset` 独立保存样本与
 - `.clamp`：始终将查表坐标限制在 `0…1`，即使输出为 EDR。
 - `.extrapolate`：在编码 sRGB 中延伸最近边界网格单元的三线性函数；面、边与角均使用这条规则。输出可以为负或大于 `1`，最终是否裁切由渲染动态范围决定。
 
-外推并非原 LUT 作者定义的 HDR 效果，也不保证等同于 Apple 的外推算法；边界平坦的 LUT 仍可能输出平坦高光，多通道外推也可能放大边界变化。它不是 shaper，本版不支持 shaper 或扩展域 cube 导入。普通 LUT 样本和文件格式仍为原有 `0…1` 约定。
+外推并非原 LUT 作者定义的 HDR 效果，也不保证等同于 Apple 的外推算法；边界平坦的 LUT 仍可能输出平坦高光，多通道外推也可能放大边界变化。它不是 shaper，本版不支持 shaper 或扩展域 cube 导入。普通 LUT 样本和文件格式使用 `0…1` 约定。
 
-非恒等 LUT 外推（包括 SDR 输出请求）目前拒绝 Float16；调用方须显式选择 Float32。恒等外推与显式 clamp LUT 仍经过逐阶段范围检查。修改越界策略后重新准备资源。源文件/样本摘要保持不变，渲染身份与准备缓存另行区分策略；SDR 默认身份不因新增可选设置而改变。风格 LUT 与设备校正 LUT 均可独立选择策略。
+非恒等 LUT 外推（包括 SDR 输出请求）目前拒绝 Float16；调用方须显式选择 Float32。恒等外推与显式 clamp LUT 仍经过逐阶段范围检查。修改越界策略后重新准备资源。源文件/样本摘要保持不变，渲染身份与准备缓存另行区分策略；风格 LUT 与设备校正 LUT 均可独立选择策略。
 
 LUT 由调用方加载和管理。需要记录外部资源关联时，分别声明风格 LUT、设备校正与校正 LUT 的 `ResourceReferences`，并用 `RenderResources.validate(against:correction:)` 核对实际资源。
 
@@ -553,9 +596,11 @@ func makePhotoRequest(input: InputDescriptor) -> RenderRequest {
 
 ## GPU 资源生命周期
 
+裸纹理编码入口与拥有型图像输出采用不同的生命周期契约。以下 command buffer 约束适用于 `TextureEffectEncoder`；`RenderedFrame` 持有其输出存储，可在对象存活期间使用。
+
 - 输入纹理、准备后的风格、校正资源和 command buffer 必须属于同一 Metal 设备。
 - command buffer 必须尚未 enqueue/commit，且 `retainedReferences = true`。
-- 输出可能直接复用输入纹理，也可能使用引擎临时存储。应在同一 command buffer 中消费输出；需要跨帧保留时，将其复制到调用方拥有的纹理。
+- 裸纹理输出可能直接复用输入纹理，也可能使用引擎临时存储。应在同一 command buffer 中消费输出；需要跨帧保留时，将其复制到调用方拥有的纹理。
 - 空闲 scratch 缓存最多保留两个 arena，合计不超过 256 MiB。该值不包括在途资源及调用方持有的准备资源，不是进程内存上限。
 - `releaseCaches()` 释放空闲缓存，并阻止释放前的在途 arena 在完成后重新进入缓存；不提前释放正在执行的资源。
 - SDR/EDR 默认使用 Float16 中间纹理；无法证明安全时明确报错。可在初始化时指定 `RenderingPrecision.float32`，不自动切换。不同精度路径不保证位级一致。

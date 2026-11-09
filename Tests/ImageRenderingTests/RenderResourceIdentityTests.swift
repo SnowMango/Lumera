@@ -17,13 +17,20 @@ final class RenderResourceIdentityTests: XCTestCase {
         XCTAssertThrowsError(try RenderResourceIdentity(resources: .init(lut: changed)))
     }
     func testLegacyRenderIdentityEncodingIsPreserved() throws {
+        // Historical encoding fixtures pin their renderer revision. Product releases
+        // must invalidate current cache identities without rewriting these fixtures.
+        let revision = "lumera-renderer-0.2.2"
         let style = try ResolvedStyle(profile: .standard)
         var request = RenderRequest(input: InputDescriptor(width: 17, height: 13))
         var lut = IndependentLUTTests.asset(0.5)
-        XCTAssertEqual("ab3e7d3e053d483a471de8cdbeb1ab1de6ce2a25c90175d59376db331f78fe57", try RenderIdentity.make(style: style, request: request, precision: .float32))
+        let current = try RenderIdentity.make(style: style, request: request, precision: .float32)
+        let historical = try RenderIdentity.make(style: style, request: request, precision: .float32, rendererRevision: revision)
+        XCTAssertNotEqual(current, historical)
+        XCTAssertEqual(current, try RenderIdentity.make(style: style, request: request, precision: .float32, rendererRevision: LumeraVersion.rendererRevision))
+        XCTAssertEqual("ab3e7d3e053d483a471de8cdbeb1ab1de6ce2a25c90175d59376db331f78fe57", historical)
         lut.boundaryPolicy = .extrapolate
-        XCTAssertEqual("2ae9cf1f830b0cda579fcf28adcfadbf1b4726456e153ebe98d65fba7009b1d1", try RenderIdentity.make(style: style, resources: .init(lut: lut), request: request, precision: .float32))
+        XCTAssertEqual("2ae9cf1f830b0cda579fcf28adcfadbf1b4726456e153ebe98d65fba7009b1d1", try RenderIdentity.make(style: style, resources: .init(lut: lut), request: request, precision: .float32, rendererRevision: revision))
         request.dynamicRange = .edr
-        XCTAssertEqual("ee5395ee68758692aab63e110176039036068782586b3a4a70fdc909647eae4f", try RenderIdentity.make(style: style, resources: .init(lut: lut), request: request, precision: .float32))
+        XCTAssertEqual("ee5395ee68758692aab63e110176039036068782586b3a4a70fdc909647eae4f", try RenderIdentity.make(style: style, resources: .init(lut: lut), request: request, precision: .float32, rendererRevision: revision))
     }
 }
