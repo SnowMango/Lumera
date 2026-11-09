@@ -159,7 +159,7 @@ private extension DecodingError {
     }
 }
 
-private struct JSONStructureScanner {
+struct JSONStructureScanner {
     let bytes: [UInt8]
     var offset = 0
     var current: UInt8? { offset < bytes.count ? bytes[offset] : nil }

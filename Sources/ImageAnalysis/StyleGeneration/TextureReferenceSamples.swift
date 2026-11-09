@@ -77,7 +77,7 @@ extension TextureReferenceSamples {
                 frames.append(.init(fileDigest:Digest.data(data),step:step,actualConditions:c,width:side,height:side,patches:[.init(id:"flat",kind:.flat,mean:[mean,mean,mean],variance:[0.0008,0.0008,0.0008],clippedFraction:0,pixelCount:side*side)],sourceURL:url,pose:nil))
               }
             }
-            return .init(folder:folder,measurements:.init(frames:frames,resourceDigests:[:]),baseline:baseline)
+            return .init(folder:folder,measurements:.init(frames:frames,resourceDigests:try GenerationResources().validatedDigests()),baseline:baseline)
         } catch {try? FileManager.default.removeItem(at:folder);throw error}
     }
 }

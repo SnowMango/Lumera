@@ -1,11 +1,11 @@
 import Foundation
 import ImagingCore
 
-/// Shared by a prepared snapshot and its dynamic frames. Values returned by this
-/// cache are immutable and remain valid when another frame replaces a cache entry.
+/// 固定快照和动态帧共用的执行数据缓存。锁保护条目与计数，取出的不可变数据可跨条目替换使用。
 final class PreparedExecutionPlan: @unchecked Sendable {
     private let lock = NSLock()
     private let baseColor: (ColorResponse, PreparedColorTransform)
+    private var lastCurves: (StyleParameters, PreparedResponseCurves)?
     private var lastColor: (ColorResponse, PreparedColorTransform)?
     private var lastGrain: (size: Double, roughness: Double, value: PreparedGrain)?
     private var lastHalation: (radius: Double, value: PreparedHalation)?
@@ -21,6 +21,13 @@ final class PreparedExecutionPlan: @unchecked Sendable {
         if parameters.grain.isActive {
             _ = grain(for: parameters.grain)
         }
+    }
+
+    func curves(for parameters: StyleParameters) -> PreparedResponseCurves {
+        lock.lock(); defer { lock.unlock() }
+        if let cached = lastCurves, cached.0.tone.curve == parameters.tone.curve,
+           cached.0.noise.curve == parameters.noise.curve, cached.0.grain.luminanceCurve == parameters.grain.luminanceCurve { return cached.1 }
+        let value = PreparedResponseCurves(parameters); lastCurves = (parameters, value); return value
     }
 
     func color(for parameters: ColorResponse) throws -> PreparedColorTransform {

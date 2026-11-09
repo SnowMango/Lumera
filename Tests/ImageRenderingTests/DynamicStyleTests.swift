@@ -39,7 +39,6 @@ final class DynamicStyleTests:XCTestCase {
         XCTAssertNotEqual(first,last)
         XCTAssertEqual(h.encoder.staticResourceStatistics.lutParses,1)
         XCTAssertEqual(h.encoder.staticResourceStatistics.lutUploads,1)
-        print("Dynamic 300 frames: LUT parses/uploads=\(h.encoder.staticResourceStatistics), cache=\(h.encoder.cacheStatistics)")
         h.encoder.releaseCaches();XCTAssertEqual(h.encoder.cachedTextureBytes,0);XCTAssertEqual(h.encoder.cacheStatistics.kernelCount,0)
         var c=CaptureConditions();c.iso=6400
         let command=try XCTUnwrap(h.queue.makeCommandBuffer())

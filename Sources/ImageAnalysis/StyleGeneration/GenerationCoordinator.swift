@@ -5,6 +5,7 @@ public struct GenerationValidationFailure:LocalizedError,Sendable {
     public let report:GenerationValidationReport
     public var errorDescription:String? {"组合验证未通过，保留原风格。请查看各照片组的失败指标。"}
 }
+/// 协调原图测量、分阶段拟合和组合验证，返回带证据的制作建议。
 public enum GenerationCoordinator {
     public static let featureModules:Set<AlgorithmID>=[.toneColor,.detail,.texture,.glow]
     public static func requiredTargets(for modules:Set<AlgorithmID>)->Set<CaptureTarget> {
@@ -17,21 +18,33 @@ public enum GenerationCoordinator {
         modules.union([.independentLUT,.targetDetection,.captureQuality,.conditionResponse,.combinedValidation])
     }
     public static func generate(captures:CaptureSet,baseline:Profile,options:GenerationOptions,resources:GenerationResources,eligibility:GenerationEligibility,progress:@Sendable(GenerationProgress)->Void = {_ in})async throws->GenerationProposal {
+        var owned:GenerationExecutionContext?
+        defer{owned?.releaseCaches()}
+        return try await generate(captures:captures,baseline:baseline,options:options,resources:resources,eligibility:eligibility,makeContext:{
+            let context=try GenerationExecutionContext();owned=context;return context
+        },progress:progress)
+    }
+    /// 使用调用方提供的串行上下文完成生成与组合验证。
+    public static func generate(captures:CaptureSet,baseline:Profile,options:GenerationOptions,resources:GenerationResources,eligibility:GenerationEligibility,context:GenerationExecutionContext,progress:@Sendable(GenerationProgress)->Void = {_ in})async throws->GenerationProposal {
+        try await generate(captures:captures,baseline:baseline,options:options,resources:resources,eligibility:eligibility,makeContext:{context},progress:progress)
+    }
+    static func generate(captures:CaptureSet,baseline:Profile,options:GenerationOptions,resources:GenerationResources,eligibility:GenerationEligibility,makeContext:()throws->GenerationExecutionContext,progress:@Sendable(GenerationProgress)->Void = {_ in})async throws->GenerationProposal {
         try Task.checkCancellation()
         guard !options.modules.isEmpty,options.modules.isSubset(of:featureModules),requiredAlgorithms(for:options.modules).isSubset(of:eligibility.algorithms) else {throw LabError.invalid("当前选择未取得完整自检资格；实拍定位/质量待验证不能由合成结果代替")}
         try baseline.validate()
         guard baseline.responses.isEmpty else{throw LabError.invalid("自动生成需要无既有条件响应的起点；已有响应可继续在手动工作台调整")}
         guard try baseline.effectDigest()==options.baseline.effectDigest() else{throw LabError.invalid("生成起点已改变，请重新开始")}
-        let measurements=try GenerationPreparation.prepare(captures:captures,resources:resources,modules:options.modules,progress:progress)
+        _ = try resources.validatedDigests()
+        let context=try makeContext()
+        let measurements=try GenerationPreparation.prepare(captures:captures,resources:resources,modules:options.modules,context:context,progress:progress)
         var working=baseline,evidence=[AlgorithmCaseResult](),unresolved=[String](),validated=Set<AlgorithmID>()
-        // Staged fitting is explicit. Every resulting effect must be checked again
-        // together against the original, unmodified baseline before publication.
+        // 分阶段求解时暂时关闭待拟合效果。发布前对比原始基线重新验证所有组合效果。
         if options.modules.contains(.detail){working.parameters.detail.enabled=false;working.parameters.softening.enabled=false}
         if options.modules.contains(.glow){working.parameters.glow.enabled=false;working.parameters.halation.enabled=false}
         if options.modules.contains(.texture){working.parameters.noise.enabled=false;working.parameters.grain.enabled=false}
         if options.modules.contains(.toneColor) {
             progress(.init(stage:"生成明暗与颜色建议",completed:0))
-            let p=try ToneColorSolver.solve(measurements:measurements,baseline:working,options:options,resources:resources)
+            let p=try ToneColorSolver.solve(measurements:measurements,baseline:working,options:options,resources:resources,measurement:context.measurements)
             working=p.profile;evidence+=p.evidence;unresolved+=p.unresolved;validated.formUnion(p.validatedModules)
         }
         var endpoints=[GenerationProposal]()
@@ -40,13 +53,13 @@ public enum GenerationCoordinator {
             var stageOptions=options;stageOptions.conditionIndex=condition
             if options.modules.contains(.detail) {
                 current.parameters.detail.enabled=baseline.parameters.detail.enabled;current.parameters.softening.enabled=baseline.parameters.softening.enabled
-                let p=try DetailSolver.solve(measurements:measurements,baseline:current,options:stageOptions,resources:resources,progress:progress)
+                let p=try DetailSolver.solve(measurements:measurements,baseline:current,options:stageOptions,resources:resources,measurement:context.measurements,progress:progress)
                 current=p.profile;proof+=p.evidence;notes+=p.unresolved;modules.formUnion(p.validatedModules)
             }
             if options.modules.contains(.glow) {
                 if condition==0 {
                     current.parameters.glow.enabled=baseline.parameters.glow.enabled;current.parameters.halation.enabled=baseline.parameters.halation.enabled
-                    let p=try GlowSolver.solve(measurements:measurements,baseline:current,options:stageOptions,resources:resources,progress:progress)
+                    let p=try GlowSolver.solve(measurements:measurements,baseline:current,options:stageOptions,resources:resources,measurement:context.measurements,progress:progress)
                     current=p.profile;proof+=p.evidence;notes+=p.unresolved;modules.formUnion(p.validatedModules)
                 }else {
                     current.parameters.glow=endpoints[0].profile.parameters.glow;current.parameters.halation=endpoints[0].profile.parameters.halation
@@ -56,15 +69,15 @@ public enum GenerationCoordinator {
             }
             if options.modules.contains(.texture) {
                 current.parameters.noise.enabled=baseline.parameters.noise.enabled;current.parameters.grain.enabled=baseline.parameters.grain.enabled
-                let p=try TextureSolver.solve(measurements:measurements,baseline:current,options:stageOptions,resources:resources,progress:progress)
+                let p=try TextureSolver.solve(measurements:measurements,baseline:current,options:stageOptions,resources:resources,measurement:context.measurements,progress:progress)
                 current=p.profile;proof+=p.evidence;notes+=p.unresolved;modules.formUnion(p.validatedModules)
             }
             let iso=measurements.frames.first{$0.step.role == .input && $0.step.conditionIndex==condition}?.actualConditions.iso
-            endpoints.append(.init(profile:current,evidence:proof,unresolved:notes,resourceDigests:resources.digests,validatedModules:modules,sourceISO:iso))
+            endpoints.append(.init(profile:current,evidence:proof,unresolved:notes,resourceDigests:try resources.validatedDigests(),validatedModules:modules,sourceISO:iso))
         }
         progress(.init(stage:"生成拍摄条件响应",completed:0))
         var candidate=try ConditionResponseSolver.solve(proposals:endpoints,captures:captures,baseline:baseline)
-        let report=try CombinedValidation.run(proposal:candidate,baseline:baseline,measurements:measurements,resources:resources,progress:progress)
+        let report=try CombinedValidation.run(proposal:candidate,baseline:baseline,measurements:measurements,resources:resources,context:context,progress:progress)
         guard report.passed else {throw GenerationValidationFailure(report:report)}
         try Task.checkCancellation()
         candidate.validationPassed=true;candidate.evidence+=report.rows
@@ -73,12 +86,24 @@ public enum GenerationCoordinator {
         candidate.unresolved.append("仅已选择模块及已拍摄条件通过自动验证；保存前仍需摄影师观察独立实景照片并确认")
         return candidate
     }
-    /// Rechecking an edited/restored candidate never optimizes against held-out photos.
-    /// These are reused validation observations, not a new independent generalization trial.
+    /// 复核编辑或恢复的候选，不使用留出照片优化参数。报告基于原留出观测的复测。
     public static func revalidate(candidate:GenerationProposal,captures:CaptureSet,baseline:Profile,options:GenerationOptions,resources:GenerationResources,eligibility:GenerationEligibility,progress:@Sendable(GenerationProgress)->Void = {_ in})async throws->GenerationProposal {
-        guard !options.modules.isEmpty,options.modules.isSubset(of:featureModules),requiredAlgorithms(for:options.modules).isSubset(of:eligibility.algorithms),candidate.validatedModules.intersection(featureModules)==options.modules,resources.digests==candidate.resourceDigests else{throw LabError.invalid("候选、所选模块、资源或自检资格不匹配")}
-        let measurements=try GenerationPreparation.prepare(captures:captures,resources:resources,modules:options.modules,progress:progress)
-        let report=try CombinedValidation.run(proposal:candidate,baseline:baseline,measurements:measurements,resources:resources,progress:progress)
+        var owned:GenerationExecutionContext?
+        defer{owned?.releaseCaches()}
+        return try await revalidate(candidate:candidate,captures:captures,baseline:baseline,options:options,resources:resources,eligibility:eligibility,makeContext:{
+            let context=try GenerationExecutionContext();owned=context;return context
+        },progress:progress)
+    }
+    /// 使用调用方上下文重新测量编辑后的候选，复用原留出照片并更新组合验证证据。
+    public static func revalidate(candidate:GenerationProposal,captures:CaptureSet,baseline:Profile,options:GenerationOptions,resources:GenerationResources,eligibility:GenerationEligibility,context:GenerationExecutionContext,progress:@Sendable(GenerationProgress)->Void = {_ in})async throws->GenerationProposal {
+        try await revalidate(candidate:candidate,captures:captures,baseline:baseline,options:options,resources:resources,eligibility:eligibility,makeContext:{context},progress:progress)
+    }
+    static func revalidate(candidate:GenerationProposal,captures:CaptureSet,baseline:Profile,options:GenerationOptions,resources:GenerationResources,eligibility:GenerationEligibility,makeContext:()throws->GenerationExecutionContext,progress:@Sendable(GenerationProgress)->Void = {_ in})async throws->GenerationProposal {
+        guard !options.modules.isEmpty,options.modules.isSubset(of:featureModules),requiredAlgorithms(for:options.modules).isSubset(of:eligibility.algorithms),candidate.validatedModules.intersection(featureModules)==options.modules else{throw LabError.invalid("候选、所选模块、资源或自检资格不匹配")}
+        try resources.validateEvidence(candidate.resourceDigests)
+        let context=try makeContext()
+        let measurements=try GenerationPreparation.prepare(captures:captures,resources:resources,modules:options.modules,context:context,progress:progress)
+        let report=try CombinedValidation.run(proposal:candidate,baseline:baseline,measurements:measurements,resources:resources,context:context,progress:progress)
         guard report.passed else{throw GenerationValidationFailure(report:report)}
         try Task.checkCancellation()
         var result=candidate;result.validationPassed=true;result.evidence=report.rows

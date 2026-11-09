@@ -49,7 +49,6 @@ final class DeviceCorrectionDesktopTests:XCTestCase {
         values.withUnsafeMutableBytes{out.getBytes($0.baseAddress!,bytesPerRow:frame.width*8,from:MTLRegionMake2D(0,0,frame.width,frame.height),mipmapLevel:0)}
         let expected=try MetalRenderer().render(frame,style:style,correction:c,request:request).image
         let maximum=zip(values,expected.pixels).map{abs(Float($0)-$1)}.max()!
-        print("Device correction runtime/desktop max channel delta: \(maximum)")
         XCTAssertLessThan(maximum,0.006)
     }
 }

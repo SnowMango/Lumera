@@ -27,6 +27,10 @@ extension LumeraRenderer {
         try Task.checkCancellation()
         let source = try normalizedSource(image, metadata: metadata, orientation: orientation, dynamicRange: options.dynamicRange)
         let outputSpace = Self.colorSpace(for: options.dynamicRange)
+        // 分块渲染沿用完整输入的范围，以便所有瓦片使用一致的半精度校验。
+        let measuredBounds = imageInputFormat == .rgba16Float
+            ? try await measureInputRange(source.image, bounds: source.bounds, colorSpace: outputSpace, budget: budget)
+            : nil
         let planner = try TilePlanner(width: Int(source.bounds.width), height: Int(source.bounds.height),
                                       style: style.style.parameters, options: options, budget: budget,
                                       preparedGrain: style.style.parameters.grain.isActive ? style.executionPlan.grain(for: style.style.parameters.grain) : nil)
@@ -52,7 +56,8 @@ extension LumeraRenderer {
             context.render(source.image, to: input, commandBuffer: command, bounds: tile.sourceArea, colorSpace: outputSpace)
             let geometry = RenderGeometry(fullWidth: planner.fullWidth, fullHeight: planner.fullHeight,
                 area: tile.area, sourceWidth: planner.sourceWidth, sourceHeight: planner.sourceHeight, sourceArea: tile.sourceArea)
-            let request = options.makeRequest(input: .init(width: input.width, height: input.height))
+            var request = options.makeRequest(input: .init(width: input.width, height: input.height))
+            request.inputValueBounds = measuredBounds
             let output = try encoder.encodeRegion(input, style: style, correction: correction, request: request, geometry: geometry, workingSet:workingSet, commandBuffer: command)
             let bpp = output.pixelFormat == .rgba32Float ? 16 : 8
             let copyWidth = Int(tile.core.width), copyHeight = Int(tile.core.height)

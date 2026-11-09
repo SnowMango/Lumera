@@ -62,9 +62,14 @@ final class OpticalResolutionTests:XCTestCase {
             XCTAssertEqual(expected.pixels,fresh.pixels,"Stale cached optical resolution")
             let command=try XCTUnwrap(queue.makeCommandBuffer())
             let output=try encoder.encode(texture,style:prepared,request:request,commandBuffer:command)
+            let ownedDescriptor=MTLTextureDescriptor.texture2DDescriptor(pixelFormat:output.pixelFormat,width:output.width,height:output.height,mipmapped:false)
+            ownedDescriptor.storageMode = .shared
+            let owned=try XCTUnwrap(device.makeTexture(descriptor:ownedDescriptor))
+            let blit=try XCTUnwrap(command.makeBlitCommandEncoder());blit.copy(from:output,to:owned);blit.endEncoding()
+
             command.commit();command.waitUntilCompleted();XCTAssertNil(command.error)
             var values=[Float](repeating:0,count:frame.pixels.count)
-            values.withUnsafeMutableBytes{output.getBytes($0.baseAddress!,bytesPerRow:frame.width*16,from:MTLRegionMake2D(0,0,frame.width,frame.height),mipmapLevel:0)}
+            values.withUnsafeMutableBytes{owned.getBytes($0.baseAddress!,bytesPerRow:frame.width*16,from:MTLRegionMake2D(0,0,frame.width,frame.height),mipmapLevel:0)}
             XCTAssertEqual(output.width,frame.width);XCTAssertEqual(output.height,frame.height)
             XCTAssertLessThan(zip(values,expected.pixels).map{abs($0-$1)}.max()!,0.0001)
         }

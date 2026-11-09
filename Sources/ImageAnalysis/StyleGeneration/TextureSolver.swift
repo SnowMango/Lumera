@@ -1,10 +1,8 @@
 import Foundation
-import Metal
 import ImagingCore
 
 struct TextureEstimate {var lowSigma:Double,highSigma:Double,maximumError:Double}
-/// Adds only the observable random variance. Spatial/chroma shape stays fixed and
-/// must match independently; fixed paper texture is never converted into grain.
+/// 只估计可观测的随机方差增量，空间和色度形状固定并单独校验。固定纸纹不参与颗粒估计。
 public enum TextureSolver {
     static func estimate(groups:[TextureCondition],model:GenerationModel)throws->TextureEstimate {
         guard groups.count==3,Set(groups.map(\.exposureEV))==Set([-1.0,0,1]) else {throw LabError.measurement("随机质感需要三档平场曝光，不能用重复帧替代未见曝光")}
@@ -62,8 +60,16 @@ public enum TextureSolver {
         return p
     }
     public static func solve(measurements:MeasurementBundle,baseline:Profile,options:GenerationOptions,resources:GenerationResources,progress:@Sendable(GenerationProgress)->Void = {_ in}) throws ->GenerationProposal {
+        try solve(measurements:measurements,baseline:baseline,options:options,resources:resources,makeContext:{try GenerationExecutionContext()},progress:progress)
+    }
+    static func solve(measurements:MeasurementBundle,baseline:Profile,options:GenerationOptions,resources:GenerationResources,makeContext:@escaping ()throws->GenerationExecutionContext,progress:@Sendable(GenerationProgress)->Void = {_ in}) throws ->GenerationProposal {
+        let measurement=DefaultGenerationMeasurements(makeContext:makeContext);defer{measurement.releaseCaches()}
+        return try solve(measurements:measurements,baseline:baseline,options:options,resources:resources,measurement:measurement,progress:progress)
+    }
+    static func solve(measurements:MeasurementBundle,baseline:Profile,options:GenerationOptions,resources:GenerationResources,measurement:any TextureMeasuring,progress:@Sendable(GenerationProgress)->Void = {_ in}) throws ->GenerationProposal {
         try baseline.validate()
-        guard options.modules.contains(.texture),[0,2].contains(options.conditionIndex),baseline.responses.isEmpty,resources.digests==measurements.resourceDigests else {throw LabError.measurement("随机质感需要固定基线、匹配资源与低/高训练条件")}
+        try resources.validateEvidence(measurements.resourceDigests)
+        guard options.modules.contains(.texture),[0,2].contains(options.conditionIndex),baseline.responses.isEmpty else {throw LabError.measurement("随机质感需要固定基线、匹配资源与低/高训练条件")}
         let frames=measurements.frames.filter{$0.step.target == .flat && $0.step.conditionIndex==options.conditionIndex}
         guard frames.count==24,Set(frames.map{$0.step.id}).count==24,Set(frames.map(\.fileDigest)).count==24 else {throw LabError.measurement("需要两设备各三档曝光，每档四张不同的平场重复照片")}
         for f in frames {
@@ -75,19 +81,12 @@ public enum TextureSolver {
             let set=frames.filter{$0.step.role==role},isos=set.compactMap{$0.actualConditions.iso}
             guard let first=isos.first,isos.allSatisfy({abs(log2($0/first))<0.08}),Set(set.map{"\($0.width)x\($0.height)"}).count==1 else {throw LabError.measurement("同一条件的重复帧 ISO 或像素尺寸不一致")}
         }
-        guard let device=MTLCreateSystemDefaultDevice() else {throw LabError.noMetal}
-        let temporal=try GPUTemporalTexture(device:device),renderer=try MetalRenderer(cacheLimitBytes:128*1024*1024),images=GenerationImages();defer{renderer.releaseCaches()}
         var base=baseline;base.parameters.noise.enabled=false;base.parameters.grain.enabled=false
         var unit=configured(base,model:options.model,low:0.02,high:0.02)
         // Per-capture seed variation is explicit; no change to runtime policy required.
         unit.temporalPolicy.noise = .fixed;unit.temporalPolicy.grain = .fixed
         func measure(_ files:[FrameMeasurements],_ profile:Profile,_ useResources:Bool,seedOffset:Int=0)throws->TemporalTexture {
-            var crops=[MTLTexture]()
-            for (i,f) in files.enumerated() {try autoreleasepool {
-                let image=try images.load(f)
-                crops.append(try renderer.renderGenerationCrop(image,style:ResolvedStyle(profile:profile),resources:useResources ? resources.rendering:.init(),seed:UInt32(1729+i*997+seedOffset)))
-            }}
-            return try temporal.measure(crops)
+            try measurement.texture(frames:files,styles:files.map{_ in try ResolvedStyle(profile:profile)},resources:useResources ? resources.rendering:.init(),seeds:files.indices.map{UInt32(1729+$0*997+seedOffset)})
         }
         var groups=[TextureCondition]()
         for ev in [-1.0,0,1] {
@@ -120,6 +119,6 @@ public enum TextureSolver {
         }
         let limit=GenerationLimits.cases(for:.texture).first{$0.caseID=="variance"}!
         let fixedShape = options.model == .film ? "颗粒 size、roughness、chroma" : "数码噪点空间尺度、色度比例及相关性"
-        return .init(profile:profile,evidence:[.init(algorithm:.texture,caseID:"held-out-repeats-and-exposure",status:.passed,measured:actualWorst,limit:limit,detail:"独立重复对与留出的中间曝光通过逐帧 GPU 验证。单位响应在照片的实际输出尺寸上测量；固定空间纹理不计入新增方差")],unresolved:["只拟合新增随机强度与线性亮度响应。平场提供的方差、频带和色差用于检验既定形状；\(fixedShape) 保留基线值。源噪声超过目标时拒绝拟合。"],resourceDigests:resources.digests,validatedModules:[.texture],sourceISO:frames.first{$0.step.role == .input}?.actualConditions.iso)
+        return .init(profile:profile,evidence:[.init(algorithm:.texture,caseID:"held-out-repeats-and-exposure",status:.passed,measured:actualWorst,limit:limit,detail:"独立重复对与留出的中间曝光通过逐帧 GPU 验证。单位响应在照片的实际输出尺寸上测量；固定空间纹理不计入新增方差")],unresolved:["只拟合新增随机强度与线性亮度响应。平场提供的方差、频带和色差用于检验既定形状；\(fixedShape) 保留基线值。源噪声超过目标时拒绝拟合。"],resourceDigests:try resources.validatedDigests(),validatedModules:[.texture],sourceISO:frames.first{$0.step.role == .input}?.actualConditions.iso)
     }
 }

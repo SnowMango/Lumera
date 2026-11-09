@@ -375,3 +375,92 @@ kernel void opticalReduceRegion(texture2d<float,access::read> src[[texture(0)]],
     if(outside(id,dst)) return;
     dst.write(float4(areaReduced(src,id+uint2(g[6],g[7]),float2(g[2],g[3]),float2(g[8],g[9]),int2(g[0],g[1]),p),1),id);
 }
+
+// 恒等帧也可能需要转换纹理存储精度，颜色编码沿用源像素。
+kernel void copyPixels(texture2d<float,access::read> src[[texture(0)]],texture2d<float,access::write> dst[[texture(1)]],uint2 id[[thread_position_in_grid]]) {
+    if(outside(id,dst)) return;
+    dst.write(src.read(id),id);
+}
+// 逐像素检查各通道的有限性，非有限标志与 RGB 极值分别记录。
+kernel void inputRangeTiles(texture2d<float,access::read> src[[texture(0)]],device float4* result[[buffer(0)]],uint2 tile[[thread_position_in_grid]]) {
+    uint nx=(src.get_width()+15)/16, ny=(src.get_height()+15)/16;
+    if(tile.x>=nx || tile.y>=ny) return;
+    float lo=INFINITY, hi=-INFINITY; bool invalid=false;
+    for(uint y=tile.y*16;y<min((tile.y+1)*16,src.get_height());++y) {
+        for(uint x=tile.x*16;x<min((tile.x+1)*16,src.get_width());++x) {
+            float4 v=src.read(uint2(x,y));
+            invalid=invalid || !all(isfinite(v));
+            lo=min(lo,min(v.r,min(v.g,v.b))); hi=max(hi,max(v.r,max(v.g,v.b)));
+        }
+    }
+    result[tile.y*nx+tile.x]=float4(lo,hi,invalid ? 1.0f : 0.0f,0);
+}
+
+// linear-srgb-summary-v1 在线性光中覆盖整帧，每个像素按与采样格的重叠面积贡献。
+kernel void frameFeatureAreaV1(texture2d<float,access::read> input [[texture(0)]],
+ device float4* samples [[buffer(0)]], constant uint2& size [[buffer(1)]], uint2 id [[thread_position_in_grid]]) {
+ if(any(id>=size))return;
+ float2 scale=float2(input.get_width(),input.get_height())/float2(size);
+ float2 lo=float2(id)*scale, hi=float2(id+1)*scale;
+ float3 total=0; float invalid=0;
+ for(uint y=uint(floor(lo.y));y<min(uint(ceil(hi.y)),input.get_height());++y) {
+  float wy=max(0.0f,min(hi.y,float(y+1))-max(lo.y,float(y)));
+  for(uint x=uint(floor(lo.x));x<min(uint(ceil(hi.x)),input.get_width());++x) {
+   float wx=max(0.0f,min(hi.x,float(x+1))-max(lo.x,float(x)));
+   float3 c=decodeRGB(input.read(uint2(x,y)).rgb);
+   if(!all(isfinite(c)))invalid=1;
+   total+=c*(wx*wy/(scale.x*scale.y));
+  }
+ }
+ samples[id.y*size.x+id.x]=float4(total,invalid);
+}
+// 每个线程最多归约 256 个样本。局部计数可由 Float32 精确表示，记录留在 GPU 私有缓冲区。
+kernel void frameFeatureSummaryV1(device const float4* samples [[buffer(0)]], device float* partials [[buffer(1)]],
+ constant uint& count [[buffer(2)]], constant float2* requests [[buffer(3)]], constant uint& featureCount [[buffer(4)]], uint id [[thread_position_in_grid]]) {
+ uint start=id*256;if(start>=count)return;
+ uint bins[256]; for(uint b=0;b<256;++b)bins[b]=0;
+ uint thresholds[64]; for(uint f=0;f<featureCount;++f)thresholds[f]=0;
+ float3 total=0, correction=0; uint below=0,above=0; float invalid=0;
+ for(uint i=start;i<min(start+256,count);++i) {
+  float4 sample=samples[i]; float y=luminance(sample.rgb);
+  if(sample.w!=0 || !all(isfinite(sample)) || !isfinite(y)){invalid=1;continue;}
+  float3 adjusted=sample.rgb-correction, next=total+adjusted;
+  correction=(next-total)-adjusted;total=next;
+  // 直方图将越界亮度归入端点区间，越界比例和阈值使用原始线性亮度。
+  bins[min(255u,uint(clamp(y,0.0f,1.0f)*256))]++;
+  below+=y<0;above+=y>1;
+  for(uint f=0;f<featureCount;++f) {
+   thresholds[f]+=(requests[f].x==1 && y<=requests[f].y)||(requests[f].x==2 && y>=requests[f].y);
+  }
+ }
+ uint offset=id*(262+featureCount);
+ for(uint b=0;b<256;++b)partials[offset+b]=float(bins[b]);
+ partials[offset+256]=total.r;partials[offset+257]=total.g;partials[offset+258]=total.b;
+ partials[offset+259]=float(below);partials[offset+260]=float(above);partials[offset+261]=invalid;
+ for(uint f=0;f<featureCount;++f)partials[offset+262+f]=float(thresholds[f]);
+}
+// 每个输出分量由一个线程合并最多 256 份局部结果，两级归约使用禁用快速数学的补偿求和。
+kernel void frameFeatureCombineV1(device const float* partials [[buffer(0)]], device float* output [[buffer(1)]],
+ constant uint& count [[buffer(2)]], constant uint& partitions [[buffer(3)]], constant uint& featureCount [[buffer(4)]], uint id [[thread_position_in_grid]]) {
+ uint stride=262+featureCount;if(id>=stride)return;
+ float total=0,correction=0;
+ for(uint p=0;p<partitions;++p) {
+  float adjusted=partials[p*stride+id]-correction,next=total+adjusted;
+  correction=(next-total)-adjusted;total=next;
+ }
+ output[id]=(id>=256 && id!=261)?total/float(count):total;
+}
+
+// 各常驻 LUT 采样同一编码输入，在一个阶段用 Float32 累加并按权重和归一化。
+kernel void weightedLUTMap(texture2d<float,access::read> src[[texture(0)]],texture2d<float,access::write> dst[[texture(1)]],
+ texture3d<float,access::read> a[[texture(2)]],texture3d<float,access::read> b[[texture(3)]],
+ texture3d<float,access::read> c[[texture(4)]],texture3d<float,access::read> d[[texture(5)]],
+ constant float* p[[buffer(0)]],uint2 id[[thread_position_in_grid]]) {
+ if(outside(id,dst))return;
+ float3 input=src.read(id).rgb, result=0;bool extrapolate=p[4]>0;
+ if(p[0]>0)result+=p[0]*sampleCube(input,a,extrapolate);
+ if(p[1]>0)result+=p[1]*sampleCube(input,b,extrapolate);
+ if(p[2]>0)result+=p[2]*sampleCube(input,c,extrapolate);
+ if(p[3]>0)result+=p[3]*sampleCube(input,d,extrapolate);
+ dst.write(float4(result/(p[0]+p[1]+p[2]+p[3]),1),id);
+}

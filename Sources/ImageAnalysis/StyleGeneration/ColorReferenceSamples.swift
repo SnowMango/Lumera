@@ -30,6 +30,6 @@ enum ColorReferenceSamples {
             var conditions=CaptureConditions();conditions.iso=s.expectedISO;conditions.exposureDurationSeconds=s.expectedExposureSeconds
             return .init(fileDigest:"analytical-"+s.id,step:s,actualConditions:conditions,width:2000,height:2800,patches:patches,pose:nil)
         }
-        return .init(frames:frames,resourceDigests:[:])
+        return .init(frames:frames,resourceDigests:try GenerationResources().validatedDigests())
     }
 }

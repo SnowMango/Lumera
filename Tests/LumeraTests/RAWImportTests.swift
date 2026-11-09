@@ -28,7 +28,7 @@ final class RAWImportTests:XCTestCase {
     }
     func testRealRAWDevelopRenderAndExport() throws {
         guard let path=ProcessInfo.processInfo.environment["LUMERA_RAW_TEST_FILE"] else {throw XCTSkip("Set LUMERA_RAW_TEST_FILE to a local RAW photo")}
-        let source=URL(fileURLWithPath:path),started=Date()
+        let source=URL(fileURLWithPath:path)
         let image=try ImageCodec.load(source)
         try image.validateStorage()
         XCTAssertEqual(image.provenance["rawDecoder"],"CIRAWFilter")
@@ -49,6 +49,5 @@ final class RAWImportTests:XCTestCase {
         let reloaded=try ImageCodec.load(output)
         XCTAssertEqual(reloaded.width,rendered.image.width)
         XCTAssertLessThan(zip(reloaded.pixels,rendered.image.pixels).map{abs($0-$1)}.max()!,0.0001)
-        print("RAW roundtrip \(source.lastPathComponent): \(image.width)x\(image.height), decoder \(image.provenance["rawDecoderVersion"] ?? "?"), total \(Date().timeIntervalSince(started)) s")
     }
 }

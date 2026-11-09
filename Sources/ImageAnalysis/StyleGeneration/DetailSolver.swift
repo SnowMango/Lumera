@@ -1,17 +1,23 @@
 import Foundation
 import ImagingCore
 
-/// Joint, restricted two-parameter model. Spatial radii are fixed by the baseline;
-/// broad-band gain and bounded edge sharpening are not independently released to cancel softness.
+/// 联合拟合受限的两参数细节模型，空间半径保持基线值。限制宽带增益和边缘锐化的自由度，避免掩盖柔化效果。
 public enum DetailSolver {
     public static func solve(measurements:MeasurementBundle,baseline:Profile,options:GenerationOptions,resources:GenerationResources,progress:@Sendable(GenerationProgress)->Void = {_ in}) throws ->GenerationProposal {
+        try solve(measurements:measurements,baseline:baseline,options:options,resources:resources,makeContext:{try GenerationExecutionContext()},progress:progress)
+    }
+    static func solve(measurements:MeasurementBundle,baseline:Profile,options:GenerationOptions,resources:GenerationResources,makeContext:@escaping ()throws->GenerationExecutionContext,progress:@Sendable(GenerationProgress)->Void = {_ in}) throws ->GenerationProposal {
+        let measurement=DefaultGenerationMeasurements(makeContext:makeContext);defer{measurement.releaseCaches()}
+        return try solve(measurements:measurements,baseline:baseline,options:options,resources:resources,measurement:measurement,progress:progress)
+    }
+    static func solve(measurements:MeasurementBundle,baseline:Profile,options:GenerationOptions,resources:GenerationResources,measurement:any DetailMeasuring,progress:@Sendable(GenerationProgress)->Void = {_ in}) throws ->GenerationProposal {
         try baseline.validate();try Task.checkCancellation()
-        guard options.modules.contains(.detail),resources.digests==measurements.resourceDigests,
+        try resources.validateEvidence(measurements.resourceDigests)
+        guard options.modules.contains(.detail),
               !baseline.parameters.noise.isActive,!baseline.parameters.grain.isActive,!baseline.parameters.glow.isActive,!baseline.parameters.halation.isActive,!baseline.parameters.vignette.isActive,
               baseline.parameters.detail.midGain==1,baseline.parameters.detail.sharpenAmount==0,baseline.responses.isEmpty else {throw LabError.measurement("联合细节模型固定中频/额外锐化与空间尺度；当前基线超出已验收范围")}
         let pairs=try ModuleCapturePair.composite(measurements,condition:options.conditionIndex)
         guard pairs.allSatisfy({min($0.input.width,$0.input.height)>=2048 && min($0.target.width,$0.target.height)>=2048}) else {throw LabError.measurement("联合细节需要短边至少 2048 像素的照片；低分辨率下柔化与细节响应可能无法分开")}
-        let renderer=try MetalRenderer(cacheLimitBytes:128*1024*1024),images=GenerationImages();defer{renderer.releaseCaches()}
         var evaluations=0,cache=[String:([Double],Double,[Double])]()
         let started=ProcessInfo.processInfo.systemUptime
         func analysisProfile(_ fine:Double,_ softness:Double)->Profile {
@@ -44,10 +50,9 @@ public enum DetailSolver {
             let key=pair.input.fileDigest+"/"+(try p.effectDigest())+"/"+Digest.data(try JSON.encode(pair.input.pose))
             if let value=cache[key] {return value}
             return try autoreleasepool {
-                let image=try images.load(pair.input),style=try ResolvedStyle(profile:p),request=RenderRequest(input:image.descriptor)
-                let edge=try renderer.renderFeatureStatistics(image,style:style,resources:resources.rendering,request:request,region:GenerationImages.region("edge",frame:pair.input),kind:.edge)
-                let pattern=try renderer.renderFeatureStatistics(image,style:style,resources:resources.rendering,request:request,region:GenerationImages.region("detail",frame:pair.input),kind:.texture)
-                guard let curve=edge.curves["edge"],let rms=pattern.metrics["rms"],let psd=pattern.curves["psd"] else {throw LabError.measurement("GPU 未返回联合细节指标")}
+                let observation=try measurement.detail(frame:pair.input,style:ResolvedStyle(profile:p),resources:resources.rendering)
+                let curve=observation.edge,rms=observation.detailRMS,psd=observation.psd
+                guard curve.count==128,psd.count==33,rms.isFinite,rms>=0,curve.allSatisfy(\.isFinite),psd.allSatisfy({$0.isFinite && $0>=0})else{throw LabError.measurement("候选细节指标无效")}
                 let value=(curve,rms,bands(psd));if cache.count>=160 {cache.removeAll(keepingCapacity:true)};cache[key]=value;return value
             }
         }
@@ -116,6 +121,6 @@ public enum DetailSolver {
             rows.append(.init(algorithm:.detail,caseID:pairs[i].input.step.pairKey,status:.passed,measured:error,limit:limit,detail:"斜边 RMSE \(error)，细节相对差 \(patternError)；未见 +1 EV 与重复帧"))
         }
         var result=baseline;result.parameters.detail.enabled=true;result.parameters.detail.fineGain=best.fine;result.parameters.softening.enabled=true;result.parameters.softening.amount=best.soft
-        return .init(profile:result,evidence:rows,unresolved:["联合建议仅调整细节强度与柔化强度；空间尺度固定。打印边缘限制、额外锐化及局部镜头变化不由此反演。"],resourceDigests:resources.digests,validatedModules:[.detail],sourceISO:pairs.first?.input.actualConditions.iso)
+        return .init(profile:result,evidence:rows,unresolved:["联合建议仅调整细节强度与柔化强度；空间尺度固定。打印边缘限制、额外锐化及局部镜头变化不由此反演。"],resourceDigests:try resources.validatedDigests(),validatedModules:[.detail],sourceISO:pairs.first?.input.actualConditions.iso)
     }
 }

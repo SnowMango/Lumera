@@ -24,9 +24,14 @@ final class DesktopRenderContractTests:XCTestCase {
         image.pixels.withUnsafeBytes{input.replace(region:MTLRegionMake2D(0,0,image.width,image.height),mipmapLevel:0,withBytes:$0.baseAddress!,bytesPerRow:image.width*16)}
         let command=try XCTUnwrap(queue.makeCommandBuffer()),done=DispatchSemaphore(value:0)
         let texture=try encoder.encode(input,style:encoder.prepare(style),request:request,commandBuffer:command)
+            let ownedDescriptor=MTLTextureDescriptor.texture2DDescriptor(pixelFormat:texture.pixelFormat,width:texture.width,height:texture.height,mipmapped:false)
+            ownedDescriptor.storageMode = .shared
+            let owned=try XCTUnwrap(d.makeTexture(descriptor:ownedDescriptor))
+            let blit=try XCTUnwrap(command.makeBlitCommandEncoder());blit.copy(from:texture,to:owned);blit.endEncoding()
+
         command.addCompletedHandler{_ in done.signal()};command.commit();done.wait();XCTAssertNil(command.error)
         var actual=[Float16](repeating:0,count:image.pixels.count)
-        actual.withUnsafeMutableBytes{texture.getBytes($0.baseAddress!,bytesPerRow:image.width*8,from:MTLRegionMake2D(0,0,image.width,image.height),mipmapLevel:0)}
+        actual.withUnsafeMutableBytes{owned.getBytes($0.baseAddress!,bytesPerRow:image.width*8,from:MTLRegionMake2D(0,0,image.width,image.height),mipmapLevel:0)}
         let expected=try MetalRenderer().render(image,style:style,request:request).image.pixels
         XCTAssertLessThan(zip(actual.map(Float.init),expected).map{abs($0-$1)}.max() ?? 1,0.006)
     }

@@ -1,8 +1,9 @@
 import Foundation
 import ImagingCore
 
-/// One decoded source at a time. Compact measurements may be cached; full photos are not accumulated.
-final class GenerationImages {
+/// 最多缓存一张解码原图。读取时核对测量记录中的尺寸和文件摘要。
+final class GenerationImages:GenerationImageLoading {
+    func releaseCaches(){cached=nil}
     private var cached:(URL,Date?,ImageFrame)?
     func load(_ frame:FrameMeasurements) throws ->ImageFrame {
         try Task.checkCancellation()

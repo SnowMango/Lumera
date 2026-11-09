@@ -22,7 +22,7 @@ final class RenderContractTests:XCTestCase {
         }
     }
     func testStandardIsIdentityAndPreparedStyleIsSnapshot() throws {
-        let h=try RenderHarness(),input=try h.texture(width:64,height:48)
+        let h=try RenderHarness(precision: .float32),input=try h.texture(width:64,height:48)
         var profile=Profile.standard
         let style=try h.encoder.prepare(ResolvedStyle(profile:profile))
         profile.parameters.vignette.enabled=true;profile.parameters.vignette.amountEV=2
@@ -46,7 +46,7 @@ final class RenderContractTests:XCTestCase {
         XCTAssertLessThan(out[0],0.9);XCTAssertGreaterThan(out[(32*64+32)*4],0.99)
     }
     func testPreviewGlowPolicyIsRequestOnly() throws {
-        let h=try RenderHarness();var p=Profile.standard
+        let h=try RenderHarness(precision: .float32);var p=Profile.standard
         p.parameters.glow.enabled=true;p.parameters.glow.amount=0.6
         p.parameters.halation.enabled=true;p.parameters.halation.amount=0.5
         let original=p,source=try h.texture(width:128,height:128,point:true)
@@ -90,8 +90,10 @@ final class RenderContractTests:XCTestCase {
         p.parameters.color.whiteBalance.source=Chromaticity(x:0.44309360431205197,y:0.18605332803746455)
         p.parameters.color.exposureEV=10
         let extreme=try h.encoder.prepare(ResolvedStyle(profile:p))
-        let texture=try h.encode(h.texture(width:32,height:32),extreme,RenderRequest(input:InputDescriptor(width:32,height:32)))
-        XCTAssertEqual(texture.pixelFormat,.rgba32Float,"Extreme white points must not overflow half-float optical intermediates")
+        XCTAssertThrowsError(try h.encode(h.texture(width:32,height:32),extreme,RenderRequest(input:InputDescriptor(width:32,height:32))))
+        let full = try RenderHarness(precision: .float32)
+        let texture=try full.encode(full.texture(width:32,height:32),full.encoder.prepare(ResolvedStyle(profile:p)),RenderRequest(input:InputDescriptor(width:32,height:32)))
+        XCTAssertEqual(texture.pixelFormat,.rgba32Float,"Explicit Float32 preserves the extreme fixture")
         let values=RenderHarness.read(texture)
         XCTAssertTrue(values.allSatisfy{$0.isFinite && (0...1).contains($0)})
     }
@@ -118,12 +120,24 @@ struct RenderHarness {
     func encode(_ input:MTLTexture,_ style:PreparedCameraStyle,_ request:RenderRequest) throws -> MTLTexture {
         let cmd=try XCTUnwrap(queue.makeCommandBuffer()),done=DispatchSemaphore(value:0)
         let output=try encoder.encode(input,style:style,request:request,commandBuffer:cmd)
+        let snapshot = output === input ? input : try Self.ownedCopy(output, commandBuffer: cmd)
         cmd.addCompletedHandler{_ in done.signal()};cmd.commit();done.wait();XCTAssertNil(cmd.error)
-        return output
+        return snapshot
     }
     func render(_ p:Profile,width:Int,height:Int,value:Float=0.5,seed:UInt32=42,frame:UInt32=0,lut:LUTAsset?=nil) throws -> [Float] {
         var request=RenderRequest(input:InputDescriptor(width:width,height:height));request.seed=seed;request.frameIndex=frame
         return Self.read(try encode(texture(width:width,height:height,value:value),encoder.prepare(ResolvedStyle(profile:p),lut:lut),request))
+    }
+    static func ownedCopy(_ source: MTLTexture, commandBuffer: MTLCommandBuffer) throws -> MTLTexture {
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: source.pixelFormat, width: source.width, height: source.height, mipmapped: false)
+        descriptor.storageMode = .shared; descriptor.usage = .shaderRead
+        let copy = try XCTUnwrap(source.device.makeTexture(descriptor: descriptor))
+        let blit = try XCTUnwrap(commandBuffer.makeBlitCommandEncoder())
+        blit.copy(from: source, sourceSlice: 0, sourceLevel: 0, sourceOrigin: .init(x: 0, y: 0, z: 0),
+                  sourceSize: .init(width: source.width, height: source.height, depth: 1), to: copy,
+                  destinationSlice: 0, destinationLevel: 0, destinationOrigin: .init(x: 0, y: 0, z: 0))
+        blit.endEncoding()
+        return copy
     }
     static func read(_ texture:MTLTexture)->[Float] {
         let count=texture.width*texture.height*4

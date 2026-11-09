@@ -1,14 +1,21 @@
 import Foundation
 import ImagingCore
 
-/// Canonical relative color model: a near-identity linear RGB matrix with sum=3,
-/// plus a monotone encoded-RGB curve anchored at 0, 0.5, 1. Exposure/WB/shift stay fixed.
-/// The anchors intentionally exclude free global exposure compensation; outside this domain, refuse.
+/// 拟合系数和为 3 的近恒等线性 RGB 矩阵，以及在 0、0.5 和 1 锚定的单调编码 RGB 曲线。
+/// 曝光、白平衡与偏移固定。锚点约束排除了自由的全局曝光补偿。
 public enum ToneColorSolver {
     public static func solve(measurements:MeasurementBundle,baseline:Profile,options:GenerationOptions,resources:GenerationResources) throws -> GenerationProposal {
+        try solve(measurements:measurements,baseline:baseline,options:options,resources:resources,makeContext:{try GenerationExecutionContext()})
+    }
+    static func solve(measurements:MeasurementBundle,baseline:Profile,options:GenerationOptions,resources:GenerationResources,makeContext:@escaping ()throws->GenerationExecutionContext) throws -> GenerationProposal {
+        let measurement=DefaultGenerationMeasurements(makeContext:makeContext);defer{measurement.releaseCaches()}
+        return try solve(measurements:measurements,baseline:baseline,options:options,resources:resources,measurement:measurement)
+    }
+    static func solve(measurements:MeasurementBundle,baseline:Profile,options:GenerationOptions,resources:GenerationResources,measurement:any PatchMeasuring) throws -> GenerationProposal {
         try Task.checkCancellation();try baseline.validate()
-        guard options.modules.contains(.toneColor),resources.digests==measurements.resourceDigests,
-              resources.rendering.lut==nil,resources.rendering.correctionLUT==nil else {throw LabError.measurement("此颜色模型需要独立的无 LUT 测量；已有 LUT 的反演可辨识性尚未验收，保留原颜色设置")}
+        try resources.validateEvidence(measurements.resourceDigests)
+        guard options.modules.contains(.toneColor),
+              resources.rendering.lut==nil,resources.rendering.correctionLUT==nil else {throw LabError.measurement("此旧版颜色建议器仅支持独立的无 LUT 测量；带固定 LUT 的相机外观拟合请使用 AppearanceFitter 的正向流程，保留原颜色设置")}
         guard baseline.parameters.color.exposureEV==0,baseline.parameters.color.whiteBalance.source==baseline.parameters.color.whiteBalance.destination,baseline.parameters.color.shift==ColorShift() else {throw LabError.measurement("现有风格包含固定曝光、白平衡或色彩偏移；此规范化颜色模型不能自动覆盖这些设置")}
         let pairs=try ToneColorMeasurement.pairs(measurements),training=pairs.filter(\.training),validation=pairs.filter{!$0.training}
         var curve=ResponseCurve.identity,matrix=ColorMatrix3x3().values
@@ -45,10 +52,9 @@ public enum ToneColorSolver {
         // Render reduced color measurements through the actual GPU color/tone path.
         // Each texel is one measured patch mean, not a resized source photograph.
         var colorOnly=Profile.standard;colorOnly.parameters.color=candidate.parameters.color;colorOnly.parameters.tone=candidate.parameters.tone
-        let renderer=try MetalRenderer(cacheLimitBytes:128*1024*1024);defer{renderer.releaseCaches()}
-        let output=try predictions(pairs,profile:colorOnly,renderer:renderer,frames:measurements.frames)
+        let output=try predictions(pairs,profile:colorOnly,measurement:measurement,frames:measurements.frames)
         var baselineColor=Profile.standard;baselineColor.parameters.color=baseline.parameters.color;baselineColor.parameters.tone=baseline.parameters.tone
-        let baselineOutput=try predictions(pairs,profile:baselineColor,renderer:renderer,frames:measurements.frames)
+        let baselineOutput=try predictions(pairs,profile:baselineColor,measurement:measurement,frames:measurements.frames)
         var worst=[String:Double](),baselineWorst=[String:Double](),trainMaximum=0.0
         for (i,pair) in pairs.enumerated() {
             let error=zip(output[i],pair.target).map{abs($0-$1)}.max()!
@@ -65,7 +71,7 @@ public enum ToneColorSolver {
             guard limit.accepts(error),error<=(baselineWorst[group] ?? 0)+0.0001 else {throw LabError.measurement("\(group)：独立颜色验证失败（最大通道差 \(error)），不自动应用或用该组重选参数")}
             evidence.append(.init(algorithm:.toneColor,caseID:group,status:.passed,measured:error,limit:limit,detail:"独立中档/重复帧及固定色样留出；encoded sRGB 最大通道差。"))
         }
-        return .init(profile:candidate,evidence:evidence,unresolved:["相对颜色等效建议，不推断目标相机的白点或内部参数；固定中灰与曝光锚点不自动补偿拍摄曝光差。","此版本无 LUT 反演资格；超出近恒等矩阵与固定中灰单调曲线的关系需人工调整。"],resourceDigests:resources.digests,validatedModules:[.toneColor])
+        return .init(profile:candidate,evidence:evidence,unresolved:["相对颜色等效建议，不推断目标相机的白点或内部参数；固定中灰与曝光锚点不自动补偿拍摄曝光差。","此旧版建议器限定近恒等矩阵与固定中灰单调曲线；更一般的相机外观关系请使用 AppearanceFitter 正向拟合。"],resourceDigests:try resources.validatedDigests(),validatedModules:[.toneColor])
     }
     private static func invert(_ curve:ResponseCurve,_ y:Double)->Double {
         var low=0.0,high=1.0
@@ -82,26 +88,27 @@ public enum ToneColorSolver {
         let x=rgb.map(GenerationMath.linear)
         return (0..<3).map{r in GenerationMath.encoded((0..<3).reduce(0.0){$0+matrix[r*3+$1]*x[$1]})}
     }
-    static func predictions(_ pairs:[ColorPatchPair],profile:Profile,renderer:MetalRenderer,frames:[FrameMeasurements]=[]) throws ->[[Double]] {
-        let pixels:[Float]=pairs.flatMap {pair -> [Float] in pair.input.map{Float($0)}+[Float(1)]}
-        let image=try ImageFrame(width:pairs.count,height:1,pixels:pixels)
-        let result=try renderer.render(image,style:ResolvedStyle(profile:profile),request:RenderRequest(input:image.descriptor)).image
-        var predictions=pairs.indices.map{i in (0..<3).map{Double(result.pixels[i*4+$0])}}
+    static func predictions(_ pairs:[ColorPatchPair],profile:Profile,measurement:any PatchMeasuring,frames:[FrameMeasurements]=[]) throws ->[[Double]] {
+        var predictions=try measurement.predictColors(pairs.map(\.input),style:ResolvedStyle(profile:profile))
+        guard predictions.count==pairs.count,predictions.allSatisfy({$0.count==3 && $0.allSatisfy(\.isFinite)})else{throw LabError.measurement("候选颜色指标无效")}
         let indices=Dictionary(grouping:pairs.indices,by:{pairs[$0].group})
         for frame in frames where frame.step.role == .input && frame.step.target == .composite {
-            guard let url=frame.sourceURL else {continue}
+            guard frame.sourceURL != nil else {continue}
             try Task.checkCancellation()
             try autoreleasepool {
-                guard let pose=frame.pose,let group=indices[frame.step.pairKey] else {throw LabError.measurement("缺少原始照片定位信息")}
-                let image=try ImageCodec.load(url)
-                guard image.width==frame.width,image.height==frame.height,image.provenance["fileSHA256"]==frame.fileDigest else {throw LabError.measurement("原始照片已变化，请重新测量")}
-                let stats=try renderer.renderPatchStatistics(image,style:ResolvedStyle(profile:profile),transform:pose,regions:Array(TargetLayout.composite.regions.prefix(30)))
+                guard frame.pose != nil,let group=indices[frame.step.pairKey] else {throw LabError.measurement("缺少原始照片定位信息")}
+                let stats=try measurement.patches(frame:frame,style:ResolvedStyle(profile:profile),resources:.init(),regions:Array(TargetLayout.composite.regions.prefix(30)))
+                guard Set(stats.map(\.id)).count==stats.count,
+                      stats.allSatisfy({patch in
+                          patch.mean.count==3 && patch.mean.allSatisfy(\.isFinite) &&
+                          patch.variance.count==3 && patch.variance.allSatisfy(\.isFinite) &&
+                          patch.pixelCount>=0 && patch.clippedFraction.isFinite && (0...1).contains(patch.clippedFraction)
+                      }) else {throw LabError.measurement("候选色块指标重复、缺失通道或包含无效数值")}
                 let byID=Dictionary(uniqueKeysWithValues:stats.map{($0.id,$0)})
                 for i in group {
                     guard let patch=byID[pairs[i].id],patch.pixelCount>=256,patch.clippedFraction<=0.01 else {throw LabError.measurement("候选在原始色块内产生裁切或无有效像素")}
                     predictions[i]=patch.mean
                 }
-                renderer.releaseCaches()
             }
         }
         return predictions

@@ -17,3 +17,14 @@ final class GenerationMemoryTests:XCTestCase {
         XCTAssertEqual(small.memoryStatistics["pooledTextureBytes"],"0")
     }
 }
+
+extension GenerationMemoryTests {
+    func testReferenceScratchRetentionMatchesPreMigrationBaseline() throws {
+        let renderer=try MetalRenderer()
+        let image=try ImageFrame.solid(width:1920,height:1080,value:0.5)
+        _=try renderer.render(image,style:ResolvedStyle(profile:StylePresets.make("film-demo")),request:.init(input:image.descriptor))
+        let memory=renderer.memoryStatistics
+        let retained=try XCTUnwrap(Int(try XCTUnwrap(memory["cachedTextureBytes"]))) + XCTUnwrap(Int(try XCTUnwrap(memory["pooledTextureBytes"])))
+        XCTAssertLessThanOrEqual(retained,1920*1080*16*7,"Migration must not retain an additional full-size scratch surface")
+    }
+}

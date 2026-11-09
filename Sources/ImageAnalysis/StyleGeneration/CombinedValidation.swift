@@ -6,18 +6,26 @@ public struct GenerationValidationReport:Sendable {
     public let rows:[AlgorithmCaseResult]
     public var passed:Bool {!rows.isEmpty && rows.allSatisfy{$0.status == .passed && $0.measured.map{$0.isFinite && $0>=0} == true}}
 }
-/// Re-renders the complete candidate and baseline on held-out originals. Previous
-/// proposal flags or single-module residuals never substitute for this check.
+/// 在留出原图上重新渲染完整候选和原始基线，以组合指标验证制作建议。
 public enum CombinedValidation {
     public static func run(proposal:GenerationProposal,baseline:Profile,measurements:MeasurementBundle,resources:GenerationResources,progress:@Sendable(GenerationProgress)->Void = {_ in})throws->GenerationValidationReport {
+        var owned:GenerationExecutionContext?;defer{owned?.releaseCaches()}
+        return try run(proposal:proposal,baseline:baseline,measurements:measurements,resources:resources,makeContext:{let value=try GenerationExecutionContext();owned=value;return value},progress:progress)
+    }
+    static func run(proposal:GenerationProposal,baseline:Profile,measurements:MeasurementBundle,resources:GenerationResources,context:GenerationExecutionContext,progress:@Sendable(GenerationProgress)->Void = {_ in})throws->GenerationValidationReport {
+        try run(proposal:proposal,baseline:baseline,measurements:measurements,resources:resources,makeContext:{context},images:context.images,progress:progress)
+    }
+    static func run(proposal:GenerationProposal,baseline:Profile,measurements:MeasurementBundle,resources:GenerationResources,makeContext:()throws->GenerationExecutionContext,images:GenerationImages=GenerationImages(),progress:@Sendable(GenerationProgress)->Void = {_ in})throws->GenerationValidationReport {
         try proposal.profile.validate();try baseline.validate()
+        try resources.validateEvidence(proposal.resourceDigests)
+        try resources.validateEvidence(measurements.resourceDigests)
         let modules=proposal.validatedModules.intersection([.toneColor,.detail,.texture,.glow])
-        guard !modules.isEmpty,modules==proposal.validatedModules.subtracting([.conditionResponse]),resources.digests==proposal.resourceDigests,resources.digests==measurements.resourceDigests,
+        guard !modules.isEmpty,modules==proposal.validatedModules.subtracting([.conditionResponse]),
               modules.allSatisfy({m in proposal.evidence.contains{$0.algorithm==m && $0.status == .passed}}),
               Set(measurements.frames.map(\.fileDigest)).count==measurements.frames.count,Set(measurements.frames.map(\.step.id)).count==measurements.frames.count else {throw LabError.measurement("组合验收需要独立照片、匹配资源及完整的单项证据")}
         let expected:[CaptureTarget:Int]=[.composite:54,.flat:72,.light:18]
         let families:Set<CaptureTarget>=Set(modules.map{ $0 == .texture ? .flat:$0 == .glow ? .light:.composite })
-        let images=GenerationImages()
+        images.releaseCaches()
         for family in families {
             let set=measurements.frames.filter{$0.step.target==family}
             guard set.count==expected[family] else{throw LabError.measurement("\(family.rawValue)：组合验收照片不足，需要完整未见中档及两端条件")}
@@ -31,8 +39,8 @@ public enum CombinedValidation {
             }
         }
         try validateConditions(measurements.frames.filter{families.contains($0.step.target)},responses:proposal.profile.responses)
-        guard let device=MTLCreateSystemDefaultDevice()else{throw LabError.noMetal}
-        let renderer=try MetalRenderer(cacheLimitBytes:128*1024*1024);defer{renderer.releaseCaches()}
+        let context=try makeContext()
+        let renderer=context.renderer
         let definition=try StyleEvaluator.compile(proposal.profile),baseDefinition=try StyleEvaluator.compile(baseline)
         func style(_ frame:FrameMeasurements,_ candidate:Bool)throws->ResolvedStyle {
             let evaluated=try StyleEvaluator.evaluate(candidate ? definition:baseDefinition,conditions:frame.actualConditions)
@@ -46,7 +54,7 @@ public enum CombinedValidation {
             rows.append(.init(algorithm:module,caseID:group+"/"+metric,status:accepted ? .passed:.failed,measured:error.isFinite ? error:nil,limit:limit,detail:"\(group) / \(metric)：候选 \(error)，基准 \(previous)，上限 \(tolerance)；\(accepted ? "通过":"退化或超出测量阈值")"))
         }
         let grouped=Dictionary(grouping:measurements.frames.filter{families.contains($0.step.target) && $0.step.target != .flat},by:{$0.step.pairKey})
-        let light=modules.contains(.glow) ? try GPULightMeasurement(device:device):nil
+        let light=modules.contains(.glow) ? try context.light():nil
         var measuring:AlgorithmID = .glow
         func measureGroup(_ key:String)throws {try autoreleasepool {
             let pair=grouped[key]!
@@ -103,7 +111,7 @@ public enum CombinedValidation {
             }
         }
         if modules.contains(.texture) {
-            let temporal=try GPUTemporalTexture(device:device)
+            let temporal=try context.temporal()
             for condition in 0...2 {for ev in [-1.0,0,1] {try autoreleasepool {
                 let set=measurements.frames.filter{$0.step.target == .flat && $0.step.conditionIndex==condition && $0.step.exposureEV==ev}
                 let input=set.filter{$0.step.role == .input}.sorted{$0.step.repeatIndex<$1.step.repeatIndex},target=set.filter{$0.step.role == .target}.sorted{$0.step.repeatIndex<$1.step.repeatIndex}

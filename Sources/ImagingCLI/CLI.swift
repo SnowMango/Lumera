@@ -21,9 +21,10 @@ private struct Arguments {
 }
 private struct Batch:Codable {var inputs:[String]}
 @main struct ImagingCLI {
+    // 命令保持可等待的异步任务；SIGINT 传播取消，避免用信号量阻塞异步相机流程。
     static func main() async {
         let args=Array(CommandLine.arguments.dropFirst())
-        let task=Task.detached {try run(args)}
+        let task=Task.detached {try await run(args)}
         signal(SIGINT,SIG_IGN)
         let interrupt=DispatchSource.makeSignalSource(signal:SIGINT,queue:.global());interrupt.setEventHandler{task.cancel()};interrupt.resume()
         do {try await task.value;interrupt.cancel()}
@@ -48,7 +49,8 @@ private struct Batch:Codable {var inputs:[String]}
         try Task.checkCancellation();try SafeFiles.write(data,to:destination,overwrite:force);try save(result.manifest,sidecar,force)
         return result.manifest
     }
-    static func run(_ input:[String]) throws {
+    /// 统一命令分发；相机制作命令等待异步渲染，既有同步命令保持原执行入口。
+    static func run(_ input:[String]) async throws {
         guard let command=input.first,command != "--help",command != "help" else {
             print("""
             Lumera — offline camera texture renderer (schema 8)
@@ -60,11 +62,18 @@ private struct Batch:Codable {var inputs:[String]}
             render --input image [--profile profile.json] --output result.png [--output-kind photo|reference] [--long-edge 1280] [--background 0,0,0] [--device-correction correction.json] [--lut look.cube] [--correction-lut correction.cube]
             batch --manifest inputs.json [--profile profile.json] --output-dir results [--output-kind photo|reference] [--device-correction correction.json] [--lut look.cube] [--correction-lut correction.cube]
             photo: 8-bit RGB; reference: 16-bit RGB PNG. Render/batch also write diagnostic JSON sidecars.
+            camera-model fit|build --project <json> --settings <json> --output <package> [--force]
+            camera-model fit ... [--condition-design <json>] [--fit-report <json>]
+            camera-model validate --project <json> --settings <json> --model <package> --output <report>
+            camera-model replay --model <package> --records <json> --output <report>
+            camera-project check --project <json> --output <report> [--force]
             check-profile --profile <file>
             Offline schema 7 conversion: tools/upgrade_profile_v1_1.py --help
             Overwrite requires --force; input files are always protected.
             """);return
         }
+        if command == "camera-model" { try await CameraModelTools.run(Array(input.dropFirst())); return }
+        if command == "camera-project" { try CameraModelCommands.run(Array(input.dropFirst())); return }
         if ["fit","validate","measure"].contains(command){throw LabError.unsupported("旧会话拟合/验证流程已停用；请使用手动工作台。新的识别与估计流程尚未实现。")}
         var remaining=Array(input.dropFirst());let allowed:Set<String>
         switch command {

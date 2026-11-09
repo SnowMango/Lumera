@@ -1,6 +1,8 @@
 import Foundation
 
+/// 旧版 Profile 将响应值写入基础参数的方式。
 public enum ResponseOperation:String,Codable,CaseIterable,Sendable {case replace,multiply,add}
+/// 旧版 Profile 可绑定的标量目标；编辑范围同时取决于当前基础值和运算。
 public enum ResponseTarget:String,Codable,CaseIterable,Sendable {
     case noiseGain="noise.gain",noiseChromaRatio="noise.chromaRatio"
     case grainAmount="grain.amount",grainSize="grain.size",grainRoughness="grain.roughness",grainChroma="grain.chroma"
@@ -10,7 +12,7 @@ public enum ResponseTarget:String,Codable,CaseIterable,Sendable {
     case halationRadius="halation.radius"
     case vignetteAmount="vignette.amountEV"
     public var descriptor:ParameterDescriptor? {ParameterDescriptor.all.first{$0.id==rawValue}}
-    public var allowedOperations:[ResponseOperation] {descriptor?.allowedOperations ?? []}
+    public var allowedOperations:[ResponseOperation] {(try? ParameterSpecification.lookup(rawValue).allowedOperations) ?? []}
     public var unit:String {self == .noiseGain ? "倍率":(descriptor?.unit.rawValue ?? "normalized")}
     public var title:String {self == .noiseGain ? "数码噪点整体倍率":(descriptor?.title ?? rawValue)}
     /// Legal editing range for this response, given the current base parameters.
@@ -50,6 +52,7 @@ public enum ResponseTarget:String,Codable,CaseIterable,Sendable {
         }
     }
 }
+/// 旧版 Profile 的单轴标量绑定，由兼容路径按采集条件求值。
 public struct ConditionBinding:Codable,Equatable,Sendable {
     public var target:ResponseTarget,axis:ConditionAxis,operation:ResponseOperation,curve:ResponseCurve
     public init(target:ResponseTarget,axis:ConditionAxis,operation:ResponseOperation,curve:ResponseCurve) {

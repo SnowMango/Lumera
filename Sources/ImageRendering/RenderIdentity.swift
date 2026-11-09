@@ -1,8 +1,9 @@
 import Foundation
 import ImagingCore
 
-/// Identifies processing settings. A finished image cache additionally needs source identity.
+/// 标识影响渲染的设置。缓存成品时需一并纳入来源身份。
 public enum RenderIdentity {
+    /// 验证资源与请求，并计算包含有效参数、精度、区域及启用随机效果种子的标识。
     public static func make(style: ResolvedStyle, resources: RenderResources = .init(),
                             correction: DeviceCorrection? = nil, request: RenderRequest,
                             precision: RenderingPrecision, region: CGRect? = nil, rendererRevision: String = LumeraVersion.rendererRevision) throws -> String {
@@ -31,17 +32,18 @@ public enum RenderIdentity {
                                height:max(1,Int(Double(request.input.height)*scale)))
             guard region == region.integral, !region.isEmpty, frame.contains(region) else { throw LabError.invalid("无效的渲染区域") }
         }
+        let identity = RenderResourceIdentity(validated: resources)
         let settings = Settings(revision: rendererRevision, effects: style.effectiveDigest,
             precision: precision == .float16 ? "float16" : "float32", region: region, size: request.input,
             limit: request.maximumLongEdge, glow: request.previewGlow,
             scales: [request.glowScale, request.softeningScale, request.halationScale],
             grainSeed: style.parameters.grain.isActive ? style.temporalPolicy.grain.seed(request.seed, frameIndex: request.frameIndex) : nil,
             noiseSeed: style.parameters.noise.isActive ? style.temporalPolicy.noise.seed(request.seed, frameIndex: request.frameIndex) : nil,
-            styleLUT: resources.lut?.sha256, correctionLUT: resources.correctionLUT?.sha256,
+            styleLUT: identity.styleLUT?.sha256, correctionLUT: identity.correctionLUT?.sha256,
             correction: try correction?.effectDigest(),
             dynamicRange: request.dynamicRange == .sdr ? nil : request.dynamicRange,
-            styleLUTBoundary: resources.lut.flatMap { $0.boundaryPolicy == .automatic ? nil : $0.boundaryPolicy },
-            correctionLUTBoundary: resources.correctionLUT.flatMap { $0.boundaryPolicy == .automatic ? nil : $0.boundaryPolicy })
+            styleLUTBoundary: identity.styleLUT.flatMap { $0.boundaryPolicy == .automatic ? nil : $0.boundaryPolicy },
+            correctionLUTBoundary: identity.correctionLUT.flatMap { $0.boundaryPolicy == .automatic ? nil : $0.boundaryPolicy })
         return Digest.data(try JSON.encode(settings))
     }
 }

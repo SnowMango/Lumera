@@ -193,7 +193,8 @@ final class EDRRenderingTests: XCTestCase {
         profile.parameters.vignette.enabled = true; profile.parameters.vignette.amountEV = 1
         profile.parameters.glow.enabled = true; profile.parameters.glow.amount = 0.1
         let style = try h.encoder.prepare(ResolvedStyle(profile: profile))
-        let request = try edrOptions().makeRequest(input: .init(width: 8, height: 8))
+        var request = try edrOptions().makeRequest(input: .init(width: 8, height: 8))
+        request.inputValueBounds = .init(lower: 0, upper: 4)
         let result = try h.encode(h.texture(width: 8, height: 8, value: 4), style, request)
         let values = RenderHarness.read(result)
         XCTAssertTrue(values.allSatisfy(\.isFinite))
@@ -204,7 +205,7 @@ final class EDRRenderingTests: XCTestCase {
     }
 
     func testExplicitSDRExtrapolationDoesNotOverflowHalfBeforeColorTransform() throws {
-        let h = try RenderHarness() // Default precision must promote the extrapolating path.
+        let h = try RenderHarness(precision: .float32) // Explicit precision preserves this extreme fixture.
         var samples = [Float](repeating: 0, count: 64*64*64*3)
         for i in (samples.count-3)..<samples.count { samples[i] = 1 }
         var lut = try LUTImporter.load(data: samples.withUnsafeBytes { Data($0) },
@@ -239,8 +240,8 @@ final class EDRRenderingTests: XCTestCase {
         for (actual, expected) in zip(result, [Float(-1), -1.5, 6, 1]) { XCTAssertEqual(actual, expected, accuracy: 0.0001) }
     }
 
-    func testDynamicFramesAlternateRangesWithoutReusingWrongNoisePrecision() throws {
-        let h = try RenderHarness()
+    func testDynamicFramesAlternateRangesWithoutReusingWrongNoiseState() throws {
+        let h = try RenderHarness(precision: .float32)
         var profile = Profile.standard
         profile.parameters.noise.enabled = true
         profile.parameters.noise.curve = .init(function: .init(family: .constant, start: 0.01, end: 0.01))

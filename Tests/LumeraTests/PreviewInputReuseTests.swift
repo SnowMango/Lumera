@@ -36,7 +36,6 @@ final class PreviewInputReuseTests:XCTestCase {
             p.vignette.amountEV=Double(i)*0.1
             let output=try renderer.renderPreview(image,style:ResolvedStyle(parameters:p),request:request)
             let timing=try XCTUnwrap(output.manifest.timing)
-            print("Preview reuse sample \(i): prepMS=\(timing.inputPreparationSeconds*1000) effectsMS=\(timing.effectsSeconds*1000) uploads=\(renderer.lastWork.uploads)")
             XCTAssertEqual(renderer.lastWork.uploads,i==0 ? 1:0)
             XCTAssertEqual(timing.reusedInput,i>0)
         }

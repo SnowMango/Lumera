@@ -5,16 +5,16 @@ public enum ParameterUnit: String, Codable, Sendable {
     case matrixCoefficient = "linear RGB coefficient", multiplier, exponent
 }
 
+/// 标量参数的可写键路径与界面元数据。非标量控制由 `ParameterSpecification` 描述。
 public struct ParameterDescriptor {
     public let id: String, title: String, module: String
     public let keyPath: WritableKeyPath<StyleParameters, Double>
     public let baseRange: ClosedRange<Double>, effectiveRange: ClosedRange<Double>
     public let unit: ParameterUnit
     public var range: ClosedRange<Double> { baseRange }
-    public var isBindable: Bool { ResponseTarget(rawValue: id) != nil }
+    public var isBindable: Bool { (try? ParameterSpecification.lookup(id).legacyBindable) ?? false }
     public var allowedOperations: [ResponseOperation] {
-        guard let target = ResponseTarget(rawValue: id) else { return [] }
-        return target == .noiseGain ? [.multiply] : ResponseOperation.allCases
+        (try? ParameterSpecification.lookup(id).allowedOperations) ?? []
     }
     public var defaultValue: Double { StyleParameters()[keyPath:keyPath] }
     public var scope: String { "style" }

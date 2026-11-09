@@ -1,22 +1,15 @@
 import Foundation
 import ImageIO
 import ImagingCore
+import ImageRendering
 
-/// Only quantities with known units; EXIF WhiteBalance is a mode, not Kelvin or Duv.
+/// 复用输入链路的拍摄元数据解释。只读取单位明确的量，EXIF 白平衡模式不提供色温或 Duv。
 public enum CaptureMetadataReader {
     public static func read(properties:[CFString:Any])->CaptureConditions {
-        guard let exif=properties[kCGImagePropertyExifDictionary] as? [CFString:Any] else{return CaptureConditions()}
-        func finite(_ value:Any?,positive:Bool=false)->Double? {
-            guard let number=value as? NSNumber else{return nil}
-            let x=number.doubleValue
-            return x.isFinite && (!positive || x>0) ? x:nil
-        }
-        var c=CaptureConditions()
-        if let values=exif[kCGImagePropertyExifISOSpeedRatings] as? [NSNumber],values.count==1 {c.iso=finite(values[0],positive:true)}
-        c.exposureDurationSeconds=finite(exif[kCGImagePropertyExifExposureTime],positive:true)
-        c.exposureBiasEV=finite(exif[kCGImagePropertyExifExposureBiasValue])
-        return c
+        InputCaptureMetadataReader.read(properties: properties)
     }
+
+    /// 读取首帧图像属性。无法读取时返回空拍摄条件。
     public static func read(url:URL)->CaptureConditions {
         guard let source=CGImageSourceCreateWithURL(url as CFURL,[kCGImageSourceShouldCache:false] as CFDictionary),
               let properties=CGImageSourceCopyPropertiesAtIndex(source,0,nil) as? [CFString:Any] else{return CaptureConditions()}

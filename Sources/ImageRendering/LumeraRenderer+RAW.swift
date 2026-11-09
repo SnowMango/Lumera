@@ -48,14 +48,21 @@ extension LumeraRenderer {
 
     private func renderRAW(_ filter: CIRAWFilter, style: PreparedCameraStyle, options: RenderOptions,
                            correction: PreparedDeviceCorrection?, configureRAW: ((CIRAWFilter) throws -> Void)?) async throws -> CIImage {
-        filter.isDraftModeEnabled = false
-        filter.extendedDynamicRangeAmount = options.dynamicRange == .edr ? 1 : 0
-        try configureRAW?(filter)
-        try Task.checkCancellation()
-        guard let image = filter.outputImage else { throw LabError.unsupported("系统 RAW 显影失败") }
-        // CIRAWFilter has already baked its orientation into outputImage.
-        let properties = filter.properties as? [String: Any] ?? [:]
+        let developed = try developRAW(filter, dynamicRange: options.dynamicRange, configure: configureRAW)
+        let image = developed.image, properties = developed.properties
         return try await render(image, metadata: properties, orientation: .up, style: style,
                                 options: options, correction: correction)
+    }
+    /// 两条图像入口共用的系统 RAW 显影步骤，输出方向已由解码器应用。
+    func developRAW(_ filter: CIRAWFilter, dynamicRange: RenderDynamicRange, configure: ((CIRAWFilter) throws -> Void)?) throws
+        -> (image: CIImage, properties: [String: Any]) {
+        filter.isDraftModeEnabled = false
+        filter.extendedDynamicRangeAmount = dynamicRange == .edr ? 1 : 0
+        try configure?(filter)
+        try Task.checkCancellation()
+        guard let image = filter.outputImage else { throw LabError.unsupported("系统 RAW 显影失败") }
+        // 保留拍摄元数据供下游使用，方向已写入显影像素。
+        let properties = filter.properties as? [String: Any] ?? [:]
+        return (image, properties)
     }
 }

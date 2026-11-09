@@ -2,18 +2,26 @@ import Foundation
 import Metal
 import ImagingCore
 
-/// Immutable device-specific resources. Prepare once outside a camera's frame loop.
-/// The caller keeps this snapshot separate from a creative style.
+/// 绑定 Metal 设备的前置颜色变换与 LUT 快照，可在帧循环外准备并独立于创意风格复用。
 public final class PreparedDeviceCorrection: @unchecked Sendable {
     public let digest:String
     public let color:PreparedColorTransform
     public let colorIsActive:Bool
     package let lutTexture:MTLTexture?
+    package let lutIsExactIdentity: Bool
     package let lutBoundaryPolicy: LUTBoundaryPolicy
     public let deviceID:UInt64
-    private init(digest:String,color:PreparedColorTransform,active:Bool,lut:MTLTexture?,device:MTLDevice,boundaryPolicy:LUTBoundaryPolicy) {
+    private init(digest:String,color:PreparedColorTransform,active:Bool,lut:MTLTexture?,device:MTLDevice,boundaryPolicy:LUTBoundaryPolicy,identity:Bool) {
+        lutIsExactIdentity = identity
         lutBoundaryPolicy=boundaryPolicy
         self.digest=digest;self.color=color;colorIsActive=active;lutTexture=lut;deviceID=device.registryID
+    }
+    /// 用户输入曝光和白平衡编辑复用前置颜色变换，位于已完成输入校正之后。
+    static func inputEdit(_ response: ColorResponse, device: MTLDevice) throws -> PreparedDeviceCorrection? {
+        let color = try ColorTransform.prepare(response)
+        guard response.isActive else { return nil }
+        return PreparedDeviceCorrection(digest: "frame-input-edit", color: color, active: true, lut: nil,
+            device: device, boundaryPolicy: .clamp, identity: true)
     }
     public static func prepare(_ correction:DeviceCorrection?,lut asset:LUTAsset?=nil,device:MTLDevice) throws -> PreparedDeviceCorrection? {
         try prepare(correction,preparedLUT:asset.map{try PreparedLUT.prepare($0,device:device)},device:device)
@@ -30,6 +38,6 @@ public final class PreparedDeviceCorrection: @unchecked Sendable {
         if !response.isActive,preparedLUT == nil || (preparedLUT!.isExactIdentity && preparedLUT!.boundaryPolicy != .clamp) {return nil}
         let digest=try correction.effectDigest()
         return PreparedDeviceCorrection(digest:preparedLUT.map{Digest.data(Data((digest+":"+$0.digest+($0.boundaryPolicy == .automatic ? "" : ":"+$0.boundaryPolicy.rawValue)).utf8))} ?? digest,
-            color:color,active:response.isActive,lut:preparedLUT?.texture,device:device,boundaryPolicy:preparedLUT?.boundaryPolicy ?? .automatic)
+            color:color,active:response.isActive,lut:preparedLUT?.texture,device:device,boundaryPolicy:preparedLUT?.boundaryPolicy ?? .automatic,identity:preparedLUT?.isExactIdentity ?? false)
     }
 }

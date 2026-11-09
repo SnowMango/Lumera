@@ -118,7 +118,7 @@ final class LumeraRendererTests: XCTestCase {
     }
 
     func testTextureFacadeDoesNotCommitAndPreservesExistingContract() throws {
-        let h = try RenderHarness(), renderer = try LumeraRenderer(device: h.device)
+        let h = try RenderHarness(), renderer = try LumeraRenderer(device: h.device, precision: .float32)
         let style = try renderer.prepare(.standard), input = try h.texture(width: 8, height: 4)
         let command = try XCTUnwrap(h.queue.makeCommandBuffer())
         let output = try renderer.render(input, style: style, inputDescriptor: InputDescriptor(width: 8, height: 4), commandBuffer: command)

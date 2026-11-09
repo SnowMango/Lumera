@@ -61,8 +61,8 @@ enum ToneColorDeveloperCheck {
         let pair=ColorPatchPair(group:frame.step.pairKey,id:"gray-0",kind:.gray,input:[0.25,0.25,0.25],target:[0.082,0.082,0.082],training:false)
         var profile=Profile.standard;profile.parameters.tone.enabled=true
         profile.parameters.tone.curve = .init(knots:[.init(x:0,y:0),.init(x:0.25,y:0.05),.init(x:0.5,y:0.5),.init(x:0.75,y:0.8),.init(x:1,y:1)])
-        let renderer=try MetalRenderer(cacheLimitBytes:128*1024*1024);defer{renderer.releaseCaches()}
-        let actual=try ToneColorSolver.predictions([pair],profile:profile,renderer:renderer,frames:[frame])[0]
+        let context=try GenerationExecutionContext();defer{context.releaseCaches()}
+        let actual=try ToneColorSolver.predictions([pair],profile:profile,measurement:context.measurements,frames:[frame])[0]
         // Half 0.21, half 0.29: independent piecewise linear result = (0.042+0.122)/2.
         return actual.map{abs($0-0.082)}.max()!
     }

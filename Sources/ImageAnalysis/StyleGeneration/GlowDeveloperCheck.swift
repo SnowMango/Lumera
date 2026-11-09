@@ -51,7 +51,7 @@ enum GlowDeveloperCheck {
                 let patch=PatchMeasurement(id:"light",kind:.light,mean:[0.2,0.2,0.2],variance:[0.01,0.01,0.01],clippedFraction:0,pixelCount:n)
                 frames.append(.init(fileDigest:Digest.data(data),step:s,actualConditions:conditions,width:side,height:side,patches:[patch],sourceURL:url,pose:nil))
             }}
-            return .init(folder:folder,bundle:.init(frames:frames,resourceDigests:[:]),baseline:profile)
+            return .init(folder:folder,bundle:.init(frames:frames,resourceDigests:try GenerationResources().validatedDigests()),baseline:profile)
         }catch{try? FileManager.default.removeItem(at:folder);throw error}
     }
     static func run(progress:@Sendable(GenerationProgress)->Void = {_ in})throws->[String:Double] {

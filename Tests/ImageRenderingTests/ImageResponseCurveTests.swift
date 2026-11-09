@@ -10,7 +10,7 @@ final class ResponseCurveTests:XCTestCase {
         let narrow=ResponseCurve(knots:[.init(x:0,y:0),.init(x:0.50000002,y:0),.init(x:0.50000014,y:1),.init(x:1,y:1)])
         for kind:ImageResponseKind in [.tone,.grain] {XCTAssertThrowsError(try narrow.validate(kind:kind))}
         var p=Profile.standard;p.parameters.tone.enabled=true;p.parameters.tone.curve = .init(knots:[.init(x:0,y:0),.init(x:0.13,y:0.13),.init(x:1,y:1)],interpolation:.smooth)
-        let h=try RenderHarness(),source=try h.texture(width:64,height:64,point:true)
+        let h=try RenderHarness(precision: .float32),source=try h.texture(width:64,height:64,point:true)
         XCTAssertTrue(try h.encode(source,h.encoder.prepare(ResolvedStyle(profile:p)),RenderRequest(input:InputDescriptor(width:64,height:64))) === source)
         p.parameters.noise.curve = .init(knots:[.init(x:0,y:-0.1),.init(x:1,y:0)])
         XCTAssertThrowsError(try p.validate())

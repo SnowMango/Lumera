@@ -5,6 +5,8 @@ import Foundation
 public struct RenderOptions: Codable, Equatable, Sendable {
     /// Explicit opt-in to extended-range input/output. Existing callers remain SDR.
     public var dynamicRange: RenderDynamicRange = .sdr
+    /// Bounds declared by borrowed-texture callers; native image adapters measure their own input.
+    public var inputValueBounds: NumericBounds?
     /// Optional output long-edge limit. Nil preserves dimensions; a limit must be positive.
     public var maximumLongEdge: Int?
     /// Base seed used by the style's temporal noise/grain policy.
@@ -38,14 +40,16 @@ public struct RenderOptions: Codable, Equatable, Sendable {
         request.halationScale = halationScale
         request.softeningScale = softeningScale
         request.dynamicRange = dynamicRange
+        request.inputValueBounds = inputValueBounds
         return request
     }
 
     private enum CodingKeys: String, CodingKey {
-        case dynamicRange, maximumLongEdge, seed, frameIndex, previewGlow, glowScale, halationScale, softeningScale
+        case dynamicRange, inputValueBounds, maximumLongEdge, seed, frameIndex, previewGlow, glowScale, halationScale, softeningScale
     }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
+        inputValueBounds = try c.decodeIfPresent(NumericBounds.self, forKey: .inputValueBounds)
         dynamicRange = try c.decodeIfPresent(RenderDynamicRange.self, forKey: .dynamicRange) ?? .sdr
         maximumLongEdge = try c.decodeIfPresent(Int.self, forKey: .maximumLongEdge)
         seed = try c.decode(UInt32.self, forKey: .seed)

@@ -1,11 +1,22 @@
 import Foundation
 import ImagingCore
 
+/// 核验采集清单与资源身份，从原图提取所选模块需要的测量。
 public enum GenerationPreparation {
     public static func prepare(captures:CaptureSet,resources:GenerationResources,modules:Set<AlgorithmID> = [.toneColor,.detail,.texture,.glow],progress:@Sendable(GenerationProgress)->Void = {_ in})throws->MeasurementBundle {
+        var owned:GenerationExecutionContext?;defer{owned?.releaseCaches()}
+        return try prepare(captures:captures,resources:resources,modules:modules,makeContext:{let value=try GenerationExecutionContext();owned=value;return value},progress:progress)
+    }
+    static func prepare(captures:CaptureSet,resources:GenerationResources,modules:Set<AlgorithmID> = [.toneColor,.detail,.texture,.glow],context:GenerationExecutionContext,progress:@Sendable(GenerationProgress)->Void = {_ in})throws->MeasurementBundle {
+        try prepare(captures:captures,resources:resources,modules:modules,makeContext:{context},progress:progress)
+    }
+    static func prepare(captures:CaptureSet,resources:GenerationResources,modules:Set<AlgorithmID> = [.toneColor,.detail,.texture,.glow],makeContext:()throws->GenerationExecutionContext,progress:@Sendable(GenerationProgress)->Void = {_ in})throws->MeasurementBundle {
+        _ = try resources.validatedDigests()
         try Task.checkCancellation()
         guard captures.protocolVersion=="capture-draft-1",captures.canMeasure,(1...200).contains(captures.records.count),Set(captures.records.map(\.fileDigest)).count==captures.records.count,Set(captures.records.map(\.step.id)).count==captures.records.count else{throw LabError.measurement("采集清单未完成、重复或版本已失效，请先处理导入列表中的问题")}
-        let renderer=try MetalRenderer(cacheLimitBytes:128*1024*1024);defer{renderer.releaseCaches()}
+        let context=try makeContext()
+        context.beginStage()
+        let renderer=context.renderer
         let neutral=try ResolvedStyle(profile:.standard),start=ProcessInfo.processInfo.systemUptime
         let selected=captures.records.filter{GenerationCoordinator.requiredTargets(for:modules).contains($0.step.target)}
         var frames=[FrameMeasurements]()
@@ -35,6 +46,6 @@ public enum GenerationPreparation {
             frames.append(frame)
             progress(.init(stage:"已检查 \(record.step.id)",completed:index+1,total:selected.count,elapsedSeconds:ProcessInfo.processInfo.systemUptime-start))
         }}
-        return .init(frames:frames,resourceDigests:resources.digests)
+        return .init(frames:frames,resourceDigests:try resources.validatedDigests())
     }
 }

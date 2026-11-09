@@ -62,7 +62,7 @@ struct DetailReferenceSamples {
                 frames.append(.init(fileDigest:Digest.data(data),step:step,actualConditions:c,width:w,height:h,patches:patches,sourceURL:url,pose:pose,metrics:metrics,curves:curves))
               }
             }
-            return .init(folder:folder,measurements:.init(frames:frames,resourceDigests:[:]))
+            return .init(folder:folder,measurements:.init(frames:frames,resourceDigests:try GenerationResources().validatedDigests()))
         } catch {try? FileManager.default.removeItem(at:folder);throw error}
     }
 }

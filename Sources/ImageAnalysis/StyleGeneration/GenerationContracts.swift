@@ -48,12 +48,34 @@ public struct GenerationEligibility:Sendable {
         algorithms=Set(required)
     }
 }
-/// These resources are caller-owned and deliberately not Codable.
+/// 调用方持有的渲染资源。制作证据记录资源摘要与处理身份。
 public struct GenerationResources:Sendable {
     public var rendering:RenderResources
     public init(rendering:RenderResources = .init()) {self.rendering=rendering}
+    /// 返回可获取的摘要。工作流的证据校验通过可抛错入口要求完整处理身份。
     public var digests:[String:String] {
-        var result=[String:String]();if let lut=rendering.lut {result["creativeLUT"]=lut.sha256};if let lut=rendering.correctionLUT {result["correctionLUT"]=lut.sha256};return result
+        var result = contentDigests
+        if let identity = try? RenderResourceIdentity(resources: rendering).digest() {
+            result["processingIdentity.v1"] = identity
+        }
+        return result
+    }
+    private var contentDigests: [String: String] {
+        var result = [String: String]()
+        if let lut = rendering.lut { result["creativeLUT"] = lut.sha256 }
+        if let lut = rendering.correctionLUT { result["correctionLUT"] = lut.sha256 }
+        return result
+    }
+    func validatedDigests() throws -> [String: String] {
+        var result = contentDigests
+        result["processingIdentity.v1"] = try RenderResourceIdentity(resources: rendering).digest()
+        return result
+    }
+    /// 要求证据摘要与当前 LUT 内容和处理策略完全匹配。
+    func validateEvidence(_ evidence: [String: String]) throws {
+        guard try evidence == validatedDigests() else {
+            throw LabError.measurement("生成资源或处理策略已改变，或证据版本已失效；请重新测量和验证")
+        }
     }
 }
 public enum GenerationModel:String,Codable,Sendable {case digital,film}

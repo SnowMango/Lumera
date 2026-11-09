@@ -15,9 +15,8 @@ extension LumeraRenderer {
     /// Tag encoded source pixels with their actual color space when constructing the CIImage.
     /// By default the result is opaque sRGB SDR (normally half-float); known HDR headroom
     /// is tone-mapped on iOS 18/macOS 15 or newer, otherwise unsupported HDR throws.
-    /// With `options.dynamicRange = .edr`, preserve extended values and return Float32
-    /// encoded extended sRGB without SDR tone mapping. Output content headroom is unknown
-    /// after styling; display/encoding and any headroom measurement belong to the caller.
+    /// `options.dynamicRange = .edr` 时以所选浮点精度输出编码扩展 sRGB，保留扩展值。
+    /// 风格处理后的亮度余量由调用方按显示或编码需求测量。
     ///
     /// - Parameters:
     ///   - image: An image with a finite, nonempty extent. Keep externally backed pixels alive
@@ -47,9 +46,13 @@ extension LumeraRenderer {
         let (normalized, bounds, sourceProperties) = try normalizedSource(image, metadata: metadata, orientation: orientation, dynamicRange: options.dynamicRange)
         let outputSpace = Self.colorSpace(for: options.dynamicRange)
         let width = Int(bounds.width), height = Int(bounds.height)
-        let request = options.makeRequest(input: InputDescriptor(width: width, height: height))
+        var request = options.makeRequest(input: InputDescriptor(width: width, height: height))
         try request.validate()
         try TextureDimensions.validate(width: width, height: height, device: device)
+        // 在转换到半精度前测量原生图像的范围，以便检查输入及效果中间值。
+        if imageInputFormat == .rgba16Float {
+            request.inputValueBounds = try await measureInputRange(normalized, bounds: bounds, colorSpace: outputSpace)
+        }
         let inputDescriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: inputFormat(for: options.dynamicRange),
             width: width, height: height, mipmapped: false)
         inputDescriptor.usage = [.shaderRead, .shaderWrite]
@@ -81,8 +84,7 @@ extension LumeraRenderer {
             width: owned.width, height: owned.height, depth: owned.pixelFormat == .rgba32Float ? 32 : 16, dynamicRange: options.dynamicRange))
     }
 
-    /// Renders a pixel buffer to independently owned BGRA8 sRGB SDR, or RGBA Float32
-    /// extended sRGB when `options.dynamicRange = .edr`. This is not an HDR video encoder.
+    /// 返回独立像素缓冲区。SDR 使用 BGRA8 sRGB，EDR 使用所选 RGBA 浮点精度及扩展 sRGB。
     ///
     /// Core Image decodes supported RGB/YCbCr buffers using their color attachments. Untagged
     /// RGB assumes sRGB; YCbCr requires a resolvable attached color space. Clean apertures other
@@ -104,6 +106,29 @@ extension LumeraRenderer {
                        style: PreparedCameraStyle, options: RenderOptions = .init(),
                        correction: PreparedDeviceCorrection? = nil) async throws -> CVPixelBuffer {
         try Task.checkCancellation()
+        let decoded = try interpretedBuffer(buffer, metadata: metadata, orientation: orientation)
+        let image = decoded.image, properties = decoded.properties
+        let rendered = try await render(image, metadata: properties,
+            orientation: decoded.orientation,
+            style: style, options: options, correction: correction)
+        let width = Int(rendered.extent.width), height = Int(rendered.extent.height)
+        var output: CVPixelBuffer?
+        let attributes: [CFString: Any] = [kCVPixelBufferIOSurfacePropertiesKey: [:], kCVPixelBufferMetalCompatibilityKey: true]
+        let extended = options.dynamicRange == .edr
+        let floatFormat = imageInputFormat == .rgba16Float ? kCVPixelFormatType_64RGBAHalf : kCVPixelFormatType_128RGBAFloat
+        let format = extended ? floatFormat : kCVPixelFormatType_32BGRA
+        let outputSpace = Self.colorSpace(for: options.dynamicRange)
+        guard CVPixelBufferCreate(nil, width, height, format, attributes as CFDictionary, &output) == kCVReturnSuccess,
+              let output else { throw LabError.io("无法分配输出像素缓冲区") }
+        context.render(rendered, to: output, bounds: rendered.extent, colorSpace: outputSpace)
+        LumeraImageMetadata.attach(LumeraImageMetadata.output(rendered.properties, width: width, height: height, depth: extended ? (imageInputFormat == .rgba16Float ? 16 : 32) : 8, dynamicRange: options.dynamicRange), to: output, dynamicRange: options.dynamicRange)
+        try Task.checkCancellation()
+        return output
+    }
+
+    /// 两类附件共同解释输入，只有可传播的拍摄字段会被传给输出元数据路径。
+    func interpretedBuffer(_ buffer: CVPixelBuffer, metadata: [String: Any]?, orientation: CGImagePropertyOrientation?) throws
+        -> (image: CIImage, properties: [String: Any], facts: [String: Any], orientation: CGImagePropertyOrientation) {
         let attachments = CVBufferCopyAttachments(buffer, .shouldPropagate) as? [String: Any] ?? [:]
         let nonpropagating = CVBufferCopyAttachments(buffer, .shouldNotPropagate) as? [String: Any] ?? [:]
         let sourceInterpretation = nonpropagating.merging(attachments) { _, propagated in propagated }
@@ -116,21 +141,39 @@ extension LumeraRenderer {
             image = CIImage(cvPixelBuffer: buffer, options: [.colorSpace: Self.sRGB])
         }
         let properties = LumeraImageMetadata.merge(attachments, supplement: metadata)
-        let rendered = try await render(image.settingProperties(attachments), metadata: properties,
-            orientation: orientation ?? LumeraImageMetadata.orientation(sourceInterpretation),
-            style: style, options: options, correction: correction)
-        let width = Int(rendered.extent.width), height = Int(rendered.extent.height)
-        var output: CVPixelBuffer?
-        let attributes: [CFString: Any] = [kCVPixelBufferIOSurfacePropertiesKey: [:], kCVPixelBufferMetalCompatibilityKey: true]
-        let extended = options.dynamicRange == .edr
-        let format = extended ? kCVPixelFormatType_128RGBAFloat : kCVPixelFormatType_32BGRA
-        let outputSpace = Self.colorSpace(for: options.dynamicRange)
-        guard CVPixelBufferCreate(nil, width, height, format, attributes as CFDictionary, &output) == kCVReturnSuccess,
-              let output else { throw LabError.io("无法分配输出像素缓冲区") }
-        context.render(rendered, to: output, bounds: rendered.extent, colorSpace: outputSpace)
-        LumeraImageMetadata.attach(LumeraImageMetadata.output(rendered.properties, width: width, height: height, depth: extended ? 32 : 8, dynamicRange: options.dynamicRange), to: output, dynamicRange: options.dynamicRange)
-        try Task.checkCancellation()
-        return output
+        return (image.settingProperties(attachments), properties, LumeraImageMetadata.merge(sourceInterpretation, supplement: metadata), orientation ?? LumeraImageMetadata.orientation(sourceInterpretation))
+    }
+
+    /// 在目标色彩空间中以 Float32 逐块测量完整图像，再检查半精度存储所需的余量。
+    func measureInputRange(_ image: CIImage, bounds: CGRect, colorSpace: CGColorSpace, budget: Int = 64 * 1024 * 1024, requireHalf: Bool = true) async throws -> NumericBounds {
+        // 分块预算同时留给暂存纹理和归约缓冲区。
+        guard budget >= 4096 else { throw LabError.invalid("Insufficient input range measurement budget") }
+        let edge = max(1, min(TextureDimensions.maximumEdge(device: device), Int(sqrt(Double(budget) / 32)), 2048))
+        var low = Double.infinity, high = -Double.infinity
+        for y in stride(from: 0, to: Int(bounds.height), by: edge) {
+            for x in stride(from: 0, to: Int(bounds.width), by: edge) {
+                try Task.checkCancellation()
+                let tileWidth = min(edge, Int(bounds.width) - x)
+                let tileHeight = min(edge, Int(bounds.height) - y)
+                let area = CGRect(x: bounds.minX + CGFloat(x), y: bounds.minY + CGFloat(y),
+                                  width: CGFloat(tileWidth), height: CGFloat(tileHeight))
+                let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba32Float,
+                    width: Int(area.width), height: Int(area.height), mipmapped: false)
+                descriptor.storageMode = .private; descriptor.usage = [.shaderRead, .shaderWrite]
+                guard let staging = device.makeTexture(descriptor: descriptor), let command = queue.makeCommandBuffer() else {
+                    throw LabError.io("Cannot allocate input range staging")
+                }
+                context.render(image, to: staging, commandBuffer: command, bounds: area, colorSpace: colorSpace)
+                let readback = try rangeReducer.encode(staging, commandBuffer: command)
+                try await complete(command)
+                let result = try readback.resolve()
+                low = min(low, result.lower); high = max(high, result.upper)
+            }
+        }
+        guard low.isFinite, high.isFinite, !requireHalf || max(abs(low), abs(high)) <= 65504 / 1.02 else {
+            throw LabError.unsupported("Input exceeds safe Float16 storage; select Float32 explicitly")
+        }
+        return .init(lower: low, upper: high)
     }
 
     func normalizedSource(_ image: CIImage, metadata: [String: Any]?, orientation: CGImagePropertyOrientation?, dynamicRange: RenderDynamicRange = .sdr) throws

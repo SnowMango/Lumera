@@ -36,7 +36,7 @@ final class GPUEdgeMeasurementTests:XCTestCase {
         // Renderer scales sigma by long edge / 2048; preserve an observable blur at 257 px.
         profile.parameters.detail.sharpenSigma=6.4;profile.parameters.detail.sharpenAmount=0.6
         let target=try MeasurementEngine.measure(renderer.renderStyle(input,profile:profile).image,kind:.edge)
-        var scores=[(Double,Double)](),maxMetric=0.0,maxCurve=0.0
+        var scores=[(Double,Double)]()
         for sharpen in [0.0,0.3,0.6,0.9,1.0] {
             profile.parameters.detail.sharpenAmount=sharpen
             let frame=try renderer.renderStyle(input,profile:profile).image
@@ -44,18 +44,16 @@ final class GPUEdgeMeasurementTests:XCTestCase {
             let actual=try gpu.measure(upload(frame,device),region:Region())
             for key in ["mean","contrast","slope","mtf50","overshoot","undershoot"] {
                 let difference=abs(actual.metrics[key]!-expected.metrics[key]!)
-                maxMetric=max(maxMetric,difference)
                 XCTAssertLessThan(difference,2e-5,key)
             }
             for key in ["edge","mtf"] {
                 let error=zip(actual.curves[key]!,expected.curves[key]!).map{abs($0-$1)}.max()!
-                maxCurve=max(maxCurve,error);XCTAssertLessThan(error,3e-5,key)
+                XCTAssertLessThan(error,3e-5,key)
             }
             let score=zip(actual.curves["mtf"]!,target.curves["mtf"]!).reduce(0.0){$0+pow($1.0-$1.1,2)}
             scores.append((sharpen,score))
         }
         XCTAssertEqual(scores.min{$0.1<$1.1}!.0,0.6)
-        print("GPU edge rendered maximum metric error: \(maxMetric); maximum curve error: \(maxCurve)")
     }
     func testInvalidEdgesAndCancellationDoNotPoisonReuse() async throws {
         let device=try XCTUnwrap(MTLCreateSystemDefaultDevice()),gpu=try GPUEdgeMeasurement(device:device)

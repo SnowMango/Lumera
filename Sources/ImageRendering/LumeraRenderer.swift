@@ -14,13 +14,15 @@ public final class LumeraRenderer: @unchecked Sendable {
     let queue: MTLCommandQueue
     let context: CIContext
     let encoder: TextureEffectEncoder
+    let frameFeatures: FrameFeatureExtractor
+    let rangeReducer: InputRangeReducer
     static let sRGB = CGColorSpace(name: CGColorSpace.sRGB)!
     static let extendedSRGB = CGColorSpace(name: CGColorSpace.extendedSRGB)!
     static func colorSpace(for range: RenderDynamicRange) -> CGColorSpace {
         range == .edr ? extendedSRGB : sRGB
     }
     func inputFormat(for range: RenderDynamicRange) -> MTLPixelFormat {
-        range == .edr ? .rgba32Float : imageInputFormat
+        imageInputFormat
     }
 
     /// Creates a renderer on the supplied device, or the system default device.
@@ -33,6 +35,8 @@ public final class LumeraRenderer: @unchecked Sendable {
         self.device = device
         self.queue = queue
         self.encoder = try TextureEffectEncoder(device: device, precision: precision)
+        self.frameFeatures = try FrameFeatureExtractor(device: device)
+        self.rangeReducer = try InputRangeReducer(device: device)
         self.context = CIContext(mtlDevice: device, options: [
             .workingColorSpace: CGColorSpace(name: CGColorSpace.extendedLinearSRGB)!,
             .workingFormat: CIFormat.RGBAf, .cacheIntermediates: false])
@@ -62,8 +66,10 @@ public final class LumeraRenderer: @unchecked Sendable {
     ///
     /// Input pixels must already be orientation-normalized, opaque and display-referred,
     /// with sRGB primaries and sRGB encoded values in a supported non-sRGB Metal format.
-    /// With `.edr`, supply extended encoded sRGB in a floating-point texture; SDR white retains
-    /// the same reference level. `inputDescriptor` declares the color encoding; it does not perform color conversion.
+    /// `.edr` 使用浮点纹理中的编码扩展 sRGB，沿用 SDR 的参考白电平。
+    /// Float16 EDR 需要可信的 `options.inputValueBounds`，范围未知时显式选择 Float32。
+    /// SDR 省略范围即声明输入为有限的 0…1 数值。
+    /// `inputDescriptor` declares the color encoding; it does not perform color conversion.
     /// No metadata is read or returned by this overload.
     ///
     /// - Important: Consume or copy the result in the same command buffer before committing.

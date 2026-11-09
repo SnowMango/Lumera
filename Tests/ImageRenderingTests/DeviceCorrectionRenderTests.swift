@@ -5,7 +5,7 @@ import ImagingCore
 
 final class DeviceCorrectionRenderTests:XCTestCase {
     func testAbsentAndExactIdentityAllocateNothing() throws {
-        let h=try RenderHarness()
+        let h=try RenderHarness(precision: .float32)
         XCTAssertNil(try h.encoder.prepareCorrection(nil))
         XCTAssertNil(try h.encoder.prepareCorrection(DeviceCorrection()))
         let c=DeviceCorrection(),lut=cube(square:false)
@@ -45,8 +45,8 @@ final class DeviceCorrectionRenderTests:XCTestCase {
         let out=RenderHarness.read(try run(h,source:source,correction:c,profile:p,lut:lut))
         XCTAssertEqual(out[0],0.5370987,accuracy:0.002)
     }
-    func testExtremeCorrectionPromotesPrecisionAndReleaseDuringFlight() throws {
-        let h=try RenderHarness(),source=try h.texture(width:32,height:32)
+    func testExtremeCorrectionFloat32AndReleaseDuringFlight() throws {
+        let h=try RenderHarness(precision: .float32),source=try h.texture(width:32,height:32)
         var c=DeviceCorrection();c.whiteBalance.source=Chromaticity(x:0.44309360431205197,y:0.18605332803746455)
         let correction=try h.encoder.prepareCorrection(c),cmd=try XCTUnwrap(h.queue.makeCommandBuffer())
         let out=try h.encoder.encode(source,style:h.encoder.prepare(ResolvedStyle(profile:.standard)),correction:correction,request:RenderRequest(input:InputDescriptor(width:32,height:32)),commandBuffer:cmd)
