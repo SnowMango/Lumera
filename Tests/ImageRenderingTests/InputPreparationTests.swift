@@ -151,3 +151,29 @@ final class InputPreparationTests: XCTestCase {
     }
 
 }
+
+extension InputPreparationTests {
+    func testTrustedNormalizedRangeChecksActualStoredPixels() async throws {
+        let renderer = try LumeraRenderer()
+        var working = WorkingImageContract(referenceRenditionID: "fixture"); working.dynamicRange = .edr
+        let adapter = try InputAdapter(renderer: renderer, working: working)
+        var execution = ExecutionProfile(width: 1, height: 1,
+            budget: .init(maxInFlightFrames: 1, maxResidentBytes: 16 * 1024 * 1024))
+        execution.dynamicRange = .edr
+        var descriptor = SourceDescriptor(id: "fixture", path: .processedPhoto); descriptor.recipeID = "ci"
+        let recipe = InputRecipe(id: "ci", backend: "coreImage", version: "1", decodedRendition: .baseImage)
+        let result = try await adapter.prepare(.image(image(0.5)), descriptor: descriptor, recipe: recipe, execution: execution,
+            trustedNormalizedRGBBounds: .init(lower: 0.4, upper: 0.6))
+        let unknown = try await adapter.prepare(.image(image(0.5)), descriptor: descriptor, recipe: recipe, execution: execution)
+        XCTAssertEqual(result.valueBounds, unknown.valueBounds)
+        XCTAssertEqual(result.valueBounds.lower, 0.5, accuracy: 0.003)
+        XCTAssertEqual(result.valueBounds.upper, 0.5, accuracy: 0.003)
+        for bounds in [NumericBounds(lower: 0.8, upper: 1), .init(lower: 0, upper: 65_500)] {
+            do {
+                _ = try await adapter.prepare(.image(image(0.5)), descriptor: descriptor, recipe: recipe, execution: execution,
+                    trustedNormalizedRGBBounds: bounds)
+                XCTFail("Accepted invalid trusted bounds or out-of-bounds stored pixels")
+            } catch { }
+        }
+    }
+}

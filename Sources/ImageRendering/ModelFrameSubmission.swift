@@ -54,7 +54,7 @@ extension LumeraRenderer {
             if let requirements = observations {
                 guard let stamp = plan.stamp else { throw LabError.invalid("Session statistics require an original frame stamp") }
                 observation = try frameFeatures.encode(input, stamp: stamp, requirements: requirements,
-                    commandBuffer: command, budgetLimit: plan.workingSet.limit, workingSet: plan.workingSet)
+                    commandBuffer: command, budgetLimit: plan.workingSet.limit, workingSet: plan.workingSet, inputAlreadyBudgeted: plan.residentInput != nil)
             } else { observation = nil }
             let submission = ModelFrameSubmission()
             try beforeCommit()

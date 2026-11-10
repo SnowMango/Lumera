@@ -7,8 +7,12 @@ import ImageRendering
 /// Waiting callers own their source buffers until admission. At most one additional
 /// queue of maxInFlightFrames callers may wait; unlimited producer fan-out rejects.
 public actor CameraSession {
+    private enum Input {
+        case prepared(PreparedInput)
+        case lazy(CameraFrameSource)
+    }
     private struct Request {
-        let input: PreparedInput
+        let input: Input
         let stamp: FrameStamp
         let edits: EditRequest
         let target: CaptureConditions
@@ -39,7 +43,7 @@ public actor CameraSession {
     private let recordLimit: Int
 
     /// 为一个有序视频流创建会话；模型须已准备资源和执行预算。
-    /// 延迟观测的帧数/秒数限制不能超过模型声明的有效期；采集、输入准备和编码仍由宿主负责。
+    /// 延迟观测的帧数/秒数限制不能超过模型声明的有效期；采集和输出编码仍由宿主负责。
     public init(renderer: LumeraRenderer, model: PreparedCameraModel,
                 backpressure: SessionBackpressure = .wait, seed: UInt32 = 42) throws {
         try self.init(model: model, backpressure: backpressure, seed: seed, driver: .live(renderer))
@@ -65,6 +69,18 @@ public actor CameraSession {
     /// reset 必须走会话边界方法，不能作为普通排队事件；取消已提交帧只抑制结果发布。
     public func enqueue(_ input: PreparedInput, stamp: FrameStamp, edits: EditRequest = .init(),
                         targetConditions: CaptureConditions = .init(), event: AdaptationEvent? = nil) async throws -> FrameOutcome {
+        try await enqueue(.prepared(input), stamp: stamp, edits: edits, targetConditions: targetConditions, event: event)
+    }
+
+    /// Admit a descriptor before invoking its preparation. Keep borrowed source backing immutable
+    /// and unavailable for reuse until this call returns, including after cancellation or reset.
+    public func enqueue(_ source: CameraFrameSource, stamp: FrameStamp, edits: EditRequest = .init(),
+                        targetConditions: CaptureConditions = .init(), event: AdaptationEvent? = nil) async throws -> FrameOutcome {
+        try await enqueue(.lazy(source), stamp: stamp, edits: edits, targetConditions: targetConditions, event: event)
+    }
+
+    private func enqueue(_ input: Input, stamp: FrameStamp, edits: EditRequest,
+                         targetConditions: CaptureConditions, event: AdaptationEvent?) async throws -> FrameOutcome {
         try Task.checkCancellation(); try targetConditions.validate()
         // Reset is a session boundary, not a queued event that could leave old jobs live.
         if case .reset = event { throw LabError.invalid("Use CameraSession.reset for stream reset events") }
@@ -140,10 +156,17 @@ public actor CameraSession {
         var request = request
         do {
             try request.cancellation.check()
-            let reservation = try model.reserveFrame()
-            guard request.input.residentStorageBytes < reservation.execution.budget.maxResidentBytes else {
-                reservation.cancel()
-                throw LabError.invalid("Prepared input exceeds the admitted frame memory allowance")
+            let reservation: FrameReservation
+            switch request.input {
+            case .prepared(let input):
+                reservation = try model.reserveFrame()
+                guard input.residentStorageBytes < reservation.execution.budget.maxResidentBytes else {
+                    reservation.cancel()
+                    throw LabError.invalid("Prepared input exceeds the admitted frame memory allowance")
+                }
+            case .lazy(let source):
+                guard source.model == nil || source.model === model else { throw LabError.invalid("Source preparer belongs to another model") }
+                reservation = try model.reserveFrame(sourceBytes: source.knownResidentBytes)
             }
             request.reservation = reservation
             pending.append(request)
@@ -172,7 +195,27 @@ public actor CameraSession {
         do {
             try request.cancellation.check()
             guard request.epoch == epoch else { request.continuation.resume(returning: .dropped(request.stamp, .reset)); return }
-            let input = request.input, stamp = request.stamp
+            let input: PreparedInput
+            switch request.input {
+            case .prepared(let prepared): input = prepared
+            case .lazy(let source):
+                let preparation = Task {
+                    try request.cancellation.check()
+                    try Task.checkCancellation()
+                    return try await source.prepare(reservation.execution)
+                }
+                request.cancellation.trackPreparation(preparation)
+                defer { request.cancellation.clearPreparation() }
+                input = try await preparation.value
+            }
+            // A provider can finish successfully after cancellation. Its result is then discarded
+            // before facts, observations, or any new GPU work are derived from it.
+            guard request.epoch == epoch else { request.continuation.resume(returning: .dropped(request.stamp, .reset)); return }
+            try request.cancellation.check()
+            guard input.residentStorageBytes < reservation.execution.budget.maxResidentBytes else {
+                throw LabError.invalid("Prepared input exceeds the admitted frame memory allowance")
+            }
+            let stamp = request.stamp
             let recipe = try input.source.effectiveRecipe.digest()
             let facts = FrameInputFacts(stamp: stamp, inputID: input.inputID, sourceID: input.sourceID,
                 calibrationID: input.calibrationID, effectiveRecipeDigest: recipe, captureConditions: input.captureConditions, effectiveRecipe: input.source.effectiveRecipe)

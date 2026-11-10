@@ -148,7 +148,19 @@ extension LumeraRenderer {
     func measureInputRange(_ image: CIImage, bounds: CGRect, colorSpace: CGColorSpace, budget: Int = 64 * 1024 * 1024, requireHalf: Bool = true) async throws -> NumericBounds {
         // 分块预算同时留给暂存纹理和归约缓冲区。
         guard budget >= 4096 else { throw LabError.invalid("Insufficient input range measurement budget") }
-        let edge = max(1, min(TextureDimensions.maximumEdge(device: device), Int(sqrt(Double(budget) / 32)), 2048))
+        func stagingDescriptor(_ width: Int, _ height: Int) -> MTLTextureDescriptor {
+            let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba32Float, width: width, height: height, mipmapped: false)
+            descriptor.storageMode = .private; descriptor.usage = [.shaderRead, .shaderWrite]
+            return descriptor
+        }
+        var edge = max(1, min(TextureDimensions.maximumEdge(device: device), Int(sqrt(Double(budget) / 32)), 2048))
+        while edge > 1 {
+            let width = min(edge, Int(bounds.width)), height = min(edge, Int(bounds.height))
+            let staging = device.heapTextureSizeAndAlign(descriptor: stagingDescriptor(width, height)).size
+            let range = device.heapBufferSizeAndAlign(length: ((width + 15) / 16) * ((height + 15) / 16) * 16, options: .storageModeShared).size
+            if staging + range <= budget { break }
+            edge /= 2
+        }
         var low = Double.infinity, high = -Double.infinity
         for y in stride(from: 0, to: Int(bounds.height), by: edge) {
             for x in stride(from: 0, to: Int(bounds.width), by: edge) {
@@ -157,14 +169,16 @@ extension LumeraRenderer {
                 let tileHeight = min(edge, Int(bounds.height) - y)
                 let area = CGRect(x: bounds.minX + CGFloat(x), y: bounds.minY + CGFloat(y),
                                   width: CGFloat(tileWidth), height: CGFloat(tileHeight))
-                let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba32Float,
-                    width: Int(area.width), height: Int(area.height), mipmapped: false)
-                descriptor.storageMode = .private; descriptor.usage = [.shaderRead, .shaderWrite]
+                let descriptor = stagingDescriptor(tileWidth, tileHeight)
+                let workspace = TileWorkingSet(limit: budget)
+                let textureBytes = device.heapTextureSizeAndAlign(descriptor: descriptor).size
+                try workspace.reserve(textureBytes)
                 guard let staging = device.makeTexture(descriptor: descriptor), let command = queue.makeCommandBuffer() else {
                     throw LabError.io("Cannot allocate input range staging")
                 }
+                try workspace.reserve(max(0, staging.allocatedSize - textureBytes))
                 context.render(image, to: staging, commandBuffer: command, bounds: area, colorSpace: colorSpace)
-                let readback = try rangeReducer.encode(staging, commandBuffer: command)
+                let readback = try rangeReducer.encode(staging, commandBuffer: command, workingSet: workspace)
                 try await complete(command)
                 let result = try readback.resolve()
                 low = min(low, result.lower); high = max(high, result.upper)

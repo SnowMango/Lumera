@@ -9,11 +9,11 @@ final class ModelRenderPlanTests: XCTestCase {
         .init(width: 2, height: 2, budget: .init(maxInFlightFrames: 1, maxResidentBytes: bytes))
     }
     func model() -> CameraModel { .init(identity: .init(id: "fixture", camera: "synthetic", mode: "test")) }
-    func input(_ renderer: LumeraRenderer) async throws -> PreparedInput {
+    func input(_ renderer: LumeraRenderer, execution: ExecutionProfile? = nil) async throws -> PreparedInput {
         var descriptor = SourceDescriptor(id: "input", path: .processedPhoto); descriptor.recipeID = "ci"
         let image = CIImage(color: .init(red: 0.5, green: 0.5, blue: 0.5)).cropped(to: .init(x: 0, y: 0, width: 2, height: 2))
         let normalized = try await InputAdapter(renderer: renderer, working: .init(referenceRenditionID: "fixture")).prepare(.image(image), descriptor: descriptor,
-            recipe: .init(id: "ci", backend: "coreImage", version: "1", decodedRendition: .baseImage), execution: execution())
+            recipe: .init(id: "ci", backend: "coreImage", version: "1", decodedRendition: .baseImage), execution: execution ?? self.execution())
         return try await InputNormalizer(renderer: renderer).normalize(normalized, calibration: nil, resources: .init())
     }
     func controls(_ model: CompiledCameraModel, input: PreparedInput) -> ResolvedControls {
@@ -197,4 +197,77 @@ final class ModelRenderPlanTests: XCTestCase {
         withExtendedLifetime(plan) {}
     }
 
+}
+
+extension ModelRenderPlanTests {
+    func testLegacyExecutionDecodesSharedScaleAndEnabledGlow() throws {
+        let legacy = Data("""
+            {"precision":"float16","width":2,"height":2,"dynamicRange":"sdr","effectScale":0.5,
+             "statisticsLatency":{"sameFrame":{}},"budget":{"maxInFlightFrames":1,"maxResidentBytes":33554432}}
+            """.utf8)
+        let value = try JSONDecoder().decode(ExecutionProfile.self, from: legacy)
+        XCTAssertEqual(try value.effectResolutions().glow, .half)
+        XCTAssertEqual(try value.effectResolutions().halation, .half)
+        XCTAssertEqual(try value.effectResolutions().softening, .half)
+        XCTAssertTrue(value.previewGlow)
+        let encoded = try XCTUnwrap(JSONSerialization.jsonObject(with: JSON.encode(value)) as? NSDictionary)
+        XCTAssertEqual(encoded, try JSONSerialization.jsonObject(with: legacy) as? NSDictionary)
+    }
+
+    func testExecutionEffectsReachRenderPlanAndOverrideLegacyFallback() async throws {
+        let renderer = try LumeraRenderer(), input = try await input(renderer)
+        let compiled = try CameraModelCompiler.compile(model())
+        var e = execution(); e.effectScale = 0.5
+        e.glowScale = .quarter; e.softeningScale = .eighth; e.previewGlow = false
+        let prepared = try ModelPreparer(renderer: renderer).prepare(compiled, resources: .init(), execution: e)
+        let plan = try RenderPlanner().plan(controls(compiled, input: input), input: input, model: prepared)
+        XCTAssertEqual(plan.request.glowScale, .quarter)
+        XCTAssertEqual(plan.request.halationScale, .half)
+        XCTAssertEqual(plan.request.softeningScale, .eighth)
+        XCTAssertFalse(plan.request.previewGlow)
+        XCTAssertEqual(try JSONDecoder().decode(ExecutionProfile.self, from: JSONEncoder().encode(e)), e)
+    }
+
+    func testStandaloneInputAcceptsLegacyScaleWhileModelRequiresSupportedEffectResolutions() async throws {
+        let renderer = try LumeraRenderer(), preparer = ModelPreparer(renderer: renderer)
+        let compiled = try CameraModelCompiler.compile(model())
+        var execution = self.execution()
+        execution.effectScale = 0.75
+        let input = try await input(renderer, execution: execution)
+        XCTAssertEqual(input.execution.effectScale, 0.75)
+        XCTAssertThrowsError(try preparer.prepare(compiled, resources: .init(), execution: execution)) { error in
+            guard case LabError.unsupported = error else { return XCTFail("Expected unsupported optical scale, got \(error)") }
+        }
+
+        execution.glowScale = .half
+        execution.halationScale = .quarter
+        execution.softeningScale = .full
+        let prepared = try preparer.prepare(compiled, resources: .init(), execution: execution)
+        let plan = try RenderPlanner().plan(controls(compiled, input: input), input: input, model: prepared)
+        XCTAssertEqual(plan.request.glowScale, .half)
+        XCTAssertEqual(plan.request.halationScale, .quarter)
+        XCTAssertEqual(plan.request.softeningScale, .full)
+    }
+}
+
+extension ModelRenderPlanTests {
+    func testStreamingPreparationRejectsOverflowingFrameWorkingSet() throws {
+        let compiled = try CameraModelCompiler.compile(model())
+        for precision in [ExecutionPrecision.float16, .float32] {
+            let renderer = try LumeraRenderer(precision: precision == .float16 ? .float16 : .float32)
+            let preparer = ModelPreparer(renderer: renderer)
+            var valid = execution(); valid.precision = precision
+            let original = try preparer.prepareStreaming(compiled, resources: .init(), execution: valid)
+            var overflowing = valid
+            overflowing.width = 1
+            overflowing.height = Int.max / (precision.bytesPerPixel * 4) + 1
+            XCTAssertNoThrow(try overflowing.validate(), "Pixel storage fits; only the full working set overflows")
+            XCTAssertThrowsError(try preparer.prepareStreaming(compiled, resources: .init(), execution: overflowing)) { error in
+                guard case LabError.invalid = error else { return XCTFail("Expected validation error, got \(error)") }
+            }
+            XCTAssertThrowsError(try preparer.prepareVariant(of: original, execution: overflowing, streaming: true)) { error in
+                guard case LabError.invalid = error else { return XCTFail("Expected variant validation error, got \(error)") }
+            }
+        }
+    }
 }

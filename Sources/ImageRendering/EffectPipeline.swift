@@ -4,10 +4,10 @@ import ImagingCore
 
 /// 单帧的固定四个 LUT 绑定和权重，空闲槽复用首张纹理，权重为零。
 struct PreparedLUTBlend {
-    let textures: [MTLTexture]
+    let luts: [PreparedLUT]
+    var textures: [MTLTexture] { luts.map(\.texture) }
     let weights: [Float]
     let boundaryPolicy: LUTBoundaryPolicy
-    let allIdentity: Bool
 }
 
 /// 实时和参考后端共用的已校验帧参数、资源和几何信息。

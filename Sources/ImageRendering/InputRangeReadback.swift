@@ -12,14 +12,19 @@ final class InputRangeReducer {
         guard let function = library.makeFunction(name: "inputRangeTiles") else { throw LabError.io("Missing input range kernel") }
         pipeline = try device.makeComputePipelineState(function: function)
     }
-    func encode(_ input: MTLTexture, commandBuffer: MTLCommandBuffer) throws -> InputRangeReadback {
+    func encode(_ input: MTLTexture, commandBuffer: MTLCommandBuffer, workingSet: TileWorkingSet? = nil) throws -> InputRangeReadback {
         guard commandBuffer.status == .notEnqueued, commandBuffer.retainedReferences,
               input.device.registryID == device.registryID, commandBuffer.device.registryID == device.registryID else {
             throw LabError.invalid("Range measurement command/device mismatch")
         }
         let width = (input.width + 15) / 16, height = (input.height + 15) / 16
-        guard let buffer = device.makeBuffer(length: width * height * MemoryLayout<SIMD4<Float>>.stride, options: .storageModeShared),
+        let length = width * height * MemoryLayout<SIMD4<Float>>.stride
+        let estimate = device.heapBufferSizeAndAlign(length: length, options: .storageModeShared).size
+        try workingSet?.reserve(estimate)
+        guard let buffer = device.makeBuffer(length: length, options: .storageModeShared),
               let encoder = commandBuffer.makeComputeCommandEncoder() else { throw LabError.io("Cannot allocate input range readback") }
+        do { try workingSet?.reserve(max(0, buffer.allocatedSize - estimate)) }
+        catch { encoder.endEncoding(); throw error }
         encoder.setComputePipelineState(pipeline); encoder.setTexture(input, index: 0); encoder.setBuffer(buffer, offset: 0, index: 0)
         let w = pipeline.threadExecutionWidth, h = max(1, min(8, pipeline.maxTotalThreadsPerThreadgroup / w))
         encoder.dispatchThreads(.init(width: width, height: height, depth: 1), threadsPerThreadgroup: .init(width: w, height: h, depth: 1))

@@ -286,3 +286,386 @@ final class PhotoProcessorTests: XCTestCase {
     }
 
 }
+
+extension PhotoProcessorTests {
+    func testExplicitExportBypassesGlowAndHalationForFullTiledAndRegionOutput() async throws {
+        let renderer = try LumeraRenderer(), processor = try PhotoProcessor(renderer: renderer, working: working)
+        var definition = definition()
+        definition.appearance.parameters.glow.enabled = true
+        definition.appearance.parameters.glow.amount = 0.7
+        definition.appearance.parameters.glow.threshold = 0.3
+        definition.appearance.parameters.halation.enabled = true
+        definition.appearance.parameters.halation.amount = 0.6
+        definition.appearance.parameters.halation.threshold = 0.3
+        var preview = execution; preview.width = 256; preview.height = 256
+        let model = try ModelPreparer(renderer: renderer).prepare(CameraModelCompiler.compile(definition), resources: .init(), execution: preview)
+        let bright = image(0.85, width: 128, height: 256).transformed(by: .init(translationX: 128, y: 0))
+        let source = bright.composited(over: image(0.1, width: 256, height: 256))
+        let result = try await processor.process(.image(source), descriptor: descriptor, recipe: recipe, calibration: nil, model: model, stamp: stamp)
+        var export = preview
+        export.previewGlow = false
+        export.glowScale = .quarter; export.halationScale = .eighth; export.softeningScale = .half
+        let full = try await processor.render(result.snapshot, execution: export)
+        let tiled = try await processor.render(result.snapshot, execution: export, tiled: true)
+        let region = CGRect(x: 126, y: 120, width: 4, height: 8)
+        let cropped = try await processor.render(result.snapshot, region: region, execution: export)
+        let expected = pixels(source)
+        XCTAssertGreaterThan(try XCTUnwrap(zip(pixels(result.frame.image), expected).map { abs($0 - $1) }.max()), 0.03)
+        XCTAssertEqual(full.execution, export)
+        let expectedRegion = pixels(source.cropped(to: region))
+        for (frame, reference) in [(full, expected), (tiled, expected), (cropped, expectedRegion)] {
+            let actual = pixels(frame.image)
+            XCTAssertEqual(actual.count, reference.count)
+            XCTAssertLessThan(try XCTUnwrap(zip(actual, reference).map { abs($0 - $1) }.max()), 0.003)
+        }
+    }
+
+    func testDevelopedProRAWPreservesCaptureOriginWithoutRAWReplay() async throws {
+        let renderer = try LumeraRenderer(), processor = try PhotoProcessor(renderer: renderer, working: working)
+        let model = try ModelPreparer(renderer: renderer).prepare(CameraModelCompiler.compile(definition()), resources: .init(), execution: execution)
+        var d = descriptor; d.path = .proRAW
+        let result = try await processor.process(.image(image()), descriptor: d, recipe: recipe, calibration: nil, model: model, stamp: stamp)
+        XCTAssertEqual(result.snapshot.input.source.descriptor.path, .proRAW)
+        XCTAssertEqual(result.snapshot.input.source.inputDevelopment, .decodedPixels)
+        XCTAssertFalse(result.snapshot.canRedevelopRAW)
+        XCTAssertNil(result.snapshot.input.source.effectiveRecipe.decoderVersion)
+        var full = execution; full.precision = .float32
+        let exported = try await processor.render(result.snapshot, execution: full)
+        XCTAssertEqual(exported.texture?.pixelFormat, .rgba32Float)
+    }
+
+    func testExternalRAWURLDataAndPhotoReplayUseActualFilterAndFrozenPayload() async throws {
+        guard let path = ProcessInfo.processInfo.environment["LUMERA_RAW_TEST_FILE"] else {
+            throw XCTSkip("Set LUMERA_RAW_TEST_FILE to a supported RAW fixture")
+        }
+        let url = URL(fileURLWithPath: path), bytes = try Data(contentsOf: url)
+        let original = try XCTUnwrap(CIRAWFilter(imageURL: url))
+        let decoder = try XCTUnwrap(original.supportedDecoderVersions.first)
+        let defaultExposure = original.baselineExposure
+        let recipe = InputRecipe(id: "ci", backend: "coreImage", version: "1")
+        var d = descriptor; d.path = .raw
+        var e = execution
+        let expected = try XCTUnwrap(original.outputImage).extent
+        e.width = Int(expected.width); e.height = Int(expected.height)
+        e.budget.maxResidentBytes = 512 * 1024 * 1024
+        let renderer = try LumeraRenderer(), processor = try PhotoProcessor(renderer: renderer, working: working)
+        let adapter = try InputAdapter(renderer: renderer, working: working)
+        let model = try ModelPreparer(renderer: renderer).prepare(CameraModelCompiler.compile(definition()), resources: .init(), execution: e)
+        var payload = Data([2])
+        let config = try RAWDevelopmentConfiguration(identifier: "host", version: "1", payload: payload) { raw, frozen in
+            XCTAssertEqual(frozen, Data([2]))
+            XCTAssertFalse(raw.isDraftModeEnabled)
+            XCTAssertEqual(raw.extendedDynamicRangeAmount, 0)
+            raw.decoderVersion = decoder
+            raw.baselineExposure = defaultExposure - Float(frozen[0])
+        }
+        payload[0] = 5
+        let result = try await processor.process(.rawURL(url), descriptor: d, recipe: recipe, calibration: nil,
+            model: model, stamp: stamp, rawConfiguration: config)
+        let dataInput = try await adapter.prepare(.rawData(bytes), descriptor: d, recipe: recipe, execution: e, rawConfiguration: config)
+        XCTAssertEqual(dataInput.sourceID, result.snapshot.input.sourceID)
+        XCTAssertEqual(dataInput.effectiveRecipe.decoderVersion, decoder.rawValue)
+        XCTAssertEqual(dataInput.effectiveRecipe.externalRAWConfiguration, config.identity)
+        XCTAssertEqual(dataInput.inputDevelopment, .rawDevelopment)
+        XCTAssertTrue(result.snapshot.canRedevelopRAW)
+        let unedited = try await adapter.prepare(.rawData(bytes), descriptor: d, recipe: recipe, execution: e)
+        XCTAssertNotEqual(pixels(dataInput.image), pixels(unedited.image))
+        var high = e; high.precision = .float32
+        let replay = try await processor.render(result.snapshot, execution: high)
+        XCTAssertEqual(replay.texture?.pixelFormat, .rgba32Float)
+        XCTAssertEqual(pixels(replay.image)[0], pixels(result.frame.image)[0], accuracy: 0.003)
+    }
+
+    func testExternalRAWCallbackErrorIsPropagated() async throws {
+        enum CallbackError: Error { case rejected }
+        guard let path = ProcessInfo.processInfo.environment["LUMERA_RAW_TEST_FILE"] else {
+            throw XCTSkip("Set LUMERA_RAW_TEST_FILE to a supported RAW fixture")
+        }
+        let url = URL(fileURLWithPath: path)
+        let adapter = try InputAdapter(renderer: LumeraRenderer(), working: working)
+        var d = descriptor; d.path = .raw
+        let recipe = InputRecipe(id: "ci", backend: "coreImage", version: "1")
+        let config = try RAWDevelopmentConfiguration(identifier: "host", version: "1", payload: Data()) { _, _ in throw CallbackError.rejected }
+        do {
+            _ = try await adapter.prepare(.rawURL(url), descriptor: d, recipe: recipe, execution: execution, rawConfiguration: config)
+            XCTFail("Callback rejection was ignored")
+        } catch CallbackError.rejected { } catch { XCTFail("Callback error was replaced by \(error)") }
+    }
+}
+
+extension PhotoProcessorTests {
+    func testConflictingRAWControlsFailBeforeOpeningSource() async throws {
+        let renderer = try LumeraRenderer()
+        let processor = try PhotoProcessor(renderer: renderer, working: working)
+        let model = try ModelPreparer(renderer: renderer).prepare(CameraModelCompiler.compile(definition()), resources: .init(), execution: execution)
+        let config = try RAWDevelopmentConfiguration(identifier: "host", version: "1", payload: Data()) { _, _ in }
+        var recipe = self.recipe
+        recipe.rawSettings = [.init(key: .exposureEV, value: 1)]
+        var descriptor = self.descriptor
+        descriptor.path = .raw
+        let source = SourceImage.rawURL(FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString))
+        do {
+            _ = try await processor.process(source, descriptor: descriptor, recipe: recipe, calibration: nil, model: model,
+                                            stamp: stamp, rawConfiguration: config)
+            XCTFail("Mixed RAW controls were accepted")
+        } catch {
+            XCTAssertEqual(error.localizedDescription, "External RAW configuration and legacy RAW controls cannot be combined")
+        }
+        XCTAssertThrowsError(try processor.makeSource(source, descriptor: descriptor, recipe: recipe, calibration: nil, rawConfiguration: config)) {
+            XCTAssertEqual($0.localizedDescription, "External RAW configuration and legacy RAW controls cannot be combined")
+        }
+    }
+
+    func testReusablePhotoRebuildsWithoutPinningInputThroughOutput() async throws {
+        let renderer = try LumeraRenderer()
+        let processor = try PhotoProcessor(renderer: renderer, working: working)
+        let model = try ModelPreparer(renderer: renderer).prepare(CameraModelCompiler.compile(definition()), resources: .init(), execution: execution)
+        let source = try processor.makeSource(.image(image(0.30001)), descriptor: descriptor, recipe: recipe, calibration: nil)
+        let cache = try PhotoInputCache(maxResidentBytes: 1 << 20)
+        let first = try await processor.process(source, cache: cache, model: model, stamp: stamp)
+        let before = await cache.residentBytes
+        XCTAssertGreaterThan(before, 0)
+        await cache.evictAll()
+        let after = await cache.residentBytes
+        XCTAssertEqual(after, 0, "The snapshot and completed result must not own cached pixels")
+        let remaining = try model.reserveFrame()
+        XCTAssertEqual(remaining.execution.budget.maxResidentBytes, execution.budget.maxResidentBytes - first.frame.texture!.allocatedSize)
+        remaining.cancel()
+        let rebuilt = try await processor.render(first.snapshot, cache: cache, execution: execution, retention: .evictAfterUse)
+        XCTAssertNotEqual(rebuilt.inputID, first.frame.inputID)
+        XCTAssertEqual(pixels(rebuilt.image), pixels(first.frame.image))
+        let discarded = await cache.residentBytes
+        XCTAssertEqual(discarded, 0)
+        var high = execution
+        high.precision = .float32
+        let exported = try await processor.render(first.snapshot, cache: cache, execution: high, retention: .evictAfterUse)
+        XCTAssertEqual(exported.texture?.pixelFormat, .rgba32Float)
+        XCTAssertEqual(pixels(exported.image)[0], 0.30001, accuracy: 0.00001)
+    }
+
+    func testReusablePhotoSwapsModelsAndObservesNewRequirements() async throws {
+        let renderer = try LumeraRenderer(), processor = try PhotoProcessor(renderer: renderer, working: working)
+        let preparer = ModelPreparer(renderer: renderer)
+        var firstDefinition = definition()
+        firstDefinition.observations.features = [.init(id: "red", statistic: .meanRed)]
+        let firstModel = try preparer.prepare(CameraModelCompiler.compile(firstDefinition), resources: .init(), execution: execution)
+        var secondDefinition = firstDefinition
+        secondDefinition.appearance.parameters.color.exposureEV = 1
+        let secondModel = try preparer.prepare(CameraModelCompiler.compile(secondDefinition), resources: .init(), execution: execution)
+        var thirdDefinition = secondDefinition
+        thirdDefinition.observations.features = [.init(id: "green", statistic: .meanGreen)]
+        let thirdModel = try preparer.prepare(CameraModelCompiler.compile(thirdDefinition), resources: .init(), execution: execution)
+        let source = try processor.makeSource(.image(image()), descriptor: descriptor, recipe: recipe, calibration: nil)
+        let cache = try PhotoInputCache(maxResidentBytes: 1 << 20)
+        let first = try await processor.process(source, cache: cache, model: firstModel, stamp: stamp)
+        let second = try await processor.process(source, cache: cache, model: secondModel, stamp: stamp, reusing: first.snapshot)
+        XCTAssertEqual(first.frame.inputID, second.frame.inputID)
+        XCTAssertEqual(first.snapshot.observations, second.snapshot.observations)
+        XCTAssertEqual(second.snapshot.automatic.parameters.color.exposureEV, 1)
+        let third = try await processor.process(source, cache: cache, model: thirdModel, stamp: stamp, reusing: second.snapshot)
+        XCTAssertEqual(third.frame.inputID, first.frame.inputID)
+        XCTAssertEqual(third.snapshot.observations.features.map(\.id), ["green"])
+        let revised = try processor.makeSource(.image(image(0.2)), descriptor: descriptor, recipe: recipe, calibration: nil)
+        let updated = try await processor.process(revised, cache: cache, model: firstModel, stamp: stamp, reusing: first.snapshot)
+        XCTAssertNotEqual(updated.frame.inputID, first.frame.inputID)
+        XCTAssertNotEqual(updated.snapshot.observations.features, first.snapshot.observations.features)
+    }
+}
+
+extension PhotoProcessorTests {
+    func testCacheEvictionPinsInputThroughActiveGPUWork() async throws {
+        let renderer = try LumeraRenderer(), processor = try PhotoProcessor(renderer: renderer, working: working)
+        let model = try ModelPreparer(renderer: renderer).prepare(CameraModelCompiler.compile(definition()), resources: .init(), execution: execution)
+        let source = try processor.makeSource(.image(image()), descriptor: descriptor, recipe: recipe, calibration: nil)
+        let cache = try PhotoInputCache(maxResidentBytes: 1 << 20)
+        let first = try await processor.process(source, cache: cache, model: model, stamp: stamp)
+        let resident = await cache.residentBytes
+        let event = try XCTUnwrap(renderer.device.makeSharedEvent())
+        let blocker = try XCTUnwrap(renderer.queue.makeCommandBuffer())
+        blocker.encodeWaitForEvent(event, value: 1)
+        blocker.commit()
+        defer { event.signaledValue = 1 }
+        let render = Task { try await processor.render(first.snapshot, cache: cache, execution: execution) }
+        var active = false
+        for _ in 0..<1000 {
+            guard let probe = try? model.reserveFrame() else { active = true; break }
+            probe.cancel()
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertTrue(active)
+        await cache.evictAll()
+        let pinned = await cache.residentBytes
+        XCTAssertEqual(pinned, resident)
+        event.signaledValue = 1
+        let output = try await render.value
+        XCTAssertEqual(output.inputID, first.frame.inputID)
+        let released = await cache.residentBytes
+        XCTAssertEqual(released, 0)
+    }
+
+    func testSharedPhotoBuildSurvivesWaiterCancellationWithoutPublishingAfterEviction() async throws {
+        enum UnexpectedBuild: Error { case duplicate }
+        let renderer = try LumeraRenderer(), processor = try PhotoProcessor(renderer: renderer, working: working)
+        let model = try ModelPreparer(renderer: renderer).prepare(CameraModelCompiler.compile(definition()), resources: .init(), execution: execution)
+        let source = try processor.makeSource(.image(image()), descriptor: descriptor, recipe: recipe, calibration: nil)
+        let cache = try PhotoInputCache(maxResidentBytes: 1 << 20)
+        let key = PhotoInputKey(source: source, model: model)
+        let (started, start) = AsyncStream<Void>.makeStream()
+        let (unblock, finish) = AsyncStream<Void>.makeStream()
+        let (joined, join) = AsyncStream<Void>.makeStream()
+        let first = Task {
+            try await cache.acquire(key, retention: .retain) {
+                start.yield()
+                var signal = unblock.makeAsyncIterator()
+                _ = await signal.next()
+                let reservation = try model.reserveFrame()
+                defer { reservation.cancel() }
+                let normalized = try await InputAdapter(renderer: renderer, working: source.working).prepare(
+                    source.lease.source, descriptor: source.descriptor, recipe: source.recipe, execution: reservation.execution)
+                let input = try await InputNormalizer(renderer: renderer).normalize(normalized, calibration: nil, resources: .init())
+                return try reservation.finishPreparingPhotoInput(input)
+            }
+        }
+        var startSignal = started.makeAsyncIterator()
+        _ = await startSignal.next()
+        let second = Task {
+            try await cache.acquireForTest(key, entered: { join.yield() }) { throw UnexpectedBuild.duplicate }
+        }
+        var joinSignal = joined.makeAsyncIterator()
+        _ = await joinSignal.next()
+        await cache.evictAll()
+        first.cancel()
+        finish.yield()
+        do { _ = try await first.value; XCTFail("Cancelled waiter received the shared input") }
+        catch { XCTAssertTrue(error is CancellationError) }
+        let entry = try await second.value
+        let pinned = await cache.residentBytes
+        XCTAssertEqual(pinned, entry.origin.input.residentStorageBytes)
+        do {
+            _ = try await cache.acquire(key, retention: .retain) { throw UnexpectedBuild.duplicate }
+            XCTFail("An evicted in-flight build repopulated the cache")
+        } catch { XCTAssertTrue(error is UnexpectedBuild) }
+    }
+
+    func testReusableRAWSourceRebuildsWithConfigurationAndRejectsURLMutationOnCacheHit() async throws {
+        guard let path = ProcessInfo.processInfo.environment["LUMERA_RAW_TEST_FILE"] else {
+            throw XCTSkip("Set LUMERA_RAW_TEST_FILE to a supported RAW fixture")
+        }
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(UUID()).dng")
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: path), to: url)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let extent = try XCTUnwrap(CIRAWFilter(imageURL: url)?.outputImage).extent
+        var execution = self.execution
+        execution.width = Int(extent.width)
+        execution.height = Int(extent.height)
+        execution.budget.maxResidentBytes = 512 * 1024 * 1024
+        let renderer = try LumeraRenderer(), processor = try PhotoProcessor(renderer: renderer, working: working)
+        let model = try ModelPreparer(renderer: renderer).prepare(CameraModelCompiler.compile(definition()), resources: .init(), execution: execution)
+        var descriptor = self.descriptor
+        descriptor.path = .raw
+        let config = try RAWDevelopmentConfiguration(identifier: "host", version: "1", payload: Data([2])) { raw, payload in
+            raw.baselineExposure -= Float(payload[0])
+        }
+        let source = try processor.makeSource(.rawURL(url), descriptor: descriptor, recipe: recipe, calibration: nil, rawConfiguration: config)
+        let cache = try PhotoInputCache(maxResidentBytes: 256 * 1024 * 1024)
+        let result = try await processor.process(source, cache: cache, model: model, stamp: stamp)
+        XCTAssertTrue(result.snapshot.canRedevelopRAW)
+        XCTAssertEqual(result.snapshot.inputFacts.effectiveRecipe?.externalRAWConfiguration, config.identity)
+        await cache.evictAll()
+        var high = execution
+        high.precision = .float32
+        let rebuilt = try await processor.render(result.snapshot, cache: cache, execution: high)
+        XCTAssertNotEqual(result.frame.inputID, rebuilt.inputID)
+        XCTAssertEqual(rebuilt.texture?.pixelFormat, .rgba32Float)
+        XCTAssertEqual(pixels(result.frame.image)[0], pixels(rebuilt.image)[0], accuracy: 0.003)
+        try Data("changed".utf8).write(to: url)
+        do {
+            _ = try await processor.render(result.snapshot, cache: cache, execution: high)
+            XCTFail("An existing RAW cache entry accepted a modified source file")
+        } catch {
+            XCTAssertEqual(error.localizedDescription, "Photo source bytes changed; create a new decision")
+        }
+    }
+}
+
+extension PhotoInputCache {
+    fileprivate func acquireForTest(_ key: PhotoInputKey, entered: @Sendable () -> Void,
+                                    build: @escaping @Sendable () async throws -> PhotoInputResidency) async throws -> PhotoInputLease {
+        entered()
+        return try await acquire(key, retention: .retain, build: build)
+    }
+}
+
+extension PhotoProcessorTests {
+    func testBoundedSnapshotRegionExportMatchesFullRender() async throws {
+        let renderer = try LumeraRenderer(), processor = try PhotoProcessor(renderer: renderer, working: working)
+        var definition = definition()
+        definition.observations.features = [.init(id: "mean", statistic: .meanRed)]
+        definition.appearance.parameters.vignette.enabled = true
+        definition.appearance.parameters.vignette.amountEV = 1
+        definition.appearance.parameters.vignette.centerX = 0.2
+        let execution = ExecutionProfile(width: 701, height: 509, budget: .init(maxInFlightFrames: 1, maxResidentBytes: 64 * 1024 * 1024))
+        let model = try ModelPreparer(renderer: renderer).prepareStreaming(CameraModelCompiler.compile(definition), resources: .init(), execution: execution)
+        let source = try processor.makeSource(.image(image(width: 701, height: 509)), descriptor: descriptor, recipe: recipe, calibration: nil)
+        let snapshot = try await processor.processStreaming(source, model: model, stamp: stamp) { _ in }
+        let region = CGRect(x: 97, y: 81, width: 311, height: 273)
+        var data = Data(count: 311 * 273 * 8)
+        let result = try await processor.renderStreaming(snapshot, execution: execution, region: region) { tile in
+            data.withUnsafeMutableBytes { dest in
+                for row in 0..<Int(tile.core.height) {
+                    let y = 272 - (Int(tile.core.minY - region.minY) + row)
+                    dest.baseAddress!.advanced(by: (y * 311 + Int(tile.core.minX - region.minX)) * 8)
+                        .copyMemory(from: tile.bytes.baseAddress!.advanced(by: row * tile.bytesPerRow), byteCount: Int(tile.core.width) * 8)
+                }
+            }
+        }
+        XCTAssertEqual(result.observations, snapshot.observations)
+        XCTAssertEqual(result.controls.automatic, snapshot.automatic)
+        let actual = CIImage(bitmapData: data, bytesPerRow: 311 * 8, size: region.size, format: .RGBAh, colorSpace: CGColorSpace(name: CGColorSpace.sRGB))
+        let expected = try await processor.process(.image(image(width: 701, height: 509)), descriptor: descriptor, recipe: recipe, calibration: nil, model: model, stamp: stamp)
+        let crop = expected.frame.image.cropped(to: region).transformed(by: .init(translationX: -region.minX, y: -region.minY))
+        for (a,b) in zip(pixels(actual), pixels(crop)) { XCTAssertEqual(a,b,accuracy:0.003) }
+    }
+}
+
+extension PhotoProcessorTests {
+    func testStreamingCalibratedLUTLedgerCeilingAndNoRetainedArena() async throws {
+        let renderer = try LumeraRenderer()
+        let asset = LUTAsset(name: "identity", cubeText: "LUT_3D_SIZE 2\n0 0 0\n1 0 0\n0 1 0\n1 1 0\n0 0 1\n1 0 1\n0 1 1\n1 1 1")
+        let resources = try ModelResourceSet(luts: ["lut": asset])
+        var definition = definition()
+        definition.appearance.resources = [.init(id: "lut", sha256: asset.sha256, dimension: 2)]
+        definition.appearance.lutWeights = [.init(resourceID: "lut", weight: 1)]
+        let model = try ModelPreparer(renderer: renderer).prepareStreaming(CameraModelCompiler.compile(definition), resources: resources, execution: execution)
+        let normalized = try await InputAdapter(renderer: renderer, working: working).prepare(.image(image()), descriptor: descriptor, recipe: recipe, execution: execution)
+        var calibration = InputCalibration(id: "half", source: descriptor, working: working)
+        calibration.recipeDigest = try normalized.effectiveRecipe.digest()
+        calibration.correction.matrix.values = [0.5,0,0,0,0.5,0,0,0,0.5]
+        var correction = ModelResourceDescriptor(id: "lut", sha256: asset.sha256, dimension: 2); correction.role = .correctionLUT
+        calibration.resources = [correction]
+        let processor = try PhotoProcessor(renderer: renderer, working: working, inputResources: resources)
+        let source = try processor.makeSource(.image(image()), descriptor: descriptor, recipe: recipe, calibration: calibration)
+        let snapshot = try await processor.processStreaming(source, model: model, stamp: stamp) { _ in }
+        XCTAssertEqual(renderer.encoder.cachedTextureBytes, 0)
+        var smaller = execution; smaller.width = 2; smaller.height = 2
+        let result = try await processor.renderStreaming(snapshot, execution: smaller) { _ in }
+        XCTAssertEqual(result.peakKnownOwnedBytes, execution.budget.maxResidentBytes)
+        XCTAssertEqual(renderer.encoder.cachedTextureBytes, 0)
+        let admission = try model.reserveFrame(); defer { admission.cancel() }
+        XCTAssertLessThan(admission.execution.budget.maxResidentBytes, result.peakKnownOwnedBytes, "Metric includes base, correction and variant resources omitted by the frame slice")
+    }
+    func testFreshStreamingSameDescriptorDifferentRevisionsReobserves() async throws {
+        let renderer = try LumeraRenderer(), processor = try PhotoProcessor(renderer: renderer, working: working)
+        var definition = definition(); definition.observations.features = [.init(id: "mean", statistic: .meanRed)]
+        let model = try ModelPreparer(renderer: renderer).prepareStreaming(CameraModelCompiler.compile(definition), resources: .init(), execution: execution)
+        let first = try processor.makeSource(.image(image(0.1)), descriptor: descriptor, recipe: recipe, calibration: nil)
+        let second = try processor.makeSource(.image(image(0.8)), descriptor: descriptor, recipe: recipe, calibration: nil)
+        let a = try await processor.processStreaming(first, model: model, stamp: stamp) { _ in }
+        let b = try await processor.processStreaming(second, model: model, stamp: stamp) { _ in }
+        XCTAssertNotEqual(first.revision, second.revision)
+        XCTAssertEqual(a.inputFacts.sourceID, b.inputFacts.sourceID)
+        XCTAssertNotEqual(a.observations.features, b.observations.features)
+        let replay = try await processor.renderStreaming(a, execution: execution) { _ in }
+        XCTAssertEqual(replay.observations, a.observations)
+    }
+}

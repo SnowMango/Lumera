@@ -49,10 +49,11 @@ public struct ModelValidationReport: Codable, Equatable, Sendable {
             throw LabError.invalid("Validation input source or target decoding declaration changed")
         }
         try measurementExecution.validate()
+        let effects = try execution.effectResolutions(), measuredEffects = try measurementExecution.effectResolutions()
         guard measurementExecution.precision == execution.precision,
               measurementExecution.dynamicRange == execution.dynamicRange,
               measurementExecution.width == execution.width, measurementExecution.height == execution.height,
-              measurementExecution.effectScale == execution.effectScale,
+              measuredEffects == effects, measurementExecution.previewGlow == execution.previewGlow,
               measurementExecution.statisticsLatency == execution.statisticsLatency,
               measurementExecution.budget.maxResidentBytes <= execution.budget.maxResidentBytes,
               measurementExecution.budget.maxInFlightFrames <= execution.budget.maxInFlightFrames else {

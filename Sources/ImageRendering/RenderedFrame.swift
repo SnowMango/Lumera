@@ -21,11 +21,13 @@ public final class RenderedFrame: @unchecked Sendable {
     public let image: CIImage
     /// 此已完成帧实际使用的控制。宿主可复制值用于诊断，不必保留帧纹理，
     /// 也不应为展示重新执行自动响应或推进时间状态。
-    public var resolvedControls: ResolvedControls { plan.controls }
-    private let plan: FrameRenderPlan
+    public let resolvedControls: ResolvedControls
+    // Compatibility plans still bind the retained-input charge to the output.
+    // Cached photos independently own input residency and publish only the output charge.
+    private let legacyPlan: FrameRenderPlan?
     init(texture: MTLTexture, input: PreparedInput, plan: FrameRenderPlan) {
         self.texture = texture; region = nil; modelID = plan.model.compiled.identity; inputID = input.inputID
-        execution = plan.model.execution; self.plan = plan
+        execution = plan.model.execution; legacyPlan = plan.residentInput == nil ? plan : nil; resolvedControls = plan.controls
         stamp = plan.stamp; resourceDigest = plan.model.resourceDigest
         let range: RenderDynamicRange = execution.dynamicRange == .edr ? .edr : .sdr
         var options: [CIImageOption: Any] = [.colorSpace: LumeraRenderer.colorSpace(for: range)]
@@ -36,7 +38,7 @@ public final class RenderedFrame: @unchecked Sendable {
     }
     init(image: CIImage, input: PreparedInput, plan: FrameRenderPlan, region: CGRect) {
         texture = nil; self.region = region; stamp = plan.stamp; resourceDigest = plan.model.resourceDigest
-        modelID = plan.model.compiled.identity; inputID = input.inputID; execution = plan.model.execution; self.plan = plan
+        modelID = plan.model.compiled.identity; inputID = input.inputID; execution = plan.model.execution; legacyPlan = plan.residentInput == nil ? plan : nil; resolvedControls = plan.controls
         self.image = image.settingProperties(LumeraImageMetadata.output(input.properties, width: Int(region.width), height: Int(region.height),
             depth: execution.precision == .float16 ? 16 : 32, dynamicRange: execution.dynamicRange == .edr ? .edr : .sdr))
         retainOutputLease(on: self.image, lease: plan.lease)

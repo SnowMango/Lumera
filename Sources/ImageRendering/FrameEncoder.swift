@@ -39,10 +39,7 @@ public final class EncodedFrame: @unchecked Sendable {
     public func copyOwned(commandBuffer: MTLCommandBuffer) throws -> FrameReadback {
         lock.lock(); defer { lock.unlock() }
         guard commandBuffer === command, command.status == .notEnqueued, !copied else { throw LabError.invalid("Owned output must be copied once in the original command") }
-        let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: texture.pixelFormat, width: texture.width, height: texture.height, mipmapped: false)
-        td.storageMode = .private; td.usage = .shaderRead
-        try plan.workingSet.reserve(texture: td, on: renderer.device)
-        let owned = try renderer.copyOwned(texture, commandBuffer: command)
+        let owned = try renderer.copyOwned(texture, commandBuffer: command, workingSet: plan.workingSet)
         try plan.lease.retainOutput(bytes: owned.allocatedSize)
         retainOutputLease(on: owned, lease: plan.lease)
         copied = true

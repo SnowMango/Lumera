@@ -6,9 +6,23 @@ import ImagingCore
 extension LumeraRenderer {
     /// 观测完整的校正后输入，仅需拍摄元数据时省去 GPU 提交。
     public func observe(_ input: PreparedInput, stamp: FrameStamp, requirements: ObservationRequirements, maxResidentBytes: Int? = nil) async throws -> FrameObservations {
+        try await observe(input, stamp: stamp, requirements: requirements, maxResidentBytes: maxResidentBytes, inputAlreadyBudgeted: false)
+    }
+
+    package func observe(_ input: PreparedInput, stamp: FrameStamp, requirements: ObservationRequirements,
+                         reservation: FrameReservation) async throws -> FrameObservations {
+        guard reservation.residentInput?.input === input, reservation.model.renderer === self else {
+            throw LabError.invalid("Photo observation reservation belongs to another input or renderer")
+        }
+        return try await observe(input, stamp: stamp, requirements: requirements,
+                                 maxResidentBytes: reservation.execution.budget.maxResidentBytes, inputAlreadyBudgeted: true)
+    }
+
+    private func observe(_ input: PreparedInput, stamp: FrameStamp, requirements: ObservationRequirements,
+                         maxResidentBytes: Int?, inputAlreadyBudgeted: Bool) async throws -> FrameObservations {
         try Task.checkCancellation()
         guard let command = queue.makeCommandBuffer() else { throw LabError.io("Cannot create observation command") }
-        let ticket = try frameFeatures.encode(input, stamp: stamp, requirements: requirements, commandBuffer: command, budgetLimit: maxResidentBytes)
+        let ticket = try frameFeatures.encode(input, stamp: stamp, requirements: requirements, commandBuffer: command, budgetLimit: maxResidentBytes, inputAlreadyBudgeted: inputAlreadyBudgeted)
         if ticket.readbackBytes > 0 {
             do { try await complete(command) }
             catch is CancellationError { throw CancellationError() }

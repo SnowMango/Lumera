@@ -1,6 +1,6 @@
 # Lumera
 
-版本：**0.3.0**。产品版本、相机模型 schema 和固定风格 schema 分别管理。
+版本：**0.3.1（开发中）**。产品版本、相机模型 schema 和固定风格 schema 分别管理。
 
 Lumera 是基于 Metal 的照片与视频成片引擎。它以相机模型描述目标外观，根据输入观测和拍摄条件计算参数，并执行颜色、色调曲线、细节、柔化、暗角、光晕、数码噪点和胶片颗粒处理。输入校正、目标模型、用户编辑和执行资源独立管理；模型可由配对样本拟合，也可手动制作。
 
@@ -30,7 +30,7 @@ Lumera 是基于 Metal 的照片与视频成片引擎。它以相机模型描述
 https://github.com/SnowMango/Lumera.git
 ```
 
-版本依赖使用 `0.3.0`，要求仓库存在对应的 `v0.3.0` 标签；标签发布前，可对包含 v0.3.0 实现的本地检出使用路径依赖 `.package(path: "../Lumera")`。添加到应用目标时，选择 `ImagingCore` 和 `ImageRendering`；使用照片/视频协调器时再添加 `ImagingRuntime`。各产品分别导入，没有名为 `Lumera` 的模块。
+`v0.3.1` 标签发布后可使用下方版本依赖。当前开发版本位于 `v0.3.1-develop` 分支，可对本地检出使用路径依赖 `.package(path: "../Lumera")`。添加到应用目标时，选择 `ImagingCore` 和 `ImageRendering`；使用照片/视频协调器时再添加 `ImagingRuntime`。各产品分别导入，没有名为 `Lumera` 的模块。
 
 如果宿主项目使用 `Package.swift`，在包的 `dependencies` 中声明仓库，并在目标的 `dependencies` 中添加产品：
 
@@ -45,7 +45,7 @@ let package = Package(
         .library(name: "MyCameraFeature", targets: ["MyCameraFeature"])
     ],
     dependencies: [
-        .package(url: "https://github.com/SnowMango/Lumera.git", from: "0.3.0")
+        .package(url: "https://github.com/SnowMango/Lumera.git", from: "0.3.1")
     ],
     targets: [
         .target(
@@ -84,7 +84,7 @@ let package = Package(
 `InputAdapter.prepare` 将带明确 `SourceDescriptor`、`InputRecipe` 的 `SourceImage` 转成拥有型 `NormalizedInput`；`InputNormalizer.normalize` 只接受该未校正类型，输出 `PreparedInput`。配方、工作参考、校正内容和源路径分别绑定身份，不能将 HEIF、JPEG、RAW、ProRAW 与实时 YUV 的验证结果相互套用。
 
 - JPEG/HEIF 由调用方解码为正确标记的 CIImage，配方明确选择基础图或系统 gain-map 重建；不自建 gain-map 算法。实时 YUV 使用原始 CVPixelBuffer 颜色附件。
-- RAW 默认值由制作者提供，只有明确许可的参数可由用户覆盖；实际后端不支持的控制报错。有效配方记录系统/解码器与实际设置，变化后重新匹配证据。不增加 Lumera 自有降噪。
+- RAW 可通过 `RAWDevelopmentConfiguration` 将系统 `CIRAWFilter` 交给调用方配置；外部路径不限制参数集合。有效配方记录配置身份、内容摘要和实际系统/解码器版本。旧 `rawSettings` / `rawOverrides` 仍作为类型化兼容入口，不能与外部配置同时使用。不增加 Lumera 自有降噪。
 - 输入校正与目标外观独立。无独立参考时可显式采用未验证的恒等参考，不能称为相机标定或逆 ISP。
 
 ```swift
@@ -108,7 +108,69 @@ let edited = try await photos.render(result.snapshot, edits: userEdits,
 
 `ExecutionProfile` 的输出尺寸、内存预算和最多在途帧数由宿主明确提供。照片区域、分块和导出复用完整输入统计和自动决策；真正裁剪或更换拍摄输入时重新 `process`。从 Float16 预览切换到 Float32 导出会重新读取/显影快照持有的原始源，不能通过提升半精度纹理恢复丢失精度。源 CIImage/CVPixelBuffer 在快照存活期间必须保持不可变；外部 RAW 文件会重新校验字节摘要。重复导出和不同执行精度共用模型预算；更换预算须建立新任务。
 
-`CameraSession.enqueue(preparedInput, stamp:edits:)` 接收已准备好的完整输入。宿主保留采集序号和 PTS，丢帧不重新编号。会话内部按源顺序逐帧提交，自动适应先于用户编辑；`.wait` 有界等待，`.dropUnsubmitted` 只替换尚未提交的帧。过多同时等待的生产者明确报错，宿主应等待 admission 形成背压。输入准备、宿主采集队列和独立固定风格入口各自需要预算，模型预算不是整个进程 RSS 上限。
+可回收的照片输入使用独立来源与缓存：
+
+```swift
+let photoSource = try photos.makeSource(source, descriptor: sourceDescriptor,
+    recipe: inputRecipe, calibration: inputCalibration,
+    rawConfiguration: rawConfiguration)
+let cache = try PhotoInputCache(maxResidentBytes: inputCacheBudgetBytes)
+let first = try await photos.process(photoSource, cache: cache,
+    model: prepared, stamp: originalStamp)
+await cache.evictAll()
+let redrawn = try await photos.render(first.snapshot, cache: cache,
+    execution: execution, edits: userEdits)
+let changedStyle = try await photos.process(photoSource, cache: cache,
+    model: anotherPreparedModel, stamp: originalStamp, reusing: first.snapshot)
+```
+
+`PhotoSource` 保存原始来源、配置和独立的实例版本；源像素、元数据或实际裁剪变化时应创建新来源。`PhotoSessionSnapshot` 保存输入事实、观测和自动决策，不持有完整输入纹理；该路径的完成输出也与输入存储解耦。缓存被释放后，从原始来源及相同显影配置重建输入，精度提升不会放大已有半精度纹理。换模型始终重新求值，仅复用与新模型要求兼容的观测。
+
+`PhotoInputRetention.retain` 保留缓存，`.evictAfterUse` 不保留缓存的强引用。`evictAll()` 不会提前释放正在使用的像素；活动请求持有租约直到 GPU 工作完成。相同输入的并发准备会共享任务，单个等待者取消不影响其他等待者。`residentBytes` 包括仍被活动租约持有的缓存条目。缓存容量约束已完成的已知输入纹理，不等同于输入准备峰值、宿主源数据或系统解码器的总内存上限。
+
+大图可通过流式照片路径按区域准备输入，按执行规格逐块交付输出，支持原始分辨率导出：
+
+```swift
+let streamingModel = try ModelPreparer(renderer: renderer).prepareStreaming(
+    compiled, resources: styleResources, execution: previewExecution)
+let snapshot = try await photos.processStreaming(photoSource,
+    model: streamingModel, stamp: originalStamp) { tile in
+        try await tileWriter.write(tile)
+    }
+let exportReport = try await photos.renderStreaming(snapshot,
+    execution: exportExecution) { tile in
+        try await tileWriter.write(tile)
+    }
+```
+
+`processStreaming` 从完整来源生成固定采样网格的观测并求值一次；`renderStreaming` 从原始来源重建区域像素，复用快照中的自动决策，支持执行规格、编辑和输出区域变化。该路径不要求完整输入纹理常驻，SDK 不组装完整输出位图。需要驻留输出时使用已有整帧接口，并计入完整输出容量。自定义 `PhotoRegionSource` 必须遵守区域请求、不可变来源和预算契约，不能以整图物化作为隐藏回退。
+
+`PhotoTile` 提供全图坐标中的 core 区域、格式、色彩空间、行跨度和借用字节。行按渲染器的左下角坐标系排列；目标文件的行序与编码由宿主处理。每次消费完成后才继续下一块；字节仅在该次异步回调结束前有效，需要保留时应复制。回调抛错或任务取消会中止导出，宿主应丢弃未完成的外部输出。
+
+`PhotoStreamResult.peakKnownOwnedBytes` 表示共享模型账本的完整配置上限，包含模型、校准、执行变体资源、保留结果及所有并发帧名额。同一账本的并发导出返回相同上限，不能相加；该值不是单次导出的实际分配峰值或进程 RSS。系统 Core Image／RAW 解码器内存、独立模型账本和宿主复制的输出另计，`hasOpaqueDecoderMemory` 标识来源是否包含不透明的解码内存。
+
+有界流式处理使用受预算约束的区域校准与临时工作区，并与同一渲染器上的传统池化编码互斥。存在尚未结束的池化任务时，有界处理明确拒绝开始；需要同时使用这两类路径时，应使用独立渲染器。
+
+实时输入可将轻量来源提交给会话，在获得预算和处理名额后再准备像素：
+
+```swift
+let inputPreparer = try prepared.prepareRealtimeInput(
+    working: workingReference, calibration: inputCalibration,
+    resources: calibrationResources)
+let session = try CameraSession(renderer: renderer, model: prepared,
+                                backpressure: .dropUnsubmitted)
+let frameSource = CameraFrameSource(source, using: inputPreparer,
+    descriptor: sourceDescriptor, recipe: inputRecipe)
+let outcome = try await session.enqueue(frameSource, stamp: originalStamp)
+```
+
+`RealtimeInputPreparer` 复用模型绑定的输入配置和校准资源。`CameraSession.enqueue(CameraFrameSource, stamp:edits:)` 将输入准备纳入同一个有序工作流和预算；尚未开始处理就被丢弃的来源不会物化纹理。宿主保留采集序号和 PTS，丢帧不重新编号。`.wait` 有界等待，`.dropUnsubmitted` 只替换尚未提交的帧；过多同时等待的生产者明确报错，宿主应等待 admission 形成背压。
+
+来源的借用期限持续到 `enqueue` 返回，期间像素及其元数据必须保持不可变。取消会传播到输入准备任务，但已提交的 GPU 工作仍须完成后才能归还来源。内置准备器计入已知源数据、SDK 纹理和临时资源；位图支持的 CIImage 等额外已知常驻容量通过 `additionalResidentBytes` 声明。自定义准备闭包必须遵守传入的执行预算，声明所有保留来源的容量，并在返回或抛错前等待自己提交的工作完成；SDK 无法测量闭包内部的隐藏分配。
+
+`trustedNormalizedRGBBounds` 仅适用于调用方能够证明范围的已解码输入，范围必须覆盖归一化到工作编码 sRGB 后的有限 RGB 值。该声明可省略半精度写入前的 Float32 范围扫描，实际存储范围仍会校验；不能把原始传感器码值范围作为该声明，也不能用于 RAW 显影。没有可信范围的输入保留写入前溢出检查。
+
+`CameraSession.enqueue(preparedInput, stamp:edits:)` 继续接收已准备好的完整输入，该兼容入口的上游准备不受会话背压覆盖。宿主采集队列、系统解码器及独立固定风格入口仍须各自管理内存，模型预算不是整个进程 RSS 上限。
 
 同帧模式等待本帧统计；声明的延迟模式使用同一个旧观测包，并按年龄、曝光/色温等事实变化整包校验。失效时进入模型声明的缺测策略，不能拼接旧特征和新元数据。当前完整统计和效果可共享命令缓冲区。延迟模式可能错过尚未发现的场景突变，宿主可通过 `reset(.reset(.sceneCut))` 明确通知。
 
@@ -193,7 +255,7 @@ let compiled = try CameraModelCompiler.compile(CameraModelCodec.decode(data))
 
 ### Profile 配置文件格式
 
-Lumera 0.3.0 的固定风格接口使用 `Profile` JSON schema 8；此格式与 `CameraModel` schema 1 分别解码。根对象必填 `schemaVersion`、`id` 和 `name`。`parameters` 缺省时使用基础参数，`responses` 缺省时使用空数组。以下是最小的固定配置。
+Lumera 0.3.1 的固定风格接口使用 `Profile` JSON schema 8；此格式与 `CameraModel` schema 1 分别解码。根对象必填 `schemaVersion`、`id` 和 `name`。`parameters` 缺省时使用基础参数，`responses` 缺省时使用空数组。以下是最小的固定配置。
 
 ```json
 {
@@ -280,7 +342,7 @@ let styledTexture = try renderer.render(
 ```swift
 var options = RenderOptions()
 options.dynamicRange = .edr
-let renderer = try LumeraRenderer(precision: .float32) // 非恒等 LUT 外推显式选择 Float32
+let renderer = try LumeraRenderer() // 默认 Float16；无法证明范围安全时可显式选择 .float32
 let lut = try LUTImporter.load(url: lutURL) // 默认 automatic：EDR 外推，SDR 裁切
 let style = try renderer.prepare(profile, lut: lut)
 let output = try await renderer.render(inputImage, style: style, options: options)
@@ -332,6 +394,26 @@ let externallyDeveloped = try await renderer.render(
     style: style, options: options
 )
 ```
+
+Runtime 支持可重放的外部显影配置：
+
+```swift
+let rawConfiguration = try RAWDevelopmentConfiguration(
+    identifier: "app.raw-development", version: "1", payload: encodedSettings
+) { filter, payload in
+    let settings = try JSONDecoder().decode(RAWControls.self, from: payload)
+    filter.exposure = settings.exposure
+    filter.baselineExposure = settings.baselineExposure
+    // RAWControls 及 encodedSettings 由宿主定义，可包含其他系统参数。
+}
+let input = try await adapter.prepare(
+    .rawURL(rawURL), descriptor: descriptor, recipe: recipe,
+    execution: execution, rawConfiguration: rawConfiguration)
+```
+
+配置保存不可变的 payload 字节，并以标识、版本和 SHA-256 摘要组成身份。回调在系统默认值设置后、输出求值前执行，能力判断和参数策略由调用方负责。配置代码的行为改变时须更新版本；捕获的外部状态应保持不变并支持并发调用。配方回执不序列化闭包，也不声明能自动读取所有系统设置。
+
+`PhotoProcessor.process(..., rawConfiguration:)` 保留配置用于精度切换后的原片重显影。`PhotoDecisionSnapshot.canRedevelopRAW` 表示快照是否持有原始 RAW 来源。`SourceDescriptor.path` 描述采集来源，`SourceImage.inputDevelopment` 区分 RAW 显影输入和已解码像素；已显影 RAW/ProRAW 可保留采集来源，但仅传入像素不会获得原片重显影能力。
 
 RAW／ProRAW 兼容性取决于系统解码器；不使用内嵌预览作为失败回退。输出是显影后的 CIImage，不是保留 RAW 可编辑能力的 DNG；需另外保存原始文件。`configureRAW` 为单次调用独占的配置闭包，不要保留并并发修改 filter。曝光等显影修改不覆盖原始拍摄 EXIF。
 
@@ -511,7 +593,11 @@ LUT 的输入和输出约定均为编码 sRGB。`LUTAsset` 独立保存样本与
 
 外推并非原 LUT 作者定义的 HDR 效果，也不保证等同于 Apple 的外推算法；边界平坦的 LUT 仍可能输出平坦高光，多通道外推也可能放大边界变化。它不是 shaper，本版不支持 shaper 或扩展域 cube 导入。普通 LUT 样本和文件格式使用 `0…1` 约定。
 
-非恒等 LUT 外推（包括 SDR 输出请求）目前拒绝 Float16；调用方须显式选择 Float32。恒等外推与显式 clamp LUT 仍经过逐阶段范围检查。修改越界策略后重新准备资源。源文件/样本摘要保持不变，渲染身份与准备缓存另行区分策略；风格 LUT 与设备校正 LUT 均可独立选择策略。
+Float16 支持经过保守范围证明的非恒等 LUT 外推。准备资源时缓存边界单元三线性函数的范围信息，渲染时结合输入范围、LUT 混合权重、颜色变换和后续中间存储进行检查。无法证明安全时明确报错，不自动改为 clamp 或切换精度。证明只保证指定条件下的数值安全，画质误差仍需与 Float32 比较。
+
+`LumeraRenderer.assessPrecision(style:correction:request:)` 和 `TextureEffectEncoder.assessPrecision(style:correction:request:)` 在编码前返回结构化判断；模型路径可调用 `FrameRenderPlan.assessPrecision()`。三种结果分别为 `.safe`、`.requiresInputRange` 和 `.unsupported(stage:reason:)`。查询与实际渲染共用范围检查，结论仅适用于传入的资源、参数、几何和可信输入范围。缺少可信范围的 EDR Float16 请求不能预先确认安全。
+
+修改越界策略后重新准备资源。源文件/样本摘要保持不变，渲染身份与准备缓存另行区分策略；风格 LUT 与设备校正 LUT 均可独立选择策略。
 
 LUT 由调用方加载和管理。需要记录外部资源关联时，分别声明风格 LUT、设备校正与校正 LUT 的 `ResourceReferences`，并用 `RenderResources.validate(against:correction:)` 核对实际资源。
 
@@ -569,6 +655,8 @@ CIColorCube 与 CIColorCubeWithColorSpace 的 cube 数组布局对应 `.rgbaFloa
 | `softeningScale` | `.full` | 柔化中间层的每轴比例 |
 | `seed` | `42` | 随机序列种子 |
 | `frameIndex` | `0` | 帧序号，配合时间策略使用 |
+
+模型执行路径通过 `ExecutionProfile.glowScale`、`halationScale`、`softeningScale` 分别设置可选比例；未设置的项使用兼容字段 `effectScale`。`ExecutionProfile.previewGlow` 默认为 `true`，为 `false` 时旁路 glow 和 halation，保留 softening。执行选项参与执行变体身份，不修改风格模型。预览与导出需要不同策略时分别提供执行配置。
 
 三个效果比例独立设置，公开枚举 `EffectResolution` 支持 `.full`、`.half`、`.quarter`、`.eighth`、`.sixteenth`，对应每轴 `1`、`1/2`、`1/4`、`1/8`、`1/16`。
 

@@ -25,10 +25,61 @@ public struct ExecutionProfile: Codable, Equatable, Sendable {
     public var precision: ExecutionPrecision = .default
     public var width: Int, height: Int
     public var dynamicRange: ModelDynamicRange = .sdr
+    /// Legacy shared resolution used for each effect without an explicit scale.
     public var effectScale = 1.0
+    public var glowScale: EffectResolution?
+    public var halationScale: EffectResolution?
+    public var softeningScale: EffectResolution?
+    /// When false, the renderer bypasses glow and halation.
+    public var previewGlow = true
     public var statisticsLatency: StatisticsLatency = .sameFrame
     public var budget: ExecutionBudget
     public init(width: Int, height: Int, budget: ExecutionBudget) { self.width = width; self.height = height; self.budget = budget }
+
+    private enum CodingKeys: String, CodingKey {
+        case precision, width, height, dynamicRange, effectScale, glowScale, halationScale, softeningScale, previewGlow, statisticsLatency, budget
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        precision = try values.decode(ExecutionPrecision.self, forKey: .precision)
+        width = try values.decode(Int.self, forKey: .width)
+        height = try values.decode(Int.self, forKey: .height)
+        dynamicRange = try values.decode(ModelDynamicRange.self, forKey: .dynamicRange)
+        effectScale = try values.decode(Double.self, forKey: .effectScale)
+        glowScale = try values.decodeIfPresent(EffectResolution.self, forKey: .glowScale)
+        halationScale = try values.decodeIfPresent(EffectResolution.self, forKey: .halationScale)
+        softeningScale = try values.decodeIfPresent(EffectResolution.self, forKey: .softeningScale)
+        previewGlow = try values.decodeIfPresent(Bool.self, forKey: .previewGlow) ?? true
+        statisticsLatency = try values.decode(StatisticsLatency.self, forKey: .statisticsLatency)
+        budget = try values.decode(ExecutionBudget.self, forKey: .budget)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(precision, forKey: .precision)
+        try values.encode(width, forKey: .width)
+        try values.encode(height, forKey: .height)
+        try values.encode(dynamicRange, forKey: .dynamicRange)
+        try values.encode(effectScale, forKey: .effectScale)
+        try values.encodeIfPresent(glowScale, forKey: .glowScale)
+        try values.encodeIfPresent(halationScale, forKey: .halationScale)
+        try values.encodeIfPresent(softeningScale, forKey: .softeningScale)
+        if !previewGlow { try values.encode(previewGlow, forKey: .previewGlow) }
+        try values.encode(statisticsLatency, forKey: .statisticsLatency)
+        try values.encode(budget, forKey: .budget)
+    }
+
+    /// Resolves each explicit setting independently against the legacy shared scale.
+    /// Renderers call this when preparing optical effects.
+    public func effectResolutions() throws -> (glow: EffectResolution, halation: EffectResolution, softening: EffectResolution) {
+        let legacy = EffectResolution.allCases.first { $0.scale == effectScale }
+        guard let glow = glowScale ?? legacy, let halation = halationScale ?? legacy, let softening = softeningScale ?? legacy else {
+            throw LabError.unsupported("Unsupported optical computation scale")
+        }
+        return (glow, halation, softening)
+    }
+
     public func validate() throws {
         _ = try ImageDimensions.pixelCount(width: width, height: height)
         try budget.validate()

@@ -44,6 +44,9 @@ public final class InputNormalizer: @unchecked Sendable {
     /// 校验来源、实际解码配方和参考契约后应用校正，并测量实际输出范围。
     /// 未选择校正时复用源存储，结果保留参考契约且没有实测资格。
     public func normalize(_ source: NormalizedInput, calibration: InputCalibration?, resources: ModelResourceSet) async throws -> PreparedInput {
+        try await normalize(source, calibration: calibration, resources: resources, bounded: false)
+    }
+    func normalize(_ source: NormalizedInput, calibration: InputCalibration?, resources: ModelResourceSet, bounded: Bool) async throws -> PreparedInput {
         try Task.checkCancellation()
         let selectedResources = try boundResources(calibration: calibration, resources: resources)
         guard source.texture.device.registryID == renderer.device.registryID,
@@ -71,12 +74,20 @@ public final class InputNormalizer: @unchecked Sendable {
         request.dynamicRange = source.execution.dynamicRange == .edr ? .edr : .sdr
         request.inputValueBounds = source.valueBounds
         guard let command = renderer.queue.makeCommandBuffer() else { throw LabError.io("Cannot create input correction command") }
-        let output = try renderer.encoder.encode(source.texture, style: prepared.tone, correction: prepared.correction,
-                                                 request: request, commandBuffer: command)
+        let workspace = bounded ? TileWorkingSet(limit: source.execution.budget.maxResidentBytes) : nil
+        try workspace?.reserve(source.texture.allocatedSize)
+        let output: MTLTexture
+        if let workspace {
+            output = try renderer.encoder.encodeBounded(source.texture, style: prepared.tone, correction: prepared.correction,
+                request: request, workingSet: workspace, commandBuffer: command)
+        } else {
+            output = try renderer.encoder.encode(source.texture, style: prepared.tone, correction: prepared.correction,
+                request: request, commandBuffer: command)
+        }
         let owned: MTLTexture
         if output === source.texture { owned = source.texture }
-        else { owned = try renderer.copyOwned(output, commandBuffer: command) }
-        let range = try renderer.rangeReducer.encode(owned, commandBuffer: command)
+        else { owned = try renderer.copyOwned(output, commandBuffer: command, workingSet: workspace) }
+        let range = try renderer.rangeReducer.encode(owned, commandBuffer: command, workingSet: workspace)
         try await renderer.complete(command)
         let actual = try range.resolve()
         try Self.validateBounds(actual, working: calibration.working)
@@ -136,12 +147,14 @@ public final class InputNormalizer: @unchecked Sendable {
 }
 
 extension LumeraRenderer {
-    func copyOwned(_ source: MTLTexture, commandBuffer: MTLCommandBuffer) throws -> MTLTexture {
+    func copyOwned(_ source: MTLTexture, commandBuffer: MTLCommandBuffer, workingSet: TileWorkingSet? = nil) throws -> MTLTexture {
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: source.pixelFormat, width: source.width, height: source.height, mipmapped: false)
         descriptor.storageMode = .private; descriptor.usage = .shaderRead
-        guard let result = device.makeTexture(descriptor: descriptor), let blit = commandBuffer.makeBlitCommandEncoder() else {
-            throw LabError.io("Cannot allocate owned input storage")
-        }
+        let estimate = device.heapTextureSizeAndAlign(descriptor: descriptor).size
+        try workingSet?.reserve(estimate)
+        guard let result = device.makeTexture(descriptor: descriptor) else { throw LabError.io("Cannot allocate owned input storage") }
+        try workingSet?.reserve(max(0, result.allocatedSize - estimate))
+        guard let blit = commandBuffer.makeBlitCommandEncoder() else { throw LabError.io("Cannot copy owned input storage") }
         blit.copy(from: source, sourceSlice: 0, sourceLevel: 0, sourceOrigin: .init(x: 0, y: 0, z: 0),
                   sourceSize: .init(width: source.width, height: source.height, depth: 1), to: result,
                   destinationSlice: 0, destinationLevel: 0, destinationOrigin: .init(x: 0, y: 0, z: 0))

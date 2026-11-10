@@ -10,7 +10,7 @@ import ImagingCore
 /// Inputs and prepared resources must not be mutated while an operation uses them.
 public final class LumeraRenderer: @unchecked Sendable {
     let imageInputFormat: MTLPixelFormat
-    let device: MTLDevice
+    package let device: MTLDevice
     let queue: MTLCommandQueue
     let context: CIContext
     let encoder: TextureEffectEncoder
@@ -60,6 +60,12 @@ public final class LumeraRenderer: @unchecked Sendable {
     /// Prepares independent device correction resources on this renderer's device.
     public func prepareCorrection(_ correction: DeviceCorrection?, lut: LUTAsset? = nil) throws -> PreparedDeviceCorrection? {
         try encoder.prepareCorrection(correction, lut: lut)
+    }
+
+    /// Assesses the selected precision for a fixed style using the supplied trusted input range.
+    public func assessPrecision(style: PreparedCameraStyle, correction: PreparedDeviceCorrection? = nil,
+                                request: RenderRequest) throws -> PrecisionAssessment {
+        try encoder.assessPrecision(style: style, correction: correction, request: request)
     }
 
     /// Encodes a fixed style into the caller's command buffer without committing or waiting.

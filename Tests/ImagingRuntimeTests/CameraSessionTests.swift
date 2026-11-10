@@ -17,6 +17,7 @@ private actor SessionTestGate {
         for listener in listeners { listener.resume() }
         if !released { await withCheckedContinuation { releases.append($0) } }
     }
+    func hasArrived() -> Bool { arrived }
     func waitForArrival() async {
         if !arrived { await withCheckedContinuation { arrivals.append($0) } }
     }
@@ -306,4 +307,142 @@ final class CameraSessionTests: XCTestCase {
         guard case .dropped(_, .cancelled) = try await second.value else { return XCTFail("Cancelled waiter rendered") }
     }
 
+}
+
+extension CameraSessionTests {
+    func testLazyWaiterAndRejectedProducerDoNotPrepareBeforeAdmission() async throws {
+        let f = try await fixture(maxFrames: 1), active = SessionTestGate(), waiting = SessionTestGate()
+        let session = try CameraSession(renderer: f.renderer, model: f.model)
+        let first = Task {
+            try await session.enqueue(CameraFrameSource(knownResidentBytes: 0) { _ in
+                await active.enter(); return f.input
+            }, stamp: self.stamp(1))
+        }
+        await active.waitForArrival()
+        let second = Task {
+            try await session.enqueue(CameraFrameSource(knownResidentBytes: 0) { _ in
+                await waiting.enter(); return f.input
+            }, stamp: self.stamp(2))
+        }
+        let isWaiting = await waitForWaitingCount(1, session: session)
+        XCTAssertTrue(isWaiting)
+        do {
+            _ = try await session.enqueue(CameraFrameSource(knownResidentBytes: 0) { _ in
+                XCTFail("Rejected producer prepared"); return f.input
+            }, stamp: stamp(3))
+            XCTFail("Expected bounded queue rejection")
+        } catch { }
+        let preparedEarly = await waiting.hasArrived()
+        XCTAssertFalse(preparedEarly)
+        await waiting.release(); await active.release()
+        assertRendered(try await first.value, stamp: stamp(1))
+        assertRendered(try await second.value, stamp: stamp(2))
+    }
+
+    func testResetCancelsPreparationButHoldsAdmissionUntilWorkDrains() async throws {
+        let f = try await fixture(maxFrames: 1), active = SessionTestGate()
+        let cancelled = expectation(description: "Preparation task received cancellation")
+        let live = SessionRenderDriver.live(f.renderer)
+        let session = try CameraSession(model: f.model, driver: .init(observe: { input, stamp, requirements, bytes in
+            XCTAssertEqual(stamp.generation, 1, "Old preparation reached observation")
+            return try await live.observe(input, stamp, requirements, bytes)
+        }, submit: live.submit))
+        let first = Task {
+            try await session.enqueue(CameraFrameSource(knownResidentBytes: 0) { _ in
+                await withTaskCancellationHandler {
+                    await active.enter() // Simulates work which has to finish even after cancellation.
+                } onCancel: {
+                    cancelled.fulfill()
+                }
+                return f.input // Intentionally ignores cancellation when returning the completed input.
+            }, stamp: self.stamp(3))
+        }
+        await active.waitForArrival()
+        try await session.reset(.reset(.seek))
+        await fulfillment(of: [cancelled], timeout: 1)
+        XCTAssertThrowsError(try f.model.reserveFrame())
+        await active.release()
+        guard case .dropped(let dropped, .reset) = try await first.value else { return XCTFail("Old preparation published") }
+        XCTAssertEqual(dropped, stamp(3))
+        let records = await session.takeRecords()
+        XCTAssertTrue(records.isEmpty)
+        assertRendered(try await session.enqueue(f.input, stamp: stamp(1, generation: 1)), stamp: stamp(1, generation: 1))
+    }
+
+    func testDeclaredBackingExhaustionRejectsBeforeProviderRuns() async throws {
+        let f = try await fixture(maxFrames: 1)
+        let session = try CameraSession(renderer: f.renderer, model: f.model, backpressure: .dropUnsubmitted)
+        do {
+            _ = try await session.enqueue(CameraFrameSource(knownResidentBytes: f.model.execution.budget.maxResidentBytes) { _ in
+                XCTFail("Over-budget provider prepared"); return f.input
+            }, stamp: stamp(1))
+            XCTFail("Expected budget rejection")
+        } catch { }
+        assertRendered(try await session.enqueue(f.input, stamp: stamp(2)), stamp: stamp(2))
+    }
+}
+
+extension CameraSessionTests {
+    func testPendingLazySourceIsDroppedWithoutPreparing() async throws {
+        let f = try await fixture(), active = SessionTestGate()
+        let session = try CameraSession(renderer: f.renderer, model: f.model, backpressure: .dropUnsubmitted)
+        let first = Task {
+            try await session.enqueue(CameraFrameSource(knownResidentBytes: 0) { _ in
+                await active.enter(); return f.input
+            }, stamp: self.stamp(1))
+        }
+        await active.waitForArrival()
+        let second = Task {
+            try await session.enqueue(CameraFrameSource(knownResidentBytes: 0) { _ in
+                XCTFail("Dropped source prepared"); return f.input
+            }, stamp: self.stamp(2))
+        }
+        var queued = false
+        for _ in 0..<10_000 {
+            if await session.queueSnapshot().pending == 1 { queued = true; break }
+            await Task.yield()
+        }
+        guard queued else {
+            await active.release(); _ = try? await first.value; _ = try? await second.value
+            return XCTFail("Expected an admitted pending source")
+        }
+        let third = Task { try await session.enqueue(f.input, stamp: self.stamp(3)) }
+        guard case .dropped(let dropped, .backpressure) = try await second.value else {
+            await active.release(); return XCTFail("Old pending source was not replaced")
+        }
+        XCTAssertEqual(dropped, stamp(2))
+        await active.release()
+        assertRendered(try await first.value, stamp: stamp(1))
+        assertRendered(try await third.value, stamp: stamp(3))
+    }
+
+    func testBorrowedBuiltInSourceReturnsOnlyAfterRenderCompletion() async throws {
+        let f = try await fixture(maxFrames: 1), completion = SessionTestGate()
+        let live = SessionRenderDriver.live(f.renderer)
+        let session = try CameraSession(model: f.model, driver: .init(observe: live.observe, submit: { input, plan, requirements, beforeCommit in
+            let submission = try live.submit(input, plan, requirements, beforeCommit)
+            return .init(completion: {
+                await completion.enter()
+                return try await submission.value()
+            })
+        }))
+        let preparer = try f.model.prepareRealtimeInput(working: f.input.working)
+        let image = CIImage(color: CIColor(red: 0.5, green: 0.5, blue: 0.5)).cropped(to: CGRect(x: 0, y: 0, width: 4, height: 4))
+        let source = CameraFrameSource(.image(image), using: preparer, descriptor: f.input.source.descriptor,
+            recipe: f.input.source.effectiveRecipe.declared, trustedNormalizedRGBBounds: .init(lower: 0, upper: 1))
+        let result = Task {
+            do { return try await session.enqueue(source, stamp: self.stamp(1)) }
+            catch {
+                await completion.release(); await completion.enter()
+                throw error
+            }
+        }
+        await completion.waitForArrival()
+        result.cancel()
+        let snapshot = await session.queueSnapshot()
+        XCTAssertEqual(snapshot.active, 1, "Cancellation returned the borrowed source before awaiting render completion")
+        await completion.release()
+        guard case .dropped(let dropped, .cancelled) = try await result.value else { return XCTFail("Cancelled render published") }
+        XCTAssertEqual(dropped, stamp(1))
+    }
 }

@@ -9,7 +9,7 @@ public final class PreparedCameraModel: @unchecked Sendable {
     /// 外观资源描述的摘要，用于标记输出采用的资源版本。
     public let resourceDigest: String
     public let resources: ModelResourceSet
-    let renderer: LumeraRenderer
+    package let renderer: LumeraRenderer
     let base: PreparedCameraStyle
     let lutStyles: [String: PreparedCameraStyle]
     let budget: ModelFrameBudget
@@ -74,6 +74,21 @@ public final class PreparedCameraModel: @unchecked Sendable {
     }
     /// 在准备输入和统计之前取得帧槽，让各阶段使用同一帧预算。
     public func reserveFrame() throws -> FrameReservation { try FrameReservation(model: self) }
+    package func reserveFrame(sourceBytes: Int) throws -> FrameReservation {
+        try FrameReservation(model: self, sourceBytes: sourceBytes)
+    }
+    package var photoBudgetID: ObjectIdentifier { budget.ledgerID }
+
+    package func accountPhotoInput(_ input: PreparedInput) throws -> PhotoInputResidency {
+        let lease = try budget.reserveResources(resident: input.residentStorageBytes, workspace: 0)
+        return PhotoInputResidency(input: input, budgetID: photoBudgetID, lease: lease)
+    }
+
+    package func reserveFrame(for input: PhotoInputResidency) throws -> FrameReservation {
+        guard input.budgetID == photoBudgetID else { throw LabError.invalid("Photo input belongs to another budget") }
+        return try FrameReservation(model: self, residentInput: input)
+    }
+
     public var preparationStatistics: StylePreparationStatistics { base.preparationStatistics }
     init(compiled: CompiledCameraModel, execution: ExecutionProfile, resources: ModelResourceSet,
          resourceDigest: String, renderer: LumeraRenderer, base: PreparedCameraStyle,
@@ -117,19 +132,23 @@ public final class ModelPreparer {
     public func prepare(_ model: CompiledCameraModel, resources: ModelResourceSet, execution: ExecutionProfile) throws -> PreparedCameraModel {
         try prepare(model, resources: resources, execution: execution, sharing: nil)
     }
+    /// Prepare a model for bounded region work. Full-frame admission still checks complete frame bytes.
+    public func prepareStreaming(_ model: CompiledCameraModel, resources: ModelResourceSet, execution: ExecutionProfile) throws -> PreparedCameraModel {
+        try prepare(model, resources: resources, execution: execution, sharing: nil, streaming: true)
+    }
     /// 用不同执行配置准备变体，沿用原模型的总内存预算与帧槽。
-    public func prepareVariant(of original: PreparedCameraModel, execution: ExecutionProfile) throws -> PreparedCameraModel {
+    public func prepareVariant(of original: PreparedCameraModel, execution: ExecutionProfile, streaming: Bool = false) throws -> PreparedCameraModel {
         guard execution.budget == original.execution.budget else { throw LabError.invalid("An execution variant cannot replace its model budget") }
-        return try prepare(original.compiled, resources: original.resources, execution: execution, sharing: original.budget)
+        return try prepare(original.compiled, resources: original.resources, execution: execution, sharing: original.budget, streaming: streaming)
     }
     private func prepare(_ model: CompiledCameraModel, resources: ModelResourceSet, execution: ExecutionProfile,
-                         sharing originalBudget: ModelFrameBudget?) throws -> PreparedCameraModel {
+                         sharing originalBudget: ModelFrameBudget?, streaming: Bool = false) throws -> PreparedCameraModel {
         try execution.validate()
         try Self.validateModelContract(model)
         guard renderer.imageInputFormat == (execution.precision == .float16 ? .rgba16Float : .rgba32Float),
               model.definition.compatibility.dynamicRanges.contains(execution.dynamicRange),
               model.definition.compatibility.requiredCapabilities.isEmpty else { throw LabError.unsupported("Model execution capabilities or precision mismatch") }
-        guard EffectResolution.allCases.contains(where: { $0.scale == execution.effectScale }) else { throw LabError.unsupported("Unsupported optical computation scale") }
+        _ = try execution.effectResolutions()
         // Continuous numerical kernel construction has no declared per-frame CPU budget yet.
         let expectedIDs = Set(model.definition.appearance.resources.map(\.id))
         guard Set(resources.luts.keys).union(resources.curves.keys) == expectedIDs else { throw LabError.invalid("Model resources must match declared IDs exactly") }
@@ -155,11 +174,11 @@ public final class ModelPreparer {
         let budget: ModelFrameBudget
         let resourceLease: ModelResourceLease?
         if let originalBudget {
-            budget = try ModelFrameBudget(execution: execution, sharing: originalBudget)
+            budget = try ModelFrameBudget(execution: execution, sharing: originalBudget, streaming: streaming)
             // Reserve before parsing/uploading; decode scratch is released after preparation.
             resourceLease = try budget.reserveResources(resident: resourceBytes, workspace: largestDecodeWorkspace)
         } else {
-            budget = try ModelFrameBudget(execution: execution, resourceBytes: resourceBytes)
+            budget = try ModelFrameBudget(execution: execution, resourceBytes: resourceBytes, streaming: streaming)
             resourceLease = nil
         }
         var parameters = model.definition.appearance.parameters, weights = model.definition.appearance.lutWeights
@@ -230,11 +249,17 @@ public final class FrameReservation: @unchecked Sendable {
     public let execution: ExecutionProfile
     let model: PreparedCameraModel
     let lease: FrameBudgetLease
+    let residentInput: PhotoInputResidency?
     private let lock = NSLock()
     private var issued = false
-    init(model: PreparedCameraModel) throws {
-        self.model = model; lease = try model.budget.acquire(retainedInputBytes: 0)
-        var execution = model.execution; execution.budget.maxResidentBytes = lease.allowance
+    init(model: PreparedCameraModel, residentInput: PhotoInputResidency? = nil, sourceBytes: Int = 0) throws {
+        self.model = model; self.residentInput = residentInput; lease = try model.budget.acquire(retainedInputBytes: 0)
+        guard sourceBytes >= 0, sourceBytes < lease.allowance else {
+            throw LabError.invalid("Source backing exceeds the admitted frame memory allowance")
+        }
+        // The ledger holds the whole allowance; the source charge stays unavailable to every
+        // stage until GPU completion but is not retained on the independent output.
+        var execution = model.execution; execution.budget.maxResidentBytes = lease.allowance - sourceBytes
         execution.budget.maxInFlightFrames = 1; self.execution = execution
     }
     func issue(inputBytes: Int) throws {
@@ -242,10 +267,32 @@ public final class FrameReservation: @unchecked Sendable {
         guard !issued else { throw LabError.invalid("Frame reservation already issued or cancelled") }
         try lease.retainInput(bytes: inputBytes); issued = true
     }
+    /// Atomically transfer prepared storage from temporary frame allowance to its own lifetime charge.
+    package func finishPreparingPhotoInput(_ input: PreparedInput) throws -> PhotoInputResidency {
+        lock.lock(); defer { lock.unlock() }
+        guard !issued, residentInput == nil else { throw LabError.invalid("Invalid photo preparation reservation") }
+        let residency = try lease.transferPhotoInput(bytes: input.residentStorageBytes)
+        issued = true
+        return PhotoInputResidency(input: input, budgetID: model.photoBudgetID, lease: residency)
+    }
+
     /// 放弃未转交的预留。已转交后由计划管理。
     public func cancel() {
         lock.lock(); defer { lock.unlock() }
         guard !issued else { return }; issued = true; lease.completeGPU()
+    }
+}
+
+/// Binds immutable photo pixels to one ledger. Frame workspaces exclude this resident allocation.
+package final class PhotoInputResidency: @unchecked Sendable {
+    package let input: PreparedInput
+    package let budgetID: ObjectIdentifier
+    private let lease: ModelResourceLease
+
+    fileprivate init(input: PreparedInput, budgetID: ObjectIdentifier, lease: ModelResourceLease) {
+        self.input = input
+        self.budgetID = budgetID
+        self.lease = lease
     }
 }
 
@@ -259,25 +306,31 @@ final class ModelFrameBudget: @unchecked Sendable {
         init(totalBytes: Int, slots: Int) { self.totalBytes = totalBytes; self.slots = slots }
     }
     private let ledger: Ledger
+    var ledgerID: ObjectIdentifier { ObjectIdentifier(ledger) }
     private let minimumFrameBytes: Int
-    init(execution: ExecutionProfile, resourceBytes: Int) throws {
+    private let resourceMinimum: Int
+    init(execution: ExecutionProfile, resourceBytes: Int, streaming: Bool = false) throws {
         ledger = Ledger(totalBytes: max(0, execution.budget.maxResidentBytes - resourceBytes), slots: execution.budget.maxInFlightFrames)
-        minimumFrameBytes = try Self.minimum(execution, total: ledger.totalBytes, slots: ledger.slots)
+        minimumFrameBytes = try Self.minimum(execution, total: ledger.totalBytes, slots: ledger.slots, streaming: streaming)
+        resourceMinimum = streaming ? 65536 : minimumFrameBytes
     }
-    init(execution: ExecutionProfile, sharing original: ModelFrameBudget) throws {
+    init(execution: ExecutionProfile, sharing original: ModelFrameBudget, streaming: Bool = false) throws {
         ledger = original.ledger
-        minimumFrameBytes = try Self.minimum(execution, total: ledger.totalBytes, slots: ledger.slots)
+        minimumFrameBytes = try Self.minimum(execution, total: ledger.totalBytes, slots: ledger.slots, streaming: streaming)
+        resourceMinimum = streaming ? 65536 : minimumFrameBytes
     }
-    private static func minimum(_ execution: ExecutionProfile, total: Int, slots: Int) throws -> Int {
+    private static func minimum(_ execution: ExecutionProfile, total: Int, slots: Int, streaming: Bool = false) throws -> Int {
         let pixels = try ImageDimensions.pixelCount(width: execution.width, height: execution.height)
-        guard total / slots / execution.precision.bytesPerPixel / 4 >= pixels else { throw LabError.invalid("Model has no bounded frame working set") }
-        return pixels * execution.precision.bytesPerPixel * 4
+        guard streaming || total / slots / execution.precision.bytesPerPixel / 4 >= pixels else { throw LabError.invalid("Model has no bounded frame working set") }
+        let (bytes, overflow) = pixels.multipliedReportingOverflow(by: execution.precision.bytesPerPixel * 4)
+        guard !overflow else { throw LabError.invalid("Frame working set exceeds representable memory size") }
+        return bytes
     }
-    func acquire(retainedInputBytes: Int) throws -> FrameBudgetLease {
+    func acquire(retainedInputBytes: Int, streaming: Bool = false) throws -> FrameBudgetLease {
         ledger.lock.lock(); defer { ledger.lock.unlock() }
         guard ledger.active < ledger.slots else { throw LabError.invalid("Model in-flight budget exhausted") }
         let allowance = (ledger.totalBytes - ledger.reserved) / (ledger.slots - ledger.active)
-        guard allowance >= minimumFrameBytes, allowance > retainedInputBytes else { throw LabError.invalid("Retained outputs exhaust model memory budget") }
+        guard allowance >= (streaming ? 65536 : minimumFrameBytes), allowance > retainedInputBytes else { throw LabError.invalid("Retained outputs exhaust model memory budget") }
         ledger.reserved += allowance; ledger.active += 1
         return FrameBudgetLease(owner: self, allowance: allowance, inputBytes: retainedInputBytes)
     }
@@ -285,7 +338,7 @@ final class ModelFrameBudget: @unchecked Sendable {
         ledger.lock.lock(); defer { ledger.lock.unlock() }
         let available = ledger.totalBytes - ledger.reserved
         guard resident <= available, workspace <= available - resident,
-              minimumFrameBytes <= available - resident else { throw LabError.invalid("Execution variant resources exceed the shared model budget") }
+              resourceMinimum <= available - resident else { throw LabError.invalid("Execution variant resources exceed the shared model budget") }
         ledger.reserved += resident + workspace
         return ModelResourceLease(owner: self, resident: resident, workspace: workspace)
     }
@@ -319,6 +372,16 @@ final class FrameBudgetLease: @unchecked Sendable {
     init(owner: ModelFrameBudget, allowance: Int, inputBytes: Int) {
         self.owner = owner; self.allowance = allowance; retained = inputBytes; retainedInput = inputBytes
     }
+    func transferPhotoInput(bytes: Int) throws -> ModelResourceLease {
+        lock.lock(); defer { lock.unlock() }
+        guard !completed, retained == 0, bytes >= 0, bytes <= allowance else {
+            throw LabError.invalid("Photo input exceeds its preparation reservation")
+        }
+        owner.complete(reservation: allowance, retained: bytes)
+        completed = true
+        return ModelResourceLease(owner: owner, resident: bytes, workspace: 0)
+    }
+
     func retainInput(bytes: Int) throws {
         lock.lock(); defer { lock.unlock() }
         guard !completed, bytes >= 0, bytes <= allowance - retained else { throw LabError.invalid("Retained input exceeds frame reservation") }

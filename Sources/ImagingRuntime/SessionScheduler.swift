@@ -17,7 +17,16 @@ final class SessionCancellation: @unchecked Sendable {
     private let lock = NSLock()
     private var cancelled = false
     private var submitted = false
-    func cancel() { lock.lock(); cancelled = true; lock.unlock() }
+    private var preparation: Task<PreparedInput, Error>?
+    func cancel() {
+        lock.lock(); cancelled = true; let preparation = preparation; lock.unlock()
+        preparation?.cancel()
+    }
+    func trackPreparation(_ task: Task<PreparedInput, Error>) {
+        lock.lock(); preparation = task; let shouldCancel = cancelled; lock.unlock()
+        if shouldCancel { task.cancel() }
+    }
+    func clearPreparation() { lock.lock(); preparation = nil; lock.unlock() }
     func check() throws {
         lock.lock(); defer { lock.unlock() }
         if cancelled { throw CancellationError() }

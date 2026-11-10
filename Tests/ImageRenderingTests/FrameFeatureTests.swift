@@ -125,7 +125,7 @@ final class FrameFeatureTests: XCTestCase {
         let prepared = try await input(renderer, width: 256, height: 256, values: Array(repeating: [Float(0.5), 0.5, 0.5, 1], count: 256 * 256).flatMap { $0 })
         var execution = prepared.execution
         execution.budget.maxResidentBytes = 2 * 256 * 256 * 16
-        let source = try NormalizedInput(texture: prepared.source.texture, properties: prepared.source.properties, descriptor: prepared.source.descriptor, recipe: prepared.source.effectiveRecipe, working: prepared.source.working, execution: execution, bounds: prepared.source.valueBounds, conditions: prepared.captureConditions)
+        let source = try NormalizedInput(texture: prepared.source.texture, properties: prepared.source.properties, descriptor: prepared.source.descriptor, recipe: prepared.source.effectiveRecipe, working: prepared.source.working, execution: execution, bounds: prepared.source.valueBounds, conditions: prepared.captureConditions, inputDevelopment: prepared.source.inputDevelopment)
         let bounded = PreparedInput(texture: prepared.texture, source: source, calibrationID: prepared.calibrationID, working: prepared.working, bounds: prepared.valueBounds, qualifications: [])
         let command = try XCTUnwrap(renderer.queue.makeCommandBuffer())
         XCTAssertThrowsError(try FrameFeatureExtractor(device: renderer.device).encode(bounded, stamp: stamp, requirements: requirements, commandBuffer: command))

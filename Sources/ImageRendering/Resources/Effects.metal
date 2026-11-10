@@ -414,6 +414,25 @@ kernel void frameFeatureAreaV1(texture2d<float,access::read> input [[texture(0)]
  }
  samples[id.y*size.x+id.x]=float4(total,invalid);
 }
+kernel void frameFeatureRegionAreaV1(texture2d<float,access::read> input [[texture(0)]],
+ device float4* samples [[buffer(0)]], constant uint2& size [[buffer(1)]], constant uint2& fullSize [[buffer(2)]], constant uint2& origin [[buffer(3)]],
+ constant uint2& sampleOrigin [[buffer(4)]], uint2 localID [[thread_position_in_grid]]) {
+ uint2 id = localID + sampleOrigin;
+ if(any(id>=size))return;
+ float2 scale=float2(fullSize)/float2(size);
+ float2 lo=float2(id)*scale, hi=float2(id+1)*scale;
+ float3 total=0; float invalid=0;
+ for(uint y=uint(floor(lo.y));y<min(uint(ceil(hi.y)),fullSize.y);++y) {
+  float wy=max(0.0f,min(hi.y,float(y+1))-max(lo.y,float(y)));
+  for(uint x=uint(floor(lo.x));x<min(uint(ceil(hi.x)),fullSize.x);++x) {
+   float wx=max(0.0f,min(hi.x,float(x+1))-max(lo.x,float(x)));
+   float3 c=decodeRGB(input.read(uint2(x,y)-origin).rgb);
+   if(!all(isfinite(c)))invalid=1;
+   total+=c*(wx*wy/(scale.x*scale.y));
+  }
+ }
+ samples[id.y*size.x+id.x]=float4(total,invalid);
+}
 // 每个线程最多归约 256 个样本。局部计数可由 Float32 精确表示，记录留在 GPU 私有缓冲区。
 kernel void frameFeatureSummaryV1(device const float4* samples [[buffer(0)]], device float* partials [[buffer(1)]],
  constant uint& count [[buffer(2)]], constant float2* requests [[buffer(3)]], constant uint& featureCount [[buffer(4)]], uint id [[thread_position_in_grid]]) {

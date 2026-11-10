@@ -7,6 +7,7 @@ public final class FrameFeatureExtractor {
     public static let algorithmVersion = "linear-srgb-summary-v1"
     private let device: MTLDevice
     private let area: MTLComputePipelineState
+    let regionalArea: MTLComputePipelineState
     private let summary: MTLComputePipelineState
     private let combine: MTLComputePipelineState
     public init(device: MTLDevice) throws {
@@ -15,7 +16,9 @@ public final class FrameFeatureExtractor {
         options.fastMathEnabled = false // Preserve compensated sums and nonfinite checks.
         let library = try RenderingResources.makeLibrary(device: device, options: options)
         guard let a = library.makeFunction(name: "frameFeatureAreaV1"), let s = library.makeFunction(name: "frameFeatureSummaryV1"), let c = library.makeFunction(name: "frameFeatureCombineV1") else { throw LabError.io("Missing frame feature kernels") }
+        guard let regional = library.makeFunction(name: "frameFeatureRegionAreaV1") else { throw LabError.io("Missing regional sample kernel") }
         area = try device.makeComputePipelineState(function: a)
+        regionalArea = try device.makeComputePipelineState(function: regional)
         summary = try device.makeComputePipelineState(function: s)
         combine = try device.makeComputePipelineState(function: c)
     }
@@ -24,7 +27,7 @@ public final class FrameFeatureExtractor {
         try encode(input, stamp: stamp, requirements: requirements, commandBuffer: commandBuffer, budgetLimit: nil)
     }
     func encode(_ input: PreparedInput, stamp: FrameStamp, requirements: ObservationRequirements,
-                commandBuffer: MTLCommandBuffer, budgetLimit: Int?, workingSet: TileWorkingSet? = nil) throws -> ObservationReadback {
+                commandBuffer: MTLCommandBuffer, budgetLimit: Int?, workingSet: TileWorkingSet? = nil, inputAlreadyBudgeted: Bool = false, regionalSamples: MTLBuffer? = nil, fullSize: SIMD2<Int>? = nil) throws -> ObservationReadback {
         try stamp.validate(); try requirements.validate(); try input.working.validate()
         guard input.texture.device.registryID == device.registryID, commandBuffer.device.registryID == device.registryID,
               commandBuffer.status == .notEnqueued, commandBuffer.retainedReferences else { throw LabError.invalid("Feature command/device mismatch or unretained command") }
@@ -36,21 +39,23 @@ public final class FrameFeatureExtractor {
         if requirements.features.isEmpty {
             return ObservationReadback(observation: observation, features: [], buffer: nil, command: nil, width: 0, height: 0, partitions: 0)
         }
-        let scale = min(1, 256 / Double(max(input.width, input.height)))
-        let width = max(1, Int(floor(Double(input.width) * scale))), height = max(1, Int(floor(Double(input.height) * scale)))
+        let fullWidth = fullSize?.x ?? input.width, fullHeight = fullSize?.y ?? input.height
+        let scale = min(1, 256 / Double(max(fullWidth, fullHeight)))
+        let width = max(1, Int(floor(Double(fullWidth) * scale))), height = max(1, Int(floor(Double(fullHeight) * scale)))
         let count = width * height, bytes = (262 + requirements.features.count) * 4
         let partitions = (count + 255) / 256, partialBytes = partitions * bytes
         // 预算包含 PreparedInput 保留的原始和校正后纹理，共用存储时只计一次。
         // 跨帧预留由会话共享的预算账本负责。
-        let inputBytes = input.texture.allocatedSize + (input.texture === input.source.texture ? 0 : input.source.texture.allocatedSize)
-        let budget = min(input.execution.budget.maxResidentBytes, budgetLimit ?? Int.max)
+        let inputBytes = inputAlreadyBudgeted ? 0 : input.residentStorageBytes
+        let inputBudget = input.execution.budget.maxResidentBytes
+        let budget = inputAlreadyBudgeted ? (budgetLimit ?? inputBudget) : min(inputBudget, budgetLimit ?? Int.max)
         let available = budget - min(budget, inputBytes)
         let sizes = [(count * 16, MTLResourceOptions.storageModePrivate), (partialBytes, .storageModePrivate), (bytes, .storageModeShared)]
         let allocation = sizes.reduce(0) { $0 + device.heapBufferSizeAndAlign(length: $1.0, options: $1.1).size }
         guard allocation <= available else { throw LabError.invalid("Feature statistics exceed available memory budget") }
         try workingSet?.reserve(allocation)
         guard count * 16 + partialBytes + bytes <= available,
-              let samples = device.makeBuffer(length: count * 16, options: .storageModePrivate),
+              let samples = regionalSamples ?? device.makeBuffer(length: count * 16, options: .storageModePrivate),
               let partials = device.makeBuffer(length: partialBytes, options: .storageModePrivate),
               let output = device.makeBuffer(length: bytes, options: .storageModeShared) else { throw LabError.invalid("Feature statistics exceed available memory budget") }
         guard samples.allocatedSize + partials.allocatedSize + output.allocatedSize <= available else { throw LabError.invalid("Feature statistics exceed available memory budget") }
@@ -71,9 +76,11 @@ public final class FrameFeatureExtractor {
             }
         }
         guard requests.allSatisfy({ $0.y.isFinite }), let encoder = commandBuffer.makeComputeCommandEncoder() else { throw LabError.invalid("Unsupported feature threshold or encoder unavailable") }
-        encoder.setComputePipelineState(area); encoder.setTexture(input.texture, index: 0)
-        encoder.setBuffer(samples, offset: 0, index: 0); encoder.setBytes(&dimensions, length: 8, index: 1)
-        encoder.dispatchThreads(.init(width: width, height: height, depth: 1), threadsPerThreadgroup: .init(width: 8, height: 8, depth: 1))
+        if regionalSamples == nil {
+            encoder.setComputePipelineState(area); encoder.setTexture(input.texture, index: 0)
+            encoder.setBuffer(samples, offset: 0, index: 0); encoder.setBytes(&dimensions, length: 8, index: 1)
+            encoder.dispatchThreads(.init(width: width, height: height, depth: 1), threadsPerThreadgroup: .init(width: 8, height: 8, depth: 1))
+        }
         encoder.setComputePipelineState(summary)
         encoder.setBuffer(samples, offset: 0, index: 0); encoder.setBuffer(partials, offset: 0, index: 1)
         var sampleCount = UInt32(count)

@@ -12,7 +12,8 @@ public struct NumericBounds: Codable, Equatable, Sendable {
 public enum PixelValueBounds: Codable, Equatable, Sendable { case unknown, finite(NumericBounds) }
 public enum ModelDynamicRange: String, Codable, Sendable { case sdr, edr }
 
-/// 描述输入采集及像素路径。身份计算同时绑定实际开发配方与工作图像契约。
+/// Describes source provenance. RAW and ProRAW describe capture origin, including
+/// when the caller supplies pixels developed outside Lumera.
 public struct SourceDescriptor: Codable, Equatable, Sendable {
     public enum Path: String, Codable, Sendable { case processedPhoto, raw, proRAW, videoYUV, externalTexture, unknown }
     public var id: String
@@ -165,19 +166,55 @@ public struct RAWOverride: Codable, Equatable, Sendable {
     public var value: Double
     public init(key: RAWSetting.Key, value: Double) { self.key = key; self.value = value }
 }
+
+/// Identifies the caller's RAW development operation and its frozen input bytes.
+public struct RAWDevelopmentIdentity: Codable, Equatable, Sendable {
+    public let identifier: String
+    public let version: String
+    public let payloadDigest: String
+
+    public init(identifier: String, version: String, payloadDigest: String) throws {
+        self.identifier = identifier; self.version = version; self.payloadDigest = payloadDigest
+        try validate()
+    }
+
+    private func validate() throws {
+        guard !identifier.isEmpty, !version.isEmpty else { throw LabError.invalid("RAW development identifier and version are required") }
+        try validateDigest(payloadDigest)
+    }
+
+    public func digest() throws -> String {
+        try validate()
+        return try StyleIdentity.digest(self)
+    }
+}
+
 /// Actual backend/version and effective settings are separate from author permissions.
 public struct EffectiveInputRecipe: Codable, Equatable, Sendable {
     public var declared: InputRecipe
     public var backendVersion: String
     public var decoderVersion: String?
     public var settings: [RAWSetting]
+    /// Receipt for external RAW configuration. Arbitrary filter changes are represented by the caller's payload identity.
+    public var externalRAWConfiguration: RAWDevelopmentIdentity?
     public init(declared: InputRecipe, backendVersion: String, decoderVersion: String? = nil, settings: [RAWSetting] = []) {
+        self.init(declared: declared, backendVersion: backendVersion, decoderVersion: decoderVersion, settings: settings, externalRAWConfiguration: nil)
+    }
+    public init(declared: InputRecipe, backendVersion: String, decoderVersion: String? = nil, settings: [RAWSetting] = [],
+                externalRAWConfiguration: RAWDevelopmentIdentity?) {
         self.declared = declared; self.backendVersion = backendVersion; self.decoderVersion = decoderVersion; self.settings = settings
+        self.externalRAWConfiguration = externalRAWConfiguration
     }
     public func digest() throws -> String {
         try declared.validate()
         guard !backendVersion.isEmpty, Set(settings.map(\.key)).count == settings.count,
               settings.allSatisfy({ $0.value.isFinite }) else { throw LabError.invalid("Invalid effective input recipe") }
+        if let externalRAWConfiguration {
+            guard decoderVersion != nil, settings.isEmpty, declared.rawSettings.isEmpty, declared.decoderVersion == nil else {
+                throw LabError.invalid("External RAW recipe requires an actual decoder and exclusive configuration")
+            }
+            _ = try externalRAWConfiguration.digest()
+        }
         return try StyleIdentity.digest(self)
     }
 }

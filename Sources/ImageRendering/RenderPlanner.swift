@@ -33,22 +33,26 @@ public struct RenderPlanner {
         var inputColor = ColorResponse(); inputColor.exposureEV = controls.inputExposureEV
         if let wb = controls.inputWhiteBalance { inputColor.whiteBalance = wb }
         let prefix = try PreparedDeviceCorrection.inputEdit(inputColor, device: model.renderer.device)
-        let retainedInputBytes = input.texture.allocatedSize + (input.texture === input.source.texture ? 0 : input.source.texture.allocatedSize)
+        let residentInput = reservation?.residentInput
+        if let residentInput, residentInput.input !== input {
+            throw LabError.invalid("Photo reservation belongs to another input")
+        }
+        let retainedInputBytes = residentInput == nil ? input.residentStorageBytes : 0
         let lease: FrameBudgetLease
         if let reservation {
             guard reservation.model === model else { throw LabError.invalid("Frame reservation belongs to another model") }
             try reservation.issue(inputBytes: retainedInputBytes); lease = reservation.lease
         } else { lease = try model.budget.acquire(retainedInputBytes: retainedInputBytes) }
-        let workingSet = TileWorkingSet(limit: lease.allowance)
-        try workingSet.reserve(input.texture.allocatedSize)
-        if input.texture !== input.source.texture { try workingSet.reserve(input.source.texture.allocatedSize) }
+        let workingSet = TileWorkingSet(limit: reservation?.execution.budget.maxResidentBytes ?? lease.allowance)
+        try workingSet.reserve(retainedInputBytes)
         var request = RenderRequest(input: .init(width: input.width, height: input.height), maximumLongEdge: max(model.execution.width, model.execution.height))
         // 输出只做等比缩小，所选执行尺寸须与上面的几何检查一致。
         request.dynamicRange = model.execution.dynamicRange == .edr ? .edr : .sdr
         request.inputValueBounds = input.valueBounds; request.seed = seed
-        let resolution = EffectResolution.allCases.first { $0.scale == model.execution.effectScale }!
-        request.glowScale = resolution; request.halationScale = resolution; request.softeningScale = resolution
+        let effects = try model.execution.effectResolutions()
+        request.glowScale = effects.glow; request.halationScale = effects.halation; request.softeningScale = effects.softening
+        request.previewGlow = model.execution.previewGlow
         if let stamp { try stamp.validate(); request.frameIndex = UInt32(truncatingIfNeeded: stamp.index) }
-        return FrameRenderPlan(controls: controls, input: input, model: model, style: style, prefix: prefix, request: request, stamp: stamp, lease: lease, workingSet: workingSet)
+        return FrameRenderPlan(controls: controls, input: input, model: model, style: style, prefix: prefix, request: request, stamp: stamp, lease: lease, workingSet: workingSet, residentInput: residentInput)
     }
 }

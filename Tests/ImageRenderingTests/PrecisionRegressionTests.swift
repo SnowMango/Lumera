@@ -88,6 +88,7 @@ final class PrecisionRegressionTests: XCTestCase {
         let before = renderer.encoder.staticResourceStatistics
         let prepared = model.preparationStatistics
         let plan = try RenderPlanner().plan(controls,input:input,model:model,stamp:stamp,seed:42)
+        XCTAssertEqual(try plan.assessPrecision(), .safe)
         let output = try await renderer.render(input,plan:plan)
         let texture = try XCTUnwrap(output.texture)
         XCTAssertEqual(texture.pixelFormat,precision == .float16 ? .rgba16Float : .rgba32Float)

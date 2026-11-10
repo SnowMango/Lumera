@@ -18,17 +18,72 @@ public final class InputAdapter: @unchecked Sendable {
     /// RAW 由系统解码，已解码图像的基础图像或增益图重建方式由调用方声明。
     public func prepare(_ source: SourceImage, descriptor: SourceDescriptor, recipe: InputRecipe,
                         execution: ExecutionProfile, rawOverrides: [RAWOverride] = []) async throws -> NormalizedInput {
-        try Task.checkCancellation(); try descriptor.validate(); try recipe.validate(); try execution.validate()
+        try await prepare(source, descriptor: descriptor, recipe: recipe, execution: execution, rawOverrides: rawOverrides, rawConfiguration: nil)
+    }
+
+    /// A caller-certified bound on finite RGB after orientation, compositing and color conversion
+    /// into the renderer's encoded sRGB working space. Only decoded sources may make this promise.
+    /// Half storage still measures the actual pixels and checks the rounded certified interval.
+    public func prepare(_ source: SourceImage, descriptor: SourceDescriptor, recipe: InputRecipe,
+                        execution: ExecutionProfile, trustedNormalizedRGBBounds: NumericBounds) async throws -> NormalizedInput {
+        try await prepare(source, descriptor: descriptor, recipe: recipe, execution: execution,
+                          rawOverrides: [], rawConfiguration: nil, trustedNormalizedRGBBounds: trustedNormalizedRGBBounds)
+    }
+
+    /// Develops a RAW source with the caller's configuration, or the legacy recipe when the configuration is nil.
+    /// Decoded pixels can declare RAW or ProRAW capture origin through the source descriptor.
+    public func prepare(_ source: SourceImage, descriptor: SourceDescriptor, recipe: InputRecipe,
+                        execution: ExecutionProfile, rawOverrides: [RAWOverride] = [],
+                        rawConfiguration: RAWDevelopmentConfiguration?) async throws -> NormalizedInput {
+        try await prepare(source, descriptor: descriptor, recipe: recipe, execution: execution,
+                          rawOverrides: rawOverrides, rawConfiguration: rawConfiguration, trustedNormalizedRGBBounds: nil)
+    }
+
+    func prepare(_ source: SourceImage, descriptor: SourceDescriptor, recipe: InputRecipe,
+                 execution: ExecutionProfile, rawOverrides: [RAWOverride], rawConfiguration: RAWDevelopmentConfiguration?,
+                 trustedNormalizedRGBBounds: NumericBounds?) async throws -> NormalizedInput {
+        try Task.checkCancellation()
+        if let bounds = trustedNormalizedRGBBounds {
+            try bounds.validate()
+            guard source.inputDevelopment == .decodedPixels,
+                  execution.precision != .float16 || max(abs(bounds.lower), abs(bounds.upper)) <= 65504 / 1.02 else {
+                throw LabError.invalid("Trusted normalized range requires decoded pixels and safe storage bounds")
+            }
+        }
+        let resolved = try resolve(source, descriptor: descriptor, recipe: recipe, execution: execution,
+                                   rawOverrides: rawOverrides, rawConfiguration: rawConfiguration)
+        return try await resolved.prepare(region: resolved.bounds, execution: execution, trustedNormalizedRGBBounds: trustedNormalizedRGBBounds)
+    }
+
+    /// Resolve decoding, orientation and color lazily, before allocating any full-frame texture.
+    public func resolve(_ source: SourceImage, descriptor: SourceDescriptor, recipe: InputRecipe,
+                        execution: ExecutionProfile, rawOverrides: [RAWOverride] = [],
+                        rawConfiguration: RAWDevelopmentConfiguration? = nil) throws -> ResolvedPhotoSource {
+        try descriptor.validate(); try recipe.validate(); try execution.validate()
         guard descriptor.recipeID == recipe.id, recipe.backend == "coreImage", working.dynamicRange == execution.dynamicRange,
               renderer.imageInputFormat == (execution.precision == .float16 ? .rgba16Float : .rgba32Float) else {
             throw LabError.invalid("Input recipe, working range or renderer precision mismatch")
         }
+        try Self.validateRAWRequest(source, descriptor: descriptor, recipe: recipe, rawOverrides: rawOverrides, rawConfiguration: rawConfiguration)
         let range: RenderDynamicRange = execution.dynamicRange == .edr ? .edr : .sdr
         var effective = EffectiveInputRecipe(declared: recipe, backendVersion: ProcessInfo.processInfo.operatingSystemVersionString)
+        func develop(_ filter: CIRAWFilter) throws -> (image: CIImage, properties: [String: Any]) {
+            let decoded = try renderer.developRAW(filter, dynamicRange: range) { raw in
+                if let rawConfiguration {
+                    try rawConfiguration.apply(to: raw)
+                } else {
+                    try Self.configure(raw, recipe: recipe, overrides: rawOverrides, effective: &effective)
+                }
+            }
+            if let rawConfiguration {
+                effective.decoderVersion = filter.decoderVersion.rawValue
+                effective.externalRAWConfiguration = rawConfiguration.identity
+            }
+            return decoded
+        }
         let image: CIImage, metadata: [String: Any]?, orientation: CGImagePropertyOrientation?
         var sourceFacts: [String: Any]?
         var bufferOutputProperties: [String: Any]?
-        var raw: CIRAWFilter?
         switch source {
         case .image(let value, let properties, let valueOrientation):
             guard let rendition = recipe.decodedRendition else { throw LabError.invalid("Decoded image recipe must declare base image or system reconstruction") }
@@ -41,41 +96,35 @@ public final class InputAdapter: @unchecked Sendable {
             image = decoded.image; metadata = decoded.properties; orientation = decoded.orientation; sourceFacts = decoded.facts; bufferOutputProperties = decoded.properties
         case .rawURL(let url):
             guard url.isFileURL, let filter = CIRAWFilter(imageURL: url) else { throw LabError.unsupported("Unsupported RAW URL") }
-            raw = filter
-            let decoded = try renderer.developRAW(filter, dynamicRange: range) { try Self.configure($0, recipe: recipe, overrides: rawOverrides, effective: &effective) }
+            let decoded = try develop(filter)
             image = decoded.image; metadata = decoded.properties; orientation = .up
         case .rawData(let data):
             guard let filter = CIRAWFilter(imageData: data, identifierHint: nil) else { throw LabError.unsupported("Unsupported RAW bytes") }
-            raw = filter
-            let decoded = try renderer.developRAW(filter, dynamicRange: range) { try Self.configure($0, recipe: recipe, overrides: rawOverrides, effective: &effective) }
+            let decoded = try develop(filter)
             image = decoded.image; metadata = decoded.properties; orientation = .up
         }
-        if raw == nil {
-            guard recipe.rawSettings.isEmpty, recipe.decoderVersion == nil, rawOverrides.isEmpty,
-                  descriptor.path != .raw, descriptor.path != .proRAW else { throw LabError.invalid("RAW recipe requires RAW development input") }
-        } else {
-            guard descriptor.path == .raw || descriptor.path == .proRAW else { throw LabError.invalid("RAW input path must be explicitly identified") }
-        }
         let normalized = try renderer.normalizedSource(image, metadata: metadata, orientation: orientation, dynamicRange: range)
-        let width = Int(normalized.bounds.width), height = Int(normalized.bounds.height)
-        try TextureDimensions.validate(width: width, height: height, device: renderer.device)
-        let bytes = try ImageDimensions.pixelCount(width: width, height: height) * execution.precision.bytesPerPixel
-        guard bytes <= execution.budget.maxResidentBytes / 2 else { throw LabError.invalid("Normalized input exceeds execution memory budget") }
-        _ = try await renderer.measureInputRange(normalized.image, bounds: normalized.bounds, colorSpace: LumeraRenderer.colorSpace(for: range),
-            budget: min(64 * 1024 * 1024, execution.budget.maxResidentBytes - bytes), requireHalf: execution.precision == .float16)
-        let textureDescriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: renderer.imageInputFormat, width: width, height: height, mipmapped: false)
-        textureDescriptor.storageMode = .private; textureDescriptor.usage = [.shaderRead, .shaderWrite]
-        guard let texture = renderer.device.makeTexture(descriptor: textureDescriptor), let command = renderer.queue.makeCommandBuffer() else { throw LabError.io("Cannot allocate normalized input") }
-        renderer.context.render(normalized.image, to: texture, commandBuffer: command, bounds: normalized.bounds, colorSpace: LumeraRenderer.colorSpace(for: range))
-        // Core Image 的内部精度可能随输出格式改变，因此从实际写入的纹理读取数值范围。
-        let readback = try renderer.rangeReducer.encode(texture, commandBuffer: command)
-        try await renderer.complete(command)
-        let bounds = try readback.resolve()
         var properties = [CFString: Any]()
         for (key, value) in (sourceFacts ?? normalized.properties) { properties[key as CFString] = value }
-        return try NormalizedInput(texture: texture, properties: bufferOutputProperties ?? normalized.properties, descriptor: descriptor, recipe: effective,
-                                   working: working, execution: execution, bounds: bounds, conditions: InputCaptureMetadataReader.read(properties: properties))
+        return ResolvedPhotoSource(renderer: renderer, image: normalized.image, bounds: normalized.bounds,
+            properties: bufferOutputProperties ?? normalized.properties, descriptor: descriptor, recipe: effective,
+            working: working, conditions: InputCaptureMetadataReader.read(properties: properties), development: source.inputDevelopment, knownResidentBytes: source.knownResidentBytes)
     }
+    /// Validate input mode and RAW controls without opening or developing the source.
+    package static func validateRAWRequest(_ source: SourceImage, descriptor: SourceDescriptor, recipe: InputRecipe,
+                                           rawOverrides: [RAWOverride], rawConfiguration: RAWDevelopmentConfiguration?) throws {
+        let hasLegacyRAWControls = !recipe.rawSettings.isEmpty || recipe.decoderVersion != nil || !rawOverrides.isEmpty
+        if rawConfiguration != nil, hasLegacyRAWControls {
+            throw LabError.invalid("External RAW configuration and legacy RAW controls cannot be combined")
+        }
+        switch source.inputDevelopment {
+        case .decodedPixels:
+            guard rawConfiguration == nil, !hasLegacyRAWControls else { throw LabError.invalid("RAW configuration requires RAW development input") }
+        case .rawDevelopment:
+            guard descriptor.path == .raw || descriptor.path == .proRAW else { throw LabError.invalid("RAW input path must be explicitly identified") }
+        }
+    }
+
     private static func configure(_ raw: CIRAWFilter, recipe: InputRecipe, overrides: [RAWOverride], effective: inout EffectiveInputRecipe) throws {
         if let version = recipe.decoderVersion {
             let selected = CIRAWDecoderVersion(rawValue: version)

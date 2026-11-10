@@ -8,10 +8,26 @@ import ImagingCore
 /// 外部提供的像素在输入准备结束前应保持不变；照片快照保留此源时，不可变期延续至快照释放。
 /// JPEG/HEIF 传入已解码的 CIImage，并在配方声明基础图像或增益图重建。
 public enum SourceImage: @unchecked Sendable {
+    public enum InputDevelopment: String, Codable, Sendable { case decodedPixels, rawDevelopment }
     case image(CIImage, metadata: [String: Any]? = nil, orientation: CGImagePropertyOrientation? = nil)
     case pixelBuffer(CVPixelBuffer, metadata: [String: Any]? = nil, orientation: CGImagePropertyOrientation? = nil)
     case rawURL(URL)
     case rawData(Data)
+
+    package var knownResidentBytes: Int {
+        switch self {
+        case .rawData(let data): return data.count
+        case .pixelBuffer(let buffer, _, _): return CVPixelBufferGetDataSize(buffer)
+        case .image, .rawURL: return 0
+        }
+    }
+
+    public var inputDevelopment: InputDevelopment {
+        switch self {
+        case .image, .pixelBuffer: return .decodedPixels
+        case .rawURL, .rawData: return .rawDevelopment
+        }
+    }
 }
 
 /// 已统一方向和颜色、由渲染模块创建并持有像素的校正前图像。
@@ -19,6 +35,7 @@ public final class NormalizedInput: @unchecked Sendable {
     let texture: MTLTexture
     let properties: [String: Any]
     public let descriptor: SourceDescriptor
+    public let inputDevelopment: SourceImage.InputDevelopment
     /// 解码器及其最终采用设置的记录，供校正匹配与来源身份计算使用。
     public let effectiveRecipe: EffectiveInputRecipe
     public let working: WorkingImageContract
@@ -34,8 +51,10 @@ public final class NormalizedInput: @unchecked Sendable {
     public var height: Int { texture.height }
     public var image: CIImage { makeInputImage(texture, properties: properties, range: execution.dynamicRange) }
     init(texture: MTLTexture, properties: [String: Any], descriptor: SourceDescriptor, recipe: EffectiveInputRecipe,
-         working: WorkingImageContract, execution: ExecutionProfile, bounds: NumericBounds, conditions: CaptureConditions) throws {
+         working: WorkingImageContract, execution: ExecutionProfile, bounds: NumericBounds, conditions: CaptureConditions,
+         inputDevelopment: SourceImage.InputDevelopment) throws {
         self.texture = texture; self.properties = properties; self.descriptor = descriptor; self.effectiveRecipe = recipe
+        self.inputDevelopment = inputDevelopment
         self.working = working; self.execution = execution; self.valueBounds = bounds; self.captureConditions = conditions
         sourceID = try descriptor.contentIdentity(effectiveRecipeDigest: recipe.digest(), working: working)
         inputID = UUID().uuidString
@@ -65,6 +84,13 @@ public final class PreparedInput: @unchecked Sendable {
     public var residentStorageBytes: Int { texture.allocatedSize + (texture === source.texture ? 0 : source.texture.allocatedSize) }
     public var execution: ExecutionProfile { source.execution }
     public var image: CIImage { makeInputImage(texture, properties: properties, range: execution.dynamicRange) }
+    /// Copy decision and replay facts without retaining the prepared textures.
+    package func photoFacts(stamp: FrameStamp) throws -> FrameInputFacts {
+        let recipe = source.effectiveRecipe
+        return FrameInputFacts(stamp: stamp, inputID: inputID, sourceID: sourceID, calibrationID: calibrationID,
+                               effectiveRecipeDigest: try recipe.digest(), captureConditions: captureConditions, effectiveRecipe: recipe)
+    }
+
     init(texture: MTLTexture, source: NormalizedInput, calibrationID: String, working: WorkingImageContract,
          bounds: NumericBounds, qualifications: [CalibrationQualification]) {
         self.texture = texture; self.source = source; self.properties = source.properties; self.sourceID = source.sourceID

@@ -85,8 +85,10 @@ final class RealtimeEffectBackend: EffectPipelineBackend {
             }
             let descriptor=MTLTextureDescriptor.texture2DDescriptor(pixelFormat:format,width:width,height:height,mipmapped:false)
             descriptor.storageMode = .shared;descriptor.usage=[.shaderRead,.shaderWrite]
-            try workingSet?.reserve(texture:descriptor,on:device)
+            let estimate = workingSet == nil ? 0 : device.heapTextureSizeAndAlign(descriptor: descriptor).size
+            try workingSet?.reserve(estimate)
             guard let texture=device.makeTexture(descriptor:descriptor) else {throw LabError.io("相机风格图像处理内存不足")}
+            try workingSet?.reserve(max(0, texture.allocatedSize - estimate))
             textures.append(texture);busy.insert(ObjectIdentifier(texture));return texture
         }
         func kernel(sigma:Float,noise:Bool,integrated:Bool) throws -> (PreparedGaussianKernel,MTLBuffer) {
@@ -96,8 +98,11 @@ final class RealtimeEffectBackend: EffectPipelineBackend {
             if kernels.count>=32 {kernels.removeAll(keepingCapacity:true)}
             let value=try PreparedGaussianKernel(sigma:sigma,noise:noise,integrated:integrated)
             // 大半径权重可能超过 setBytes 的 4 KiB 上限，改用缓冲区绑定。
-            try workingSet?.reserve(bufferLength:value.weights.count * MemoryLayout<Float>.stride,on:device)
+            let length = value.weights.count * MemoryLayout<Float>.stride
+            let estimate = workingSet == nil ? 0 : device.heapBufferSizeAndAlign(length: length, options: .storageModeShared).size
+            try workingSet?.reserve(estimate)
             guard let buffer=value.weights.withUnsafeBytes({device.makeBuffer(bytes:$0.baseAddress!,length:$0.count,options:.storageModeShared)}) else {throw LabError.io("无法分配模糊权重")}
+            try workingSet?.reserve(max(0, buffer.allocatedSize - estimate))
             kernels[key]=(value,buffer);return (value,buffer)
         }
         func release(_ texture:MTLTexture){busy.remove(ObjectIdentifier(texture))}
