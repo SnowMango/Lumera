@@ -4,7 +4,12 @@ import XCTest
 final class EditResolverTests: XCTestCase {
     private func fixture(_ configure: (inout CameraModel) -> Void = { _ in }) throws -> (CompiledCameraModel, AutomaticControls) {
         var definition = CameraModel(identity: .init(id: "edit", camera: "test", mode: "standard"))
-        definition.edits.overrideTargets = ParameterSpecification.all.map(\.id)
+        // Declare only the controls exercised below, within the persisted array budget.
+        definition.edits.overrideTargets = [
+            "detail.fineSigma", "detail.midSigma", "detail.fineGain", "color.matrix", "color.matrix.0",
+            "color.whiteBalance.destination.x", "color.whiteBalance.destination.y", "color.exposureEV",
+            "tone.curve", "style.lutWeights"
+        ]
         definition.edits.visualControls = [.init(id: "texture", unit: .normalized, bounds: .init(lower: -1, upper: 1), links: [.init(target: "detail.fineSigma", coefficient: 4)])]
         configure(&definition)
         let model = try CameraModelCompiler.compile(definition)

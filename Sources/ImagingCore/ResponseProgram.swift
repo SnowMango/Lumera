@@ -36,6 +36,7 @@ public enum ResponseExpression: Codable, Equatable, Sendable {
     case constant(ControlValue)
     case singleAxis(axis: ObservationAxis, nodes: [ResponseNode], boundary: ResponseBoundaryPolicy)
     /// x varies fastest: values[yIndex * x.count + xIndex].
+    /// CameraModel's persisted array budget also requires x.count * y.count <= 36.
     case twoAxisGrid(xAxis: ObservationAxis, yAxis: ObservationAxis, x: [Double], y: [Double], values: [ControlValue], boundary: ResponseBoundaryPolicy)
     public var axes: [ObservationAxis] {
         switch self { case .constant: return []; case .singleAxis(let a, _, _): return [a]; case .twoAxisGrid(let x, let y, _, _, _, _): return [x, y] }
@@ -57,7 +58,7 @@ public struct ResponseProgram: Codable, Equatable, Sendable {
         guard spec.bindable else { throw LabError.invalid("Non-bindable response target") }
         for value in expression.values { try spec.validate(value) }
         func positions(_ values: [Double], axis: ObservationAxis) throws {
-            guard (2...32).contains(values.count) else { throw LabError.invalid("Response axes require 2...32 nodes") }
+            guard (2...36).contains(values.count) else { throw LabError.invalid("Response axes require 2...36 nodes") }
             for value in values { try axis.validate(value) }
             guard zip(values, values.dropFirst()).allSatisfy({ axis.coordinate($0) < axis.coordinate($1) && (axis.coordinate($1) - axis.coordinate($0)).isFinite }) else {
                 throw LabError.invalid("Response nodes must increase strictly")

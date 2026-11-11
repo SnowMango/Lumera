@@ -190,8 +190,8 @@ struct JSONStructureScanner {
                     skipWhitespace()
                     guard consume(58) else { throw LabError.invalid("\(child): 缺少冒号") }
                 } else {
-                    // The largest legal schema 8 array is a 32-knot curve.
-                    guard index < 32 else { throw LabError.invalid("\(path): 数组超过 32 项") }
+                    // Shared persisted contract: every Profile/CameraModel array has at most 36 items.
+                    guard index < 36 else { throw LabError.invalid("\(path): 数组超过 36 项") }
                     child = "\(path)[\(index)]"
                 }
                 try value(path: child, depth: depth + 1)

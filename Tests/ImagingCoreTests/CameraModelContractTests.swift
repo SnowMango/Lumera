@@ -14,6 +14,63 @@ final class CameraModelContractTests: XCTestCase {
         XCTAssertThrowsError(try CameraModelCodec.decode(JSONSerialization.data(withJSONObject: json)))
     }
 
+    func testArrayBudgetsAgreeAcrossModelBoundaries() throws {
+        let base = CameraModel(identity: .init(id: "budget", camera: "test", mode: "test"))
+        for count in [32, 33, 36, 37] {
+            var permissions = base
+            permissions.edits.overrideTargets = Array(ParameterSpecification.all.prefix(count)).map(\.id)
+            var evidence = base
+            evidence.coverage.evidenceDigests = Array(repeating: String(repeating: "a", count: 64), count: count)
+            var features = base
+            features.observations.features = (0..<count).map { .init(id: "feature-\($0)", statistic: .meanGreen) }
+            var resources = base
+            resources.appearance.resources = (0..<count).map {
+                .init(id: "lut-\($0)", sha256: String(repeating: "a", count: 64), dimension: 2)
+            }
+            for model in [permissions, evidence, features, resources] {
+                try assertBudget(model, accepted: count <= 36)
+            }
+        }
+    }
+
+    func testGridBudgetCountsAllValuesRatherThanEachAxis() throws {
+        for (width, height, accepted) in [(4, 8, true), (4, 9, true), (6, 6, true), (6, 7, false), (36, 36, false)] {
+            var model = CameraModel(identity: .init(id: "grid", camera: "test", mode: "test"))
+            model.observations.sourceConditions = [.iso]
+            model.responses = [.init(target: "glow.amount", expression: .twoAxisGrid(
+                xAxis: .source(.iso), yAxis: .target(.iso),
+                x: (1...width).map { Double($0 * 100) }, y: (1...height).map { Double($0 * 100) },
+                values: Array(repeating: .scalar(0.1), count: width * height), boundary: .clamp))]
+            try assertBudget(model, accepted: accepted)
+        }
+    }
+
+    func testSingleAxisResponseAllows36NodesButRejects37() throws {
+        for count in [36, 37] {
+            var model = CameraModel(identity: .init(id: "axis", camera: "test", mode: "test"))
+            model.responses = [.init(target: "glow.amount", expression: .singleAxis(
+                axis: .target(.iso), nodes: (1...count).map { .init(Double($0 * 100), .scalar(0.1)) },
+                boundary: .clamp))]
+            try assertBudget(model, accepted: count == 36)
+        }
+    }
+
+    private func assertBudget(_ model: CameraModel, accepted: Bool,
+                              file: StaticString = #filePath, line: UInt = #line) throws {
+        // Raw encoding deliberately bypasses the codec to exercise untrusted input rejection.
+        let raw = try JSONEncoder().encode(model)
+        if accepted {
+            XCTAssertNoThrow(try model.validate(), file: file, line: line)
+            XCTAssertNoThrow(try CameraModelCompiler.compile(model), file: file, line: line)
+            XCTAssertEqual(try CameraModelCodec.decode(CameraModelCodec.encode(model)), model, file: file, line: line)
+        } else {
+            XCTAssertThrowsError(try model.validate(), file: file, line: line)
+            XCTAssertThrowsError(try CameraModelCompiler.compile(model), file: file, line: line)
+            XCTAssertThrowsError(try CameraModelCodec.encode(model), file: file, line: line)
+            XCTAssertThrowsError(try CameraModelCodec.decode(raw), file: file, line: line)
+        }
+    }
+
     func testInvalidResponseValuesAndOwnershipAreRejected() throws {
         var model = CameraModel(identity: .init(id: "fixture", camera: "synthetic", mode: "neutral"))
         model.responses = [.init(target: "glow.amount", expression: .constant(.scalar(.nan)))]

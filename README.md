@@ -1,6 +1,6 @@
 # Lumera
 
-版本：**0.3.1（开发中）**。产品版本、相机模型 schema 和固定风格 schema 分别管理。
+版本：**0.3.2**。产品版本、相机模型 schema 和固定风格 schema 分别管理。
 
 Lumera 是基于 Metal 的照片与视频成片引擎。它以相机模型描述目标外观，根据输入观测和拍摄条件计算参数，并执行颜色、色调曲线、细节、柔化、暗角、光晕、数码噪点和胶片颗粒处理。输入校正、目标模型、用户编辑和执行资源独立管理；模型可由配对样本拟合，也可手动制作。
 
@@ -30,7 +30,7 @@ Lumera 是基于 Metal 的照片与视频成片引擎。它以相机模型描述
 https://github.com/SnowMango/Lumera.git
 ```
 
-`v0.3.1` 标签发布后可使用下方版本依赖。当前开发版本位于 `v0.3.1-develop` 分支，可对本地检出使用路径依赖 `.package(path: "../Lumera")`。添加到应用目标时，选择 `ImagingCore` 和 `ImageRendering`；使用照片/视频协调器时再添加 `ImagingRuntime`。各产品分别导入，没有名为 `Lumera` 的模块。
+SPM 版本依赖使用 `0.3.2`。本地检出使用路径依赖 `.package(path: "../Lumera")`。添加到应用目标时，选择 `ImagingCore` 和 `ImageRendering`；使用照片/视频协调器时再添加 `ImagingRuntime`。各产品分别导入，没有名为 `Lumera` 的模块。
 
 如果宿主项目使用 `Package.swift`，在包的 `dependencies` 中声明仓库，并在目标的 `dependencies` 中添加产品：
 
@@ -45,7 +45,7 @@ let package = Package(
         .library(name: "MyCameraFeature", targets: ["MyCameraFeature"])
     ],
     dependencies: [
-        .package(url: "https://github.com/SnowMango/Lumera.git", from: "0.3.1")
+        .package(url: "https://github.com/SnowMango/Lumera.git", from: "0.3.2")
     ],
     targets: [
         .target(
@@ -232,6 +232,8 @@ let compiled = try CameraModelCompiler.compile(CameraModelCodec.decode(data))
 
 初始化器生成的是基础外观定义，不具备特定相机的实拍验证资格。`CameraModelCodec` 接受不超过 16 MiB 的 JSON；完整资源包由 `ModelBuilder` 构建。目标身份与输入设备身份独立，模型编辑不会改变输入校正。
 
+`CameraModel` 的每个 JSON 数组最多 36 项，包括覆盖／锁定权限目标、响应程序、观测特征、资源清单及嵌套控制值。`ResponseProgram` 每轴允许 2–36 个节点；二维响应还要求 `values.count == x.count * y.count` 且 `values.count <= 36`，支持 6×6 网格。字段自身的更严格约束仍然有效；`ResponseCurve` 的 2–32 节点限制及动态色调曲线的固定 32 节点契约独立于数组结构预算。`validate()`、编译、编码和解码使用相同的模型结构预算，超限时抛出错误，不执行截断或采样。JSON 总大小上限为 16 MiB，容器嵌套深度上限为 64 层；解码拒绝重复键。
+
 ### 固定风格与兼容接口
 
 `Profile` 保留独立的编译、求值与渲染路径。需要显式桥接时可调用 `LegacyProfileAdapter.adapt`；桥接模型保留 `legacyProfile` 语义，不等价于通过原生响应程序制作的相机模型。宿主可限制仅接受原生模型。
@@ -255,7 +257,7 @@ let compiled = try CameraModelCompiler.compile(CameraModelCodec.decode(data))
 
 ### Profile 配置文件格式
 
-Lumera 0.3.1 的固定风格接口使用 `Profile` JSON schema 8；此格式与 `CameraModel` schema 1 分别解码。根对象必填 `schemaVersion`、`id` 和 `name`。`parameters` 缺省时使用基础参数，`responses` 缺省时使用空数组。以下是最小的固定配置。
+Lumera 0.3.2 的固定风格接口使用 `Profile` JSON schema 8；此格式与 `CameraModel` schema 1 分别解码。根对象必填 `schemaVersion`、`id` 和 `name`。`parameters` 缺省时使用基础参数，`responses` 缺省时使用空数组。以下是最小的固定配置。
 
 ```json
 {
