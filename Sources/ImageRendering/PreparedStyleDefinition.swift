@@ -4,8 +4,8 @@ import ImagingCore
 public final class PreparedStyleDefinition:@unchecked Sendable {
     public let definition:CompiledStyleDefinition
     public var preparationStatistics: StylePreparationStatistics { fixed.preparationStatistics }
-    let fixed:PreparedCameraStyle
-    init(definition:CompiledStyleDefinition,fixed:PreparedCameraStyle){self.definition=definition;self.fixed=fixed}
+    let fixed:PreparedResolvedStyle
+    init(definition:CompiledStyleDefinition,fixed:PreparedResolvedStyle){self.definition=definition;self.fixed=fixed}
 }
 /// Immutable evaluator output; callers cannot supply unchecked numeric parameters or a different LUT.
 public struct FrameStyleParameters:Sendable {

@@ -70,13 +70,13 @@ public struct TemporalFitResult: Sendable {
 }
 /// 将帧及适应后的自动控制映射为与实测向量逐项对应的预测值。
 public protocol TemporalResponsePredicting {
-    func predict(_ frame:ResponseSequence.Frame,controls:AutomaticControls,model:CompiledCameraModel) async throws -> [Double]
+    func predict(_ frame:ResponseSequence.Frame,controls:AutomaticControls,model:CompiledStyleModel) async throws -> [Double]
 }
 /// 数值控制域的时序预测器，适用于开发证据。
 public struct TypedControlTemporalPredictor: TemporalResponsePredicting {
     public let targets:[String]
     public init(targets:[String]) { self.targets=targets }
-    public func predict(_ frame:ResponseSequence.Frame,controls:AutomaticControls,model:CompiledCameraModel) async throws -> [Double] {
+    public func predict(_ frame:ResponseSequence.Frame,controls:AutomaticControls,model:CompiledStyleModel) async throws -> [Double] {
         try ParameterSpecification.validateOwners(targets)
         var result=[Double]()
         for target in targets {
@@ -95,7 +95,7 @@ public struct TypedControlTemporalPredictor: TemporalResponsePredicting {
 public enum TemporalResponseFitter {
     /// 训练序列用于搜索，调优序列用于报告残差，验收序列只参与分组校验。
     /// 时序声明或可辨识性不足时，可保留原适应策略并记录原因。
-    public static func fit(_ sequences:[ResponseSequence],model:CompiledCameraModel,policy:ValidationPolicy,
+    public static func fit(_ sequences:[ResponseSequence],model:CompiledStyleModel,policy:ValidationPolicy,
                            options:TemporalFitOptions,predictor:any TemporalResponsePredicting) async throws -> TemporalFitResult {
         try policy.validate();try options.validate()
         let selected=sequences.filter{$0.split != .acceptance}
@@ -138,8 +138,8 @@ public enum TemporalResponseFitter {
                       abs(frame.targetPresentationTime-sequence.captureDelaySeconds!-stamp.presentationTime)<=sequence.captureUncertaintySeconds!+1e-9 else {
                     throw LabError.invalid("Temporal measurement identity, edits or declared target timing mismatch")
                 }
-                if case .lock = record.event { throw LabError.unsupported("Locked controls cannot identify camera response timing") }
-                if case .unlock = record.event { throw LabError.unsupported("Unlock edits cannot identify camera response timing") }
+                if case .lock = record.event { throw LabError.unsupported("Locked controls cannot identify model response timing") }
+                if case .unlock = record.event { throw LabError.unsupported("Unlock edits cannot identify model response timing") }
                 guard let current=record.currentInput else { throw LabError.invalid("Temporal evidence requires current prepared-input facts") }
                 do {
                     try current.validate()
@@ -187,7 +187,7 @@ public enum TemporalResponseFitter {
                 var context=frame.record.context
                 if let supplied=context.fallback,supplied != fallback { throw LabError.invalid("Replay fallback disagrees with reconstructed history") }
                 context.fallback=fallback
-                let desired=try CameraModelEvaluator.evaluate(model,context:context)
+                let desired=try StyleModelEvaluator.evaluate(model,context:context)
                 trajectory.append(desired)
                 fallback = .init(controls:desired,stamp:context.evaluationStamp)
             }
@@ -302,7 +302,7 @@ public enum TemporalResponseFitter {
         if !converged { unresolved.append("Finite temporal search budget exhausted before convergence") }
         if tune.isEmpty { unresolved.append("No independent tune sequence; temporal generalization remains unknown") }
         if !policy.thresholds.contains(where:{$0.domain == .temporal}) { unresolved.append("No frozen temporal threshold; timing qualification remains insufficient") }
-        unresolved.append("Independent real-camera timing and whole-scene pixel validation remain pending")
+        unresolved.append("Independent timing and whole-scene pixel validation remain pending")
         return result(adaptation,best.maximum,tuned,converged)
     }
 }

@@ -2,8 +2,8 @@ import Foundation
 
 /// Immutable, bounded program. Its grammar cannot reference another output control,
 /// so control-dependency cycles are unrepresentable rather than scheduled at runtime.
-public struct CompiledCameraModel: Sendable {
-    public let definition: CameraModel
+public struct CompiledStyleModel: Sendable {
+    public let definition: StyleModel
     /// 完整模型定义的内容摘要。
     public let identity: String
     public var modelDigest: String { identity }
@@ -18,7 +18,7 @@ public struct CompiledCameraModel: Sendable {
     public let lutResourceIDs: Set<String>
     let legacy: CompiledStyleDefinition?
 
-    fileprivate init(_ model: CameraModel, lutResourceIDs: Set<String>) throws {
+    fileprivate init(_ model: StyleModel, lutResourceIDs: Set<String>) throws {
         self.lutResourceIDs = lutResourceIDs
         definition = model; identity = try model.digest()
         featureDigest = try model.observations.featureDigest()
@@ -69,9 +69,9 @@ public enum ControlAccess {
 }
 
 /// 在逐帧求值前验证自动响应、时间插值端点及 LUT 调色板的兼容性。
-public enum CameraModelCompiler {
+public enum StyleModelCompiler {
     /// 从模型声明生成不可变求值程序，并提取观测依赖和可用 LUT 集合。
-    public static func compile(_ model: CameraModel) throws -> CompiledCameraModel {
+    public static func compile(_ model: StyleModel) throws -> CompiledStyleModel {
         try model.validate()
         guard model.responses.count <= ParameterSpecification.all.count else { throw LabError.invalid("Response instruction limit exceeded") }
         var baseline = model.appearance.parameters, weights = model.appearance.lutWeights
@@ -136,11 +136,11 @@ public enum CameraModelCompiler {
             try EditResolver.validateStrength(strength, parameters: baseline, lutWeights: weights,
                                               resources: model.appearance.resources)
         }
-        return try CompiledCameraModel(model, lutResourceIDs: palette)
+        return try CompiledStyleModel(model, lutResourceIDs: palette)
     }
     /// Initial execution palette is capped globally, not merely per interpolation
     /// cell, so temporal blending across cells cannot accumulate more than four LUTs.
-    private static func validatePalette(_ model: CameraModel) throws -> Set<String> {
+    private static func validatePalette(_ model: StyleModel) throws -> Set<String> {
         var values = model.responses.flatMap { $0.expression.values }
         for response in model.responses { if case .constant(let value) = response.missing { values.append(value) } }
         for rule in model.adaptation.rules {

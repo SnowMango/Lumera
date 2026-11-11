@@ -1,7 +1,7 @@
 // swift-tools-version: 5.10
 import PackageDescription
 
-// Camera rendering styles: film, CCD and other digital cameras.
+// Photo and video style processing.
 // Shared engine and offline tool only. No macOS application sources or targets.
 let package = Package(
     name: "Lumera",

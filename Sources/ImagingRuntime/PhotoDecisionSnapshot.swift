@@ -22,7 +22,7 @@ public final class PhotoDecisionSnapshot: @unchecked Sendable {
     /// The retained source contains original RAW bytes, either directly or at a validated URL.
     public var canRedevelopRAW: Bool { source.source.inputDevelopment == .rawDevelopment }
     let owner: UUID
-    let model: PreparedCameraModel
+    let model: PreparedStyleModel
     let renderer: LumeraRenderer
     let source: PhotoSourceLease
     let descriptor: SourceDescriptor
@@ -34,11 +34,11 @@ public final class PhotoDecisionSnapshot: @unchecked Sendable {
     let reservation: FrameReservation
     private let variants: PhotoExecutionVariants
 
-    func executionVariant(_ execution: ExecutionProfile) throws -> (renderer: LumeraRenderer, model: PreparedCameraModel) {
+    func executionVariant(_ execution: ExecutionProfile) throws -> (renderer: LumeraRenderer, model: PreparedStyleModel) {
         try variants.get(execution)
     }
     init(input: PreparedInput, observations: FrameObservations, automatic: AutomaticControls,
-         owner: UUID, model: PreparedCameraModel, renderer: LumeraRenderer, source: PhotoSourceLease,
+         owner: UUID, model: PreparedStyleModel, renderer: LumeraRenderer, source: PhotoSourceLease,
          descriptor: SourceDescriptor, recipe: InputRecipe, calibration: InputCalibration?, inputResources: ModelResourceSet,
          rawOverrides: [RAWOverride], rawConfiguration: RAWDevelopmentConfiguration?, reservation: FrameReservation, stamp: FrameStamp, seed: UInt32) {
         self.input = input; self.observations = observations; self.automatic = automatic
@@ -79,19 +79,19 @@ struct PhotoSourceLease: @unchecked Sendable {
 
 /// Input-independent model execution variants shared by both photo APIs.
 final class PhotoExecutionVariants: @unchecked Sendable {
-    private let model: PreparedCameraModel
+    private let model: PreparedStyleModel
     private let renderer: LumeraRenderer
 
-    init(model: PreparedCameraModel, renderer: LumeraRenderer) {
+    init(model: PreparedStyleModel, renderer: LumeraRenderer) {
         self.model = model
         self.renderer = renderer
     }
 
     private let variantLock = NSLock()
     // 以完整执行规格缓存变体；不同精度的渲染器仍共用原模型预算账本。
-    private var variants: [(execution: ExecutionProfile, renderer: LumeraRenderer, model: PreparedCameraModel)] = []
+    private var variants: [(execution: ExecutionProfile, renderer: LumeraRenderer, model: PreparedStyleModel)] = []
     /// Serialize cache misses so concurrent exports cannot upload duplicate variants.
-    func get(_ execution: ExecutionProfile, streaming: Bool = false) throws -> (renderer: LumeraRenderer, model: PreparedCameraModel) {
+    func get(_ execution: ExecutionProfile, streaming: Bool = false) throws -> (renderer: LumeraRenderer, model: PreparedStyleModel) {
         guard execution.budget == model.execution.budget else { throw LabError.invalid("Snapshot budget changes require a new model and photo decision") }
         if execution == model.execution { return (renderer, model) }
         variantLock.lock(); defer { variantLock.unlock() }

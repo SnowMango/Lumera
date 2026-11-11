@@ -23,7 +23,7 @@ public struct DecisionStepResult: Sendable {
 public enum DecisionReplay {
     /// 按给定顺序从空历史重放整段记录；reset 事件在段内建立新的历史边界。
     /// 仅返回参数决策，不解码图像或执行像素渲染。
-    public static func evaluate(_ records: [DecisionRecord], model: CompiledCameraModel) throws -> [FrameDecision] {
+    public static func evaluate(_ records: [DecisionRecord], model: CompiledStyleModel) throws -> [FrameDecision] {
         var state: DecisionEngineState?
         return try records.map { record in
             let result = try step(record, model: model, state: state)
@@ -36,7 +36,7 @@ public enum DecisionReplay {
     /// is unsupported until automatic and final edit coordinates have an explicit mapping.
     /// 校验模型、资源及当前输入事实后，执行自动求值 → 时间适应 → 用户编辑。
     /// 显式提供的 fallback 必须与可重建历史一致；失败不会改变传入状态。
-    public static func step(_ record: DecisionRecord, model: CompiledCameraModel, state: DecisionEngineState? = nil) throws -> DecisionStepResult {
+    public static func step(_ record: DecisionRecord, model: CompiledStyleModel, state: DecisionEngineState? = nil) throws -> DecisionStepResult {
         let resourceDigest = Digest.data(try JSON.encode(model.definition.appearance.resources))
         guard record.version == 1, record.modelDigest == model.identity,
               record.resourceDigest == resourceDigest, let current = record.currentInput else {
@@ -83,7 +83,7 @@ public enum DecisionReplay {
         guard record.edits.locks.allSatisfy({ declaredLocks.contains($0) }) else {
             throw LabError.invalid("Replay lock edits require a matching recorded lock event")
         }
-        let automatic = try CameraModelEvaluator.evaluate(model, context: context, lockedControls: declaredLocks + unlocks)
+        let automatic = try StyleModelEvaluator.evaluate(model, context: context, lockedControls: declaredLocks + unlocks)
         let adapted = try AdaptationReducer.reduce(automatic, state: previous?.adaptation, stamp: current.stamp,
                                                    event: record.event, policy: model.definition.adaptation)
         var edits = record.edits

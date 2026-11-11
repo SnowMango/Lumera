@@ -1,7 +1,7 @@
 import ImagingCore
 
 /// Common uniform layout for the texture and offline renderers.
-public enum CameraEffectUniforms {
+public enum EffectUniforms {
     public static let kernels=["colorResponse","toneResponse","softenCombine","halationCombine","filmGrain","grainSubpixels","grainReduce","opticalReduce","softenCombineReduced","glowCombineReduced","halationCombineReduced"]
     public static func tone(_ value:ToneResponse)->[Float] {PreparedResponseCurves({var p=StyleParameters();p.tone=value;return p}()).tone}
     public static func noise(_ value:Noise, envelope:[Float]? = nil)->[Float] { [value.isActive ? 1:0,Float(value.chromaRatio),Float(value.chromaCorrelation),Float(value.gain)]+(envelope ?? PreparedResponseCurves.encode(value.curve)) }

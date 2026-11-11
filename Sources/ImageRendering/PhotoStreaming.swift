@@ -32,7 +32,7 @@ extension LumeraRenderer {
     /// Entry clears idle renderer caches and rejects outstanding pooled commands. While active,
     /// unbudgeted pooled encoding on this renderer rejects; concurrent bounded streams are allowed.
     /// Use a separate renderer for simultaneous legacy unbudgeted rendering.
-    public func streamPhoto(_ source: any PhotoRegionSource, model: PreparedCameraModel,
+    public func streamPhoto(_ source: any PhotoRegionSource, model: PreparedStyleModel,
                             calibration: InputCalibration? = nil, inputResources: ModelResourceSet? = nil,
                             edits: EditRequest = .init(), stamp: FrameStamp,
                             targetConditions: CaptureConditions = .init(), seed: UInt32 = 42,
@@ -42,7 +42,7 @@ extension LumeraRenderer {
             reusing: nil, automatic: nil, sink: sink)
     }
     /// Unchecked replay is package-only: PhotoProcessor supplies its source-bound snapshot.
-    package func streamPhoto(_ source: any PhotoRegionSource, model: PreparedCameraModel,
+    package func streamPhoto(_ source: any PhotoRegionSource, model: PreparedStyleModel,
                             calibration: InputCalibration? = nil, inputResources: ModelResourceSet? = nil,
                             edits: EditRequest = .init(), stamp: FrameStamp,
                             targetConditions: CaptureConditions = .init(), seed: UInt32 = 42,
@@ -64,7 +64,7 @@ extension LumeraRenderer {
             observations = previous
         } else { observations = try await observe(source, normalizer: normalizer, calibration: calibration, resources: inputResources,
             execution: execution, stamp: stamp, requirements: model.compiled.definition.observations) }
-        let automatic = try priorAutomatic ?? CameraModelEvaluator.evaluate(model.compiled, context: .init(evaluationStamp: stamp, observations: observations, targetConditions: targetConditions))
+        let automatic = try priorAutomatic ?? StyleModelEvaluator.evaluate(model.compiled, context: .init(evaluationStamp: stamp, observations: observations, targetConditions: targetConditions))
         guard automatic.sourceID == observations.sourceID, automatic.calibrationID == observations.calibrationID else {
             throw LabError.invalid("Automatic controls differ from observation provenance")
         }
@@ -73,7 +73,7 @@ extension LumeraRenderer {
         guard max(1, Int(Double(source.width) * ratio)) == execution.width,
               max(1, Int(Double(source.height) * ratio)) == execution.height else { throw LabError.invalid("Output aspect ratio differs from source") }
         let active = controls.lutWeights.filter { $0.weight > 0 }
-        let selected = try active.map { weight -> PreparedCameraStyle in
+        let selected = try active.map { weight -> PreparedResolvedStyle in
             guard let style = model.lutStyles[weight.resourceID] else { throw LabError.invalid("LUT outside model palette") }; return style
         }
         let style = try active.isEmpty ? model.base : encoder.blendStyle(base: model.base, styles: selected, weights: active.map(\.weight))

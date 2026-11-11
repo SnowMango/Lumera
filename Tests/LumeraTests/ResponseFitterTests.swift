@@ -5,10 +5,10 @@ import ImagingCore
 import ImageRendering
 @testable import ImageAnalysis
 
-final class CameraResponseFitterTests: XCTestCase {
+final class ResponseFitterTests: XCTestCase {
     func testConstantRemainsConstantWithoutEvidence() throws {
-        let model=CameraModel(identity:.init(id:"fixture",camera:"synthetic",mode:"SDR"))
-        let result=try CameraFitResult(model:model,resources:ModelResourceSet())
+        let model=StyleModel(identity:.init(id:"fixture",name: "SDR"))
+        let result=try ModelFitResult(model:model,resources:ModelResourceSet())
         XCTAssertEqual(result.model,model)
         XCTAssertEqual(result.derivation,.manual)
         XCTAssertTrue(result.conditionDomains.isEmpty)
@@ -24,11 +24,11 @@ final class CameraResponseFitterTests: XCTestCase {
                          controls:[.init(target:"color.matrix",value:.matrix(.init(values:[gain,0,0,0,gain,0,0,0,gain])))])
         } }
     }
-    func baseline() -> CameraModel { .init(identity:.init(id:"fixture",camera:"synthetic",mode:"SDR")) }
+    func baseline() -> StyleModel { .init(identity:.init(id:"fixture",name: "SDR")) }
     func testOneAxisPreferredOverUnsupportedTwoAxis() async throws {
         let measurements=samples([(100,nil),(400,nil)],split:.train,twoAxis:false)+samples([(150,nil),(300,nil)],split:.tune,twoAxis:false)
         let design=ConditionFitDesign(candidateAxes:[.target(.iso),.target(.whiteBalanceTemperatureKelvin)],controlledConditions:[.init(axis:.source(.iso),value:100)])
-        let fit=try await CameraResponseFitter.fit(measurements:measurements,baseline:baseline(),resources:ModelResourceSet(),design:design,options:.init())
+        let fit=try await ResponseFitter.fit(measurements:measurements,baseline:baseline(),resources:ModelResourceSet(),design:design,options:.init())
         XCTAssertEqual(fit.conditionDomains.first?.axes,[.target(.iso)])
         XCTAssertLessThan(fit.tuneResidual ?? 1,1e-8)
         XCTAssertEqual(fit.derivation,.manual)
@@ -36,26 +36,26 @@ final class CameraResponseFitterTests: XCTestCase {
     }
     func testIndistinguishableTuneDataKeepsConstant() async throws {
         let measurements=samples([(100,nil),(400,nil)],split:.train,twoAxis:false)+samples([(200,nil)],split:.tune,twoAxis:false)
-        let fit=try await CameraResponseFitter.fit(measurements:measurements,baseline:baseline(),resources:ModelResourceSet(),design:.init(candidateAxes:[.target(.iso)],controlledConditions:[.init(axis:.source(.iso),value:100)]),options:.init())
+        let fit=try await ResponseFitter.fit(measurements:measurements,baseline:baseline(),resources:ModelResourceSet(),design:.init(candidateAxes:[.target(.iso)],controlledConditions:[.init(axis:.source(.iso),value:100)]),options:.init())
         XCTAssertTrue(fit.model.responses.isEmpty)
         XCTAssertTrue(fit.conditionDomains.isEmpty)
     }
     func testMissingConditionCellCannotGrantCoverage() async throws {
         let measurements=samples([(100,3000),(400,3000),(100,6000)],split:.train,twoAxis:true)+samples([(200,4500)],split:.tune,twoAxis:true)
-        let fit=try await CameraResponseFitter.fit(measurements:measurements,baseline:baseline(),resources:ModelResourceSet(),design:.init(candidateAxes:[.target(.iso),.target(.whiteBalanceTemperatureKelvin)],controlledConditions:[.init(axis:.source(.iso),value:100)]),options:.init())
+        let fit=try await ResponseFitter.fit(measurements:measurements,baseline:baseline(),resources:ModelResourceSet(),design:.init(candidateAxes:[.target(.iso),.target(.whiteBalanceTemperatureKelvin)],controlledConditions:[.init(axis:.source(.iso),value:100)]),options:.init())
         XCTAssertFalse(fit.conditionDomains.contains{$0.axes.count==2})
         XCTAssertTrue(fit.unresolved.contains{$0.contains("Cartesian")})
     }
     func testCompleteControlledGridPredictsIndependentIntermediateConditions() async throws {
         let measurements=samples([(100,3000),(400,3000),(100,6000),(400,6000)],split:.train,twoAxis:true)+samples([(150,4000),(300,5000)],split:.tune,twoAxis:true)
-        let fit=try await CameraResponseFitter.fit(measurements:measurements,baseline:baseline(),resources:ModelResourceSet(),design:.init(candidateAxes:[.target(.iso),.target(.whiteBalanceTemperatureKelvin)],controlledConditions:[.init(axis:.source(.iso),value:100)]),options:.init())
+        let fit=try await ResponseFitter.fit(measurements:measurements,baseline:baseline(),resources:ModelResourceSet(),design:.init(candidateAxes:[.target(.iso),.target(.whiteBalanceTemperatureKelvin)],controlledConditions:[.init(axis:.source(.iso),value:100)]),options:.init())
         XCTAssertTrue(fit.conditionDomains.contains{$0.axes.count==2})
-        let compiled=try CameraModelCompiler.compile(fit.model)
+        let compiled=try StyleModelCompiler.compile(fit.model)
         for (iso,kelvin) in [(125.0,3500.0),(250.0,5500.0)] {
             let stamp=FrameStamp(streamID:"heldout",generation:1,index:0,presentationTime:0,duration:1)
             let observations=FrameObservations(stamp:stamp,sourceID:"source",calibrationID:"calibration",featureDigest:compiled.featureDigest)
             var target=CaptureConditions();target.iso=iso;target.whiteBalanceTemperatureKelvin=kelvin
-            let controls=try CameraModelEvaluator.evaluate(compiled,context:.init(evaluationStamp:stamp,observations:observations,targetConditions:target))
+            let controls=try StyleModelEvaluator.evaluate(compiled,context:.init(evaluationStamp:stamp,observations:observations,targetConditions:target))
             XCTAssertEqual(controls.parameters.color.matrix.values[0],0.4+0.3*log2(iso/100)/2+0.2*(kelvin-3000)/3000,accuracy:1e-8)
         }
     }
@@ -67,12 +67,12 @@ final class CameraResponseFitterTests: XCTestCase {
             var target=CaptureConditions();target.iso=40000/source.iso!;target.exposureBiasEV=0
             return .init(id:record.id,sampleIDs:record.sampleIDs,sceneIDs:record.sceneIDs,split:record.split,sourceConditions:source,targetConditions:target,controls:record.controls)
         }
-        let unavailable=try await CameraResponseFitter.fit(measurements:measurements,baseline:baseline(),resources:ModelResourceSet(),
+        let unavailable=try await ResponseFitter.fit(measurements:measurements,baseline:baseline(),resources:ModelResourceSet(),
             design:.init(candidateAxes:[.source(.iso)],controlledConditions:[.init(axis:.target(.exposureBiasEV),value:0)]),options:.init())
         XCTAssertTrue(unavailable.model.responses.isEmpty)
         XCTAssertTrue(unavailable.unresolved.contains{$0.contains("mapping")})
         let pairs=measurements.map{SourceTargetConditionPair(sourceAxis:.iso,targetAxis:.iso,sourceValue:$0.sourceConditions.iso!,targetValue:$0.targetConditions.iso!)}
-        let fitted=try await CameraResponseFitter.fit(measurements:measurements,baseline:baseline(),resources:ModelResourceSet(),
+        let fitted=try await ResponseFitter.fit(measurements:measurements,baseline:baseline(),resources:ModelResourceSet(),
             design:.init(candidateAxes:[.source(.iso)],controlledConditions:[.init(axis:.target(.exposureBiasEV),value:0)],sourceTargetPairs:pairs),options:.init())
         XCTAssertEqual(fitted.conditionDomains.first?.axes,[.source(.iso)])
         XCTAssertEqual(fitted.model.observations.sourceConditions,[.iso])
@@ -87,7 +87,7 @@ final class CameraResponseFitterTests: XCTestCase {
                 var target=record.targetConditions;target.exposureBiasEV=0
                 return .init(id:record.id,sampleIDs:record.sampleIDs,sceneIDs:record.sceneIDs,split:record.split,sourceConditions:source,targetConditions:target,controls:record.controls)
             }
-            let fit=try await CameraResponseFitter.fit(measurements:records,baseline:baseline(),resources:ModelResourceSet(),design:.init(candidateAxes:[.target(.iso)],controlledConditions:[.init(axis:.target(.exposureBiasEV),value:0)]),options:.init())
+            let fit=try await ResponseFitter.fit(measurements:records,baseline:baseline(),resources:ModelResourceSet(),design:.init(candidateAxes:[.target(.iso)],controlledConditions:[.init(axis:.target(.exposureBiasEV),value:0)]),options:.init())
             XCTAssertTrue(fit.model.responses.isEmpty,"Nuisance source changes cannot be attributed to target ISO")
             XCTAssertTrue(fit.unresolved.contains{$0.contains("nuisance")})
         }
@@ -96,11 +96,11 @@ final class CameraResponseFitterTests: XCTestCase {
         let records=samples([(100,nil),(400,nil)],split:.train,twoAxis:false)+samples([(150,nil),(300,nil)],split:.tune,twoAxis:false)
         let design=ConditionFitDesign(candidateAxes:[.target(.iso)],controlledConditions:[.init(axis:.source(.iso),value:100)])
         let held=ConditionAppearanceMeasurement(id:"held",sampleIDs:["held"],sceneIDs:["held"],split:.acceptance,sourceConditions:.init(),targetConditions:.init(),controls:[.init(target:"invalid",value:.scalar(.nan))])
-        let a=try await CameraResponseFitter.fit(measurements:records,baseline:baseline(),resources:ModelResourceSet(),design:design,options:.init())
-        let b=try await CameraResponseFitter.fit(measurements:records+[held],baseline:baseline(),resources:ModelResourceSet(),design:design,options:.init())
+        let a=try await ResponseFitter.fit(measurements:records,baseline:baseline(),resources:ModelResourceSet(),design:design,options:.init())
+        let b=try await ResponseFitter.fit(measurements:records+[held],baseline:baseline(),resources:ModelResourceSet(),design:design,options:.init())
         XCTAssertEqual(a.model,b.model)
         XCTAssertFalse(b.consumedSampleIDs.contains("held"))
-        let bounded=try await CameraResponseFitter.fit(measurements:records,baseline:baseline(),resources:ModelResourceSet(),design:design,options:.init(maxIterations:1))
+        let bounded=try await ResponseFitter.fit(measurements:records,baseline:baseline(),resources:ModelResourceSet(),design:design,options:.init(maxIterations:1))
         XCTAssertTrue(bounded.model.responses.isEmpty)
         XCTAssertTrue(bounded.unresolved.contains{$0.contains("budget")})
     }
@@ -123,17 +123,17 @@ final class CameraResponseFitterTests: XCTestCase {
             converged:false,iterations:0,unresolved:[],algorithmVersion:"fixture",options:.init(),curveDiagnostics:nil,residualIterations:0,
             inputIdentity:try calibration.processingDigest(),datasetIdentity:String(repeating:"a",count:64))
         base.projectDigest=dataset.report.projectDigest;base.consumedSampleIDs=["train"]
-        XCTAssertNoThrow(try CameraResponseFitter.validateBase(base,dataset:dataset,calibration:calibration))
-        let constant=try CameraFitResult.constant(base:base,baseline:baseline(),resources:ModelResourceSet(),calibration:calibration)
+        XCTAssertNoThrow(try ResponseFitter.validateBase(base,dataset:dataset,calibration:calibration))
+        let constant=try ModelFitResult.constant(base:base,baseline:baseline(),resources:ModelResourceSet(),calibration:calibration)
         XCTAssertEqual(constant.projectDigest,dataset.report.projectDigest);XCTAssertEqual(constant.consumedSampleIDs,["train"])
         base.projectDigest=String(repeating:"b",count:64)
-        XCTAssertThrowsError(try CameraResponseFitter.validateBase(base,dataset:dataset,calibration:calibration))
+        XCTAssertThrowsError(try ResponseFitter.validateBase(base,dataset:dataset,calibration:calibration))
         base.projectDigest=dataset.report.projectDigest;base.consumedSampleIDs=["held"]
-        XCTAssertThrowsError(try CameraResponseFitter.validateBase(base,dataset:dataset,calibration:calibration))
+        XCTAssertThrowsError(try ResponseFitter.validateBase(base,dataset:dataset,calibration:calibration))
         base.consumedSampleIDs=["train","train"]
-        XCTAssertThrowsError(try CameraResponseFitter.validateBase(base,dataset:dataset,calibration:calibration))
+        XCTAssertThrowsError(try ResponseFitter.validateBase(base,dataset:dataset,calibration:calibration))
         base.projectDigest=nil;base.consumedSampleIDs=[]
-        XCTAssertThrowsError(try CameraResponseFitter.validateBase(base,dataset:dataset,calibration:calibration))
+        XCTAssertThrowsError(try ResponseFitter.validateBase(base,dataset:dataset,calibration:calibration))
     }
     func testProductionCellsUseC3AndB7WithoutAcceptanceOrInputResourceAliasing() async throws {
         guard let device=MTLCreateSystemDefaultDevice() else { throw XCTSkip("Metal unavailable") }
@@ -169,7 +169,7 @@ final class CameraResponseFitterTests: XCTestCase {
             var targetConditions=CaptureConditions();targetConditions.iso=row.0
             records.append(.init(id:"sample-\(index)",input:input,target:target,sceneID:"scene-\(index)",split:row.1,sourceConditions:sourceConditions,targetConditions:targetConditions))
         }
-        let identity=TargetIdentity(id:"target",camera:"synthetic",mode:"SDR")
+        let identity=ModelIdentity(id:"target",name: "SDR")
         let project=CalibrationProject(id:"conditional",target:identity,source:source,inputRecipe:recipe,working:working,samples:records)
         let dataset=try DatasetValidator(baseDirectory:directory).validate(project)
         for file in [records.last!.input,records.last!.target] { try FileManager.default.removeItem(at:directory.appendingPathComponent(file.path)) }
@@ -180,15 +180,15 @@ final class CameraResponseFitterTests: XCTestCase {
         let inputResources=try ModelResourceSet(luts:[correctionDescriptor.id:correction])
         let fixed=try LUTSampleGrid.identity(dimension:17).asset(name:"fixed-style")
         let styleResources=try ModelResourceSet(luts:["fixed-style":fixed])
-        var baseline=CameraModel(identity:identity)
+        var baseline=StyleModel(identity:identity)
         baseline.appearance.resources=[.init(id:"fixed-style",sha256:fixed.sha256,dimension:17)]
         baseline.appearance.lutWeights=[.init(resourceID:"fixed-style",weight:1)]
         var execution=ExecutionProfile(width:8,height:8,budget:.init(maxInFlightFrames:1,maxResidentBytes:128*1024*1024));execution.precision = .float32
         let renderer=try LumeraRenderer(device:device,precision:.float32),reference=try MetalRenderer(device:device,cacheLimitBytes:16*1024*1024)
         defer { reference.releaseCaches() }
         let loader=try AppearanceDatasetLoader(renderer:renderer,execution:execution,working:working,targetSource:targetSource,targetRecipe:targetRecipe)
-        let scorer=try B7CameraResponseScorer(renderer:renderer,working:working,execution:execution,resources:styleResources)
-        let fit=try await CameraResponseFitter.fit(dataset,baseline:baseline,calibration:calibration,resources:styleResources,inputResources:inputResources,
+        let scorer=try B7ResponseScorer(renderer:renderer,working:working,execution:execution,resources:styleResources)
+        let fit=try await ResponseFitter.fit(dataset,baseline:baseline,calibration:calibration,resources:styleResources,inputResources:inputResources,
             design:.init(candidateAxes:[.target(.iso)],controlledConditions:[.init(axis:.source(.iso),value:100)]),options:.init(maxSamples:4096),
             appearanceOptions:.init(maxIterations:40,maximumSamples:1024,residualEnabled:false),loader:loader,predictor:ReferenceAppearancePredictor(renderer:reference,fixedLUT:fixed),scorer:scorer)
         XCTAssertEqual(fit.derivation,.c3ForwardFits)

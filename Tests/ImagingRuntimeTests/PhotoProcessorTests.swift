@@ -22,8 +22,8 @@ final class PhotoProcessorTests: XCTestCase {
         output.withUnsafeMutableBytes { CIContext().render(image, toBitmap: $0.baseAddress!, rowBytes: width * 16, bounds: image.extent, format: .RGBAf, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)) }
         return output
     }
-    func definition() -> CameraModel {
-        var m = CameraModel(identity: .init(id: "synthetic", camera: "fixture", mode: "manual"))
+    func definition() -> StyleModel {
+        var m = StyleModel(identity: .init(id: "synthetic", name: "manual"))
         m.compatibility.referenceRenditionIDs = [working.referenceRenditionID]
         m.edits.overrideTargets = ["color.exposureEV"]
         return m
@@ -31,7 +31,7 @@ final class PhotoProcessorTests: XCTestCase {
     func testDefaultPhotoUsesOneCalibrationAndOriginalObservation() async throws {
         let renderer = try LumeraRenderer(), processor = try PhotoProcessor(renderer: renderer, working: working)
         var m = definition(); m.observations.features = [.init(id: "mean", statistic: .meanRed)]
-        let model = try ModelPreparer(renderer: renderer).prepare(CameraModelCompiler.compile(m), resources: .init(), execution: execution)
+        let model = try ModelPreparer(renderer: renderer).prepare(StyleModelCompiler.compile(m), resources: .init(), execution: execution)
         let normalized = try await InputAdapter(renderer: renderer, working: working).prepare(.image(image()), descriptor: descriptor, recipe: recipe, execution: execution)
         var calibration = InputCalibration(id: "half", source: descriptor, working: working)
         calibration.recipeDigest = try normalized.effectiveRecipe.digest(); calibration.correction.matrix.values = [0.5,0,0,0,0.5,0,0,0,0.5]
@@ -49,7 +49,7 @@ final class PhotoProcessorTests: XCTestCase {
         let renderer = try LumeraRenderer(), processor = try PhotoProcessor(renderer: renderer, working: working)
         var m = definition(); m.appearance.parameters.vignette.enabled = true; m.appearance.parameters.vignette.amountEV = 1
         m.appearance.parameters.vignette.centerX = 0.2; m.appearance.parameters.vignette.centerY = 0.8
-        let model = try ModelPreparer(renderer: renderer).prepare(CameraModelCompiler.compile(m), resources: .init(), execution: execution)
+        let model = try ModelPreparer(renderer: renderer).prepare(StyleModelCompiler.compile(m), resources: .init(), execution: execution)
         let result = try await processor.process(.image(image()), descriptor: descriptor, recipe: recipe, calibration: nil, model: model, stamp: stamp)
         let region = CGRect(x: 1, y: 1, width: 2, height: 3)
         let cropped = try await processor.render(result.snapshot, region: region, execution: execution)
@@ -61,7 +61,7 @@ final class PhotoProcessorTests: XCTestCase {
     }
     func testFloat32ExportRepreparesOriginalPixels() async throws {
         let renderer = try LumeraRenderer(), processor = try PhotoProcessor(renderer: renderer, working: working)
-        let model = try ModelPreparer(renderer: renderer).prepare(CameraModelCompiler.compile(definition()), resources: .init(), execution: execution)
+        let model = try ModelPreparer(renderer: renderer).prepare(StyleModelCompiler.compile(definition()), resources: .init(), execution: execution)
         let source: Float = 0.30001
         let result = try await processor.process(.image(image(source)), descriptor: descriptor, recipe: recipe, calibration: nil, model: model, stamp: stamp)
         var high = execution; high.precision = .float32
@@ -74,7 +74,7 @@ final class PhotoProcessorTests: XCTestCase {
     }
     func testForeignSnapshotAndChangedFileReject() async throws {
         let renderer = try LumeraRenderer(), first = try PhotoProcessor(renderer: renderer, working: working), second = try PhotoProcessor(renderer: renderer, working: working)
-        let model = try ModelPreparer(renderer: renderer).prepare(CameraModelCompiler.compile(definition()), resources: .init(), execution: execution)
+        let model = try ModelPreparer(renderer: renderer).prepare(StyleModelCompiler.compile(definition()), resources: .init(), execution: execution)
         let result = try await first.process(.image(image()), descriptor: descriptor, recipe: recipe, calibration: nil, model: model, stamp: stamp)
         do { _ = try await second.render(result.snapshot, execution: execution); XCTFail("Foreign snapshot accepted") } catch { }
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -88,7 +88,7 @@ final class PhotoProcessorTests: XCTestCase {
         let renderer = try LumeraRenderer(), processor = try PhotoProcessor(renderer: renderer, working: working)
         var m = definition(); m.observations.sourceConditions = [.iso]
         m.responses = [.init(target: "color.exposureEV", expression: .singleAxis(axis: .source(.iso), nodes: [.init(100,.scalar(0)),.init(400,.scalar(1))], boundary: .clamp))]
-        let compiled = try CameraModelCompiler.compile(m)
+        let compiled = try StyleModelCompiler.compile(m)
         let model = try ModelPreparer(renderer: renderer).prepare(compiled, resources: .init(), execution: execution)
         let first = try await processor.process(.image(image(), metadata: ["{Exif}": ["ISOSpeedRatings": [100]]]), descriptor: descriptor, recipe: recipe, calibration: nil, model: model, stamp: stamp)
         var buffer: CVPixelBuffer?; XCTAssertEqual(CVPixelBufferCreate(nil, 4, 4, kCVPixelFormatType_32BGRA, nil, &buffer), kCVReturnSuccess)
@@ -107,7 +107,7 @@ final class PhotoProcessorTests: XCTestCase {
     }
     func testPrecisionVariantSharesActiveFrameLimit() async throws {
         let renderer = try LumeraRenderer(), processor = try PhotoProcessor(renderer: renderer, working: working)
-        let model = try ModelPreparer(renderer: renderer).prepare(CameraModelCompiler.compile(definition()), resources: .init(), execution: execution)
+        let model = try ModelPreparer(renderer: renderer).prepare(StyleModelCompiler.compile(definition()), resources: .init(), execution: execution)
         let result = try await processor.process(.image(image()), descriptor: descriptor, recipe: recipe, calibration: nil, model: model, stamp: stamp)
         let occupied = try model.reserveFrame()
         defer { occupied.cancel() }
@@ -119,7 +119,7 @@ final class PhotoProcessorTests: XCTestCase {
     }
     func testSnapshotCannotReplaceItsBudget() async throws {
         let renderer = try LumeraRenderer(), processor = try PhotoProcessor(renderer: renderer, working: working)
-        let model = try ModelPreparer(renderer: renderer).prepare(CameraModelCompiler.compile(definition()), resources: .init(), execution: execution)
+        let model = try ModelPreparer(renderer: renderer).prepare(StyleModelCompiler.compile(definition()), resources: .init(), execution: execution)
         let result = try await processor.process(.image(image()), descriptor: descriptor, recipe: recipe, calibration: nil, model: model, stamp: stamp)
         var changed = execution; changed.budget.maxResidentBytes *= 2
         do {
@@ -130,7 +130,7 @@ final class PhotoProcessorTests: XCTestCase {
 
     func testSnapshotCachesCompleteExecutionVariants() async throws {
         let renderer = try LumeraRenderer(), processor = try PhotoProcessor(renderer: renderer, working: working)
-        let model = try ModelPreparer(renderer: renderer).prepare(CameraModelCompiler.compile(definition()), resources: .init(), execution: execution)
+        let model = try ModelPreparer(renderer: renderer).prepare(StyleModelCompiler.compile(definition()), resources: .init(), execution: execution)
         let result = try await processor.process(.image(image()), descriptor: descriptor, recipe: recipe, calibration: nil, model: model, stamp: stamp)
         var high = execution; high.precision = .float32
         let first = try result.snapshot.executionVariant(high)
@@ -150,14 +150,14 @@ final class PhotoProcessorTests: XCTestCase {
         var definition = definition()
         definition.appearance.resources = [.init(id: "lut", sha256: asset.sha256, dimension: 2)]
         definition.appearance.lutWeights = [.init(resourceID: "lut", weight: 1)]
-        let model = try ModelPreparer(renderer: renderer).prepare(CameraModelCompiler.compile(definition), resources: .init(luts: ["lut": asset]), execution: execution)
+        let model = try ModelPreparer(renderer: renderer).prepare(StyleModelCompiler.compile(definition), resources: .init(luts: ["lut": asset]), execution: execution)
         func allowance() throws -> Int {
             let reservation = try model.reserveFrame(); defer { reservation.cancel() }
             return reservation.execution.budget.maxResidentBytes
         }
         let originalAllowance = try allowance()
         var smaller = execution; smaller.width = 2; smaller.height = 2
-        var variant: PreparedCameraModel? = try ModelPreparer(renderer: renderer).prepareVariant(of: model, execution: smaller)
+        var variant: PreparedStyleModel? = try ModelPreparer(renderer: renderer).prepareVariant(of: model, execution: smaller)
         XCTAssertLessThan(try allowance(), originalAllowance)
         withExtendedLifetime(variant) {}
         variant = nil
@@ -168,7 +168,7 @@ final class PhotoProcessorTests: XCTestCase {
     func testVariantMinimumUsesItsOwnPrecisionAndGeometry() throws {
         let renderer = try LumeraRenderer()
         var bounded = execution; bounded.budget.maxResidentBytes = 4096
-        let model = try ModelPreparer(renderer: renderer).prepare(CameraModelCompiler.compile(definition()), resources: .init(), execution: bounded)
+        let model = try ModelPreparer(renderer: renderer).prepare(StyleModelCompiler.compile(definition()), resources: .init(), execution: bounded)
         var larger = bounded; larger.width = 16; larger.height = 16
         XCTAssertThrowsError(try ModelPreparer(renderer: renderer).prepareVariant(of: model, execution: larger))
         var high = bounded; high.precision = .float32; high.width = 9; high.height = 9
@@ -177,7 +177,7 @@ final class PhotoProcessorTests: XCTestCase {
 
     func testRetainedFloat32OutputReducesOriginalModelAllowance() async throws {
         let renderer = try LumeraRenderer(), processor = try PhotoProcessor(renderer: renderer, working: working)
-        let model = try ModelPreparer(renderer: renderer).prepare(CameraModelCompiler.compile(definition()), resources: .init(), execution: execution)
+        let model = try ModelPreparer(renderer: renderer).prepare(StyleModelCompiler.compile(definition()), resources: .init(), execution: execution)
         let result = try await processor.process(.image(image()), descriptor: descriptor, recipe: recipe, calibration: nil, model: model, stamp: stamp)
         func allowance() throws -> Int {
             let reservation = try model.reserveFrame(); defer { reservation.cancel() }
@@ -214,7 +214,7 @@ final class PhotoProcessorTests: XCTestCase {
         // Two uploads and one decode fit with image/entry headroom; a third
         // upload cannot fit on either tightly or generously aligned devices.
         bounded.budget.maxResidentBytes = 2 * resident + cubeBytes + 1024 * 1024
-        let model = try ModelPreparer(renderer: renderer).prepare(CameraModelCompiler.compile(definition()), resources: .init(), execution: bounded)
+        let model = try ModelPreparer(renderer: renderer).prepare(StyleModelCompiler.compile(definition()), resources: .init(), execution: bounded)
         let normalized = try await InputAdapter(renderer: renderer, working: working).prepare(.image(image(width: 64, height: 64)), descriptor: descriptor, recipe: recipe, execution: bounded)
         var calibration = InputCalibration(id: "zero", source: descriptor, working: working)
         calibration.recipeDigest = try normalized.effectiveRecipe.digest(); calibration.resources = [resource]
@@ -237,7 +237,7 @@ final class PhotoProcessorTests: XCTestCase {
 
     func testPreparedReferenceNormalizerCannotAcquireAnUnchargedCalibration() async throws {
         let renderer = try LumeraRenderer()
-        let model = try ModelPreparer(renderer: renderer).prepare(CameraModelCompiler.compile(definition()), resources: .init(), execution: execution)
+        let model = try ModelPreparer(renderer: renderer).prepare(StyleModelCompiler.compile(definition()), resources: .init(), execution: execution)
         let normalizer = try model.prepareInputNormalizer(calibration: nil, resources: .init())
         let input = try await InputAdapter(renderer: renderer, working: working).prepare(.image(image()), descriptor: descriptor, recipe: recipe, execution: execution)
         var calibration = InputCalibration(id: "different", source: descriptor, working: working)
@@ -250,7 +250,7 @@ final class PhotoProcessorTests: XCTestCase {
 
     func testCalibrationCacheLeaseFollowsRetainedNormalizer() throws {
         let renderer = try LumeraRenderer()
-        let model = try ModelPreparer(renderer: renderer).prepare(CameraModelCompiler.compile(definition()), resources: .init(), execution: execution)
+        let model = try ModelPreparer(renderer: renderer).prepare(StyleModelCompiler.compile(definition()), resources: .init(), execution: execution)
         let asset = LUTAsset(name: "zero", cubeText: "LUT_3D_SIZE 2\n" + String(repeating: "0 0 0\n", count: 8))
         var descriptor = ModelResourceDescriptor(id: "correction", sha256: asset.sha256, dimension: 2); descriptor.role = .correctionLUT
         let resources = try ModelResourceSet(luts: [descriptor.id: asset])
@@ -260,7 +260,7 @@ final class PhotoProcessorTests: XCTestCase {
             return reservation.execution.budget.maxResidentBytes
         }
         let initial = try allowance()
-        var variant: PreparedCameraModel? = try ModelPreparer(renderer: renderer).prepareVariant(of: model, execution: execution)
+        var variant: PreparedStyleModel? = try ModelPreparer(renderer: renderer).prepareVariant(of: model, execution: execution)
         var normalizer: InputNormalizer? = try variant!.prepareInputNormalizer(calibration: calibration, resources: resources)
         let charged = try allowance()
         XCTAssertLessThan(charged, initial)
@@ -298,7 +298,7 @@ extension PhotoProcessorTests {
         definition.appearance.parameters.halation.amount = 0.6
         definition.appearance.parameters.halation.threshold = 0.3
         var preview = execution; preview.width = 256; preview.height = 256
-        let model = try ModelPreparer(renderer: renderer).prepare(CameraModelCompiler.compile(definition), resources: .init(), execution: preview)
+        let model = try ModelPreparer(renderer: renderer).prepare(StyleModelCompiler.compile(definition), resources: .init(), execution: preview)
         let bright = image(0.85, width: 128, height: 256).transformed(by: .init(translationX: 128, y: 0))
         let source = bright.composited(over: image(0.1, width: 256, height: 256))
         let result = try await processor.process(.image(source), descriptor: descriptor, recipe: recipe, calibration: nil, model: model, stamp: stamp)
@@ -322,7 +322,7 @@ extension PhotoProcessorTests {
 
     func testDevelopedProRAWPreservesCaptureOriginWithoutRAWReplay() async throws {
         let renderer = try LumeraRenderer(), processor = try PhotoProcessor(renderer: renderer, working: working)
-        let model = try ModelPreparer(renderer: renderer).prepare(CameraModelCompiler.compile(definition()), resources: .init(), execution: execution)
+        let model = try ModelPreparer(renderer: renderer).prepare(StyleModelCompiler.compile(definition()), resources: .init(), execution: execution)
         var d = descriptor; d.path = .proRAW
         let result = try await processor.process(.image(image()), descriptor: d, recipe: recipe, calibration: nil, model: model, stamp: stamp)
         XCTAssertEqual(result.snapshot.input.source.descriptor.path, .proRAW)
@@ -350,7 +350,7 @@ extension PhotoProcessorTests {
         e.budget.maxResidentBytes = 512 * 1024 * 1024
         let renderer = try LumeraRenderer(), processor = try PhotoProcessor(renderer: renderer, working: working)
         let adapter = try InputAdapter(renderer: renderer, working: working)
-        let model = try ModelPreparer(renderer: renderer).prepare(CameraModelCompiler.compile(definition()), resources: .init(), execution: e)
+        let model = try ModelPreparer(renderer: renderer).prepare(StyleModelCompiler.compile(definition()), resources: .init(), execution: e)
         var payload = Data([2])
         let config = try RAWDevelopmentConfiguration(identifier: "host", version: "1", payload: payload) { raw, frozen in
             XCTAssertEqual(frozen, Data([2]))
@@ -397,7 +397,7 @@ extension PhotoProcessorTests {
     func testConflictingRAWControlsFailBeforeOpeningSource() async throws {
         let renderer = try LumeraRenderer()
         let processor = try PhotoProcessor(renderer: renderer, working: working)
-        let model = try ModelPreparer(renderer: renderer).prepare(CameraModelCompiler.compile(definition()), resources: .init(), execution: execution)
+        let model = try ModelPreparer(renderer: renderer).prepare(StyleModelCompiler.compile(definition()), resources: .init(), execution: execution)
         let config = try RAWDevelopmentConfiguration(identifier: "host", version: "1", payload: Data()) { _, _ in }
         var recipe = self.recipe
         recipe.rawSettings = [.init(key: .exposureEV, value: 1)]
@@ -419,7 +419,7 @@ extension PhotoProcessorTests {
     func testReusablePhotoRebuildsWithoutPinningInputThroughOutput() async throws {
         let renderer = try LumeraRenderer()
         let processor = try PhotoProcessor(renderer: renderer, working: working)
-        let model = try ModelPreparer(renderer: renderer).prepare(CameraModelCompiler.compile(definition()), resources: .init(), execution: execution)
+        let model = try ModelPreparer(renderer: renderer).prepare(StyleModelCompiler.compile(definition()), resources: .init(), execution: execution)
         let source = try processor.makeSource(.image(image(0.30001)), descriptor: descriptor, recipe: recipe, calibration: nil)
         let cache = try PhotoInputCache(maxResidentBytes: 1 << 20)
         let first = try await processor.process(source, cache: cache, model: model, stamp: stamp)
@@ -448,13 +448,13 @@ extension PhotoProcessorTests {
         let preparer = ModelPreparer(renderer: renderer)
         var firstDefinition = definition()
         firstDefinition.observations.features = [.init(id: "red", statistic: .meanRed)]
-        let firstModel = try preparer.prepare(CameraModelCompiler.compile(firstDefinition), resources: .init(), execution: execution)
+        let firstModel = try preparer.prepare(StyleModelCompiler.compile(firstDefinition), resources: .init(), execution: execution)
         var secondDefinition = firstDefinition
         secondDefinition.appearance.parameters.color.exposureEV = 1
-        let secondModel = try preparer.prepare(CameraModelCompiler.compile(secondDefinition), resources: .init(), execution: execution)
+        let secondModel = try preparer.prepare(StyleModelCompiler.compile(secondDefinition), resources: .init(), execution: execution)
         var thirdDefinition = secondDefinition
         thirdDefinition.observations.features = [.init(id: "green", statistic: .meanGreen)]
-        let thirdModel = try preparer.prepare(CameraModelCompiler.compile(thirdDefinition), resources: .init(), execution: execution)
+        let thirdModel = try preparer.prepare(StyleModelCompiler.compile(thirdDefinition), resources: .init(), execution: execution)
         let source = try processor.makeSource(.image(image()), descriptor: descriptor, recipe: recipe, calibration: nil)
         let cache = try PhotoInputCache(maxResidentBytes: 1 << 20)
         let first = try await processor.process(source, cache: cache, model: firstModel, stamp: stamp)
@@ -475,7 +475,7 @@ extension PhotoProcessorTests {
 extension PhotoProcessorTests {
     func testCacheEvictionPinsInputThroughActiveGPUWork() async throws {
         let renderer = try LumeraRenderer(), processor = try PhotoProcessor(renderer: renderer, working: working)
-        let model = try ModelPreparer(renderer: renderer).prepare(CameraModelCompiler.compile(definition()), resources: .init(), execution: execution)
+        let model = try ModelPreparer(renderer: renderer).prepare(StyleModelCompiler.compile(definition()), resources: .init(), execution: execution)
         let source = try processor.makeSource(.image(image()), descriptor: descriptor, recipe: recipe, calibration: nil)
         let cache = try PhotoInputCache(maxResidentBytes: 1 << 20)
         let first = try await processor.process(source, cache: cache, model: model, stamp: stamp)
@@ -506,7 +506,7 @@ extension PhotoProcessorTests {
     func testSharedPhotoBuildSurvivesWaiterCancellationWithoutPublishingAfterEviction() async throws {
         enum UnexpectedBuild: Error { case duplicate }
         let renderer = try LumeraRenderer(), processor = try PhotoProcessor(renderer: renderer, working: working)
-        let model = try ModelPreparer(renderer: renderer).prepare(CameraModelCompiler.compile(definition()), resources: .init(), execution: execution)
+        let model = try ModelPreparer(renderer: renderer).prepare(StyleModelCompiler.compile(definition()), resources: .init(), execution: execution)
         let source = try processor.makeSource(.image(image()), descriptor: descriptor, recipe: recipe, calibration: nil)
         let cache = try PhotoInputCache(maxResidentBytes: 1 << 20)
         let key = PhotoInputKey(source: source, model: model)
@@ -560,7 +560,7 @@ extension PhotoProcessorTests {
         execution.height = Int(extent.height)
         execution.budget.maxResidentBytes = 512 * 1024 * 1024
         let renderer = try LumeraRenderer(), processor = try PhotoProcessor(renderer: renderer, working: working)
-        let model = try ModelPreparer(renderer: renderer).prepare(CameraModelCompiler.compile(definition()), resources: .init(), execution: execution)
+        let model = try ModelPreparer(renderer: renderer).prepare(StyleModelCompiler.compile(definition()), resources: .init(), execution: execution)
         var descriptor = self.descriptor
         descriptor.path = .raw
         let config = try RAWDevelopmentConfiguration(identifier: "host", version: "1", payload: Data([2])) { raw, payload in
@@ -605,7 +605,7 @@ extension PhotoProcessorTests {
         definition.appearance.parameters.vignette.amountEV = 1
         definition.appearance.parameters.vignette.centerX = 0.2
         let execution = ExecutionProfile(width: 701, height: 509, budget: .init(maxInFlightFrames: 1, maxResidentBytes: 64 * 1024 * 1024))
-        let model = try ModelPreparer(renderer: renderer).prepareStreaming(CameraModelCompiler.compile(definition), resources: .init(), execution: execution)
+        let model = try ModelPreparer(renderer: renderer).prepareStreaming(StyleModelCompiler.compile(definition), resources: .init(), execution: execution)
         let source = try processor.makeSource(.image(image(width: 701, height: 509)), descriptor: descriptor, recipe: recipe, calibration: nil)
         let snapshot = try await processor.processStreaming(source, model: model, stamp: stamp) { _ in }
         let region = CGRect(x: 97, y: 81, width: 311, height: 273)
@@ -636,7 +636,7 @@ extension PhotoProcessorTests {
         var definition = definition()
         definition.appearance.resources = [.init(id: "lut", sha256: asset.sha256, dimension: 2)]
         definition.appearance.lutWeights = [.init(resourceID: "lut", weight: 1)]
-        let model = try ModelPreparer(renderer: renderer).prepareStreaming(CameraModelCompiler.compile(definition), resources: resources, execution: execution)
+        let model = try ModelPreparer(renderer: renderer).prepareStreaming(StyleModelCompiler.compile(definition), resources: resources, execution: execution)
         let normalized = try await InputAdapter(renderer: renderer, working: working).prepare(.image(image()), descriptor: descriptor, recipe: recipe, execution: execution)
         var calibration = InputCalibration(id: "half", source: descriptor, working: working)
         calibration.recipeDigest = try normalized.effectiveRecipe.digest()
@@ -657,7 +657,7 @@ extension PhotoProcessorTests {
     func testFreshStreamingSameDescriptorDifferentRevisionsReobserves() async throws {
         let renderer = try LumeraRenderer(), processor = try PhotoProcessor(renderer: renderer, working: working)
         var definition = definition(); definition.observations.features = [.init(id: "mean", statistic: .meanRed)]
-        let model = try ModelPreparer(renderer: renderer).prepareStreaming(CameraModelCompiler.compile(definition), resources: .init(), execution: execution)
+        let model = try ModelPreparer(renderer: renderer).prepareStreaming(StyleModelCompiler.compile(definition), resources: .init(), execution: execution)
         let first = try processor.makeSource(.image(image(0.1)), descriptor: descriptor, recipe: recipe, calibration: nil)
         let second = try processor.makeSource(.image(image(0.8)), descriptor: descriptor, recipe: recipe, calibration: nil)
         let a = try await processor.processStreaming(first, model: model, stamp: stamp) { _ in }

@@ -6,7 +6,7 @@ import ImagingCore
 public struct RenderPlanner {
     public init() {}
     /// 验证身份、资格与输出几何，并领取帧预算。可接收同一模型预先取得的帧预留。
-    public func plan(_ controls: ResolvedControls, input: PreparedInput, model: PreparedCameraModel,
+    public func plan(_ controls: ResolvedControls, input: PreparedInput, model: PreparedStyleModel,
                      stamp: FrameStamp? = nil, seed: UInt32 = 42, reservation: FrameReservation? = nil) throws -> FrameRenderPlan {
         try controls.parameters.validate(resolved: true); try ResourceWeight.validate(controls.lutWeights)
         guard controls.automatic.modelID == model.compiled.identity, controls.automatic.sourceID == input.sourceID,
@@ -22,10 +22,10 @@ public struct RenderPlanner {
             throw LabError.invalid("Requested output geometry must match aspect-preserving input scaling")
         }
         let active = controls.lutWeights.filter { $0.weight > 0 }
-        let style: PreparedCameraStyle
+        let style: PreparedResolvedStyle
         if active.isEmpty { style = model.base }
         else {
-            let selected = try active.map { weight -> PreparedCameraStyle in
+            let selected = try active.map { weight -> PreparedResolvedStyle in
                 guard model.compiled.lutResourceIDs.contains(weight.resourceID), let resident = model.lutStyles[weight.resourceID] else { throw LabError.invalid("LUT is outside the prepared palette") }; return resident
             }
             style = try model.renderer.encoder.blendStyle(base: model.base, styles: selected, weights: active.map(\.weight))

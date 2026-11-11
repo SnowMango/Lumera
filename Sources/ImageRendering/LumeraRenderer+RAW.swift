@@ -21,7 +21,7 @@ extension LumeraRenderer {
     /// - Returns: An independently owned CIImage with supported capture metadata, normalized
     ///   orientation and current dimensions/color. RAW-only instructions and auxiliary data are omitted.
     /// - Throws: Unreadable/unsupported RAW, configuration errors, rendering errors or cancellation.
-    public func render(rawURL url: URL, style: PreparedCameraStyle, options: RenderOptions = .init(),
+    public func render(rawURL url: URL, style: PreparedResolvedStyle, options: RenderOptions = .init(),
                        correction: PreparedDeviceCorrection? = nil,
                        configureRAW: ((CIRAWFilter) throws -> Void)? = nil) async throws -> CIImage {
         try Task.checkCancellation()
@@ -36,7 +36,7 @@ extension LumeraRenderer {
     /// configuration-closure contract as `render(rawURL:style:options:correction:configureRAW:)`.
     /// For caller-owned CIRAWFilter development, instead pass its outputImage to the CIImage
     /// overload, `metadata: filter.properties as? [String: Any]`, and `orientation: .up` to avoid a second rotation.
-    public func render(rawData data: Data, style: PreparedCameraStyle, options: RenderOptions = .init(),
+    public func render(rawData data: Data, style: PreparedResolvedStyle, options: RenderOptions = .init(),
                        correction: PreparedDeviceCorrection? = nil,
                        configureRAW: ((CIRAWFilter) throws -> Void)? = nil) async throws -> CIImage {
         try Task.checkCancellation()
@@ -46,7 +46,7 @@ extension LumeraRenderer {
         return try await renderRAW(filter, style: style, options: options, correction: correction, configureRAW: configureRAW)
     }
 
-    private func renderRAW(_ filter: CIRAWFilter, style: PreparedCameraStyle, options: RenderOptions,
+    private func renderRAW(_ filter: CIRAWFilter, style: PreparedResolvedStyle, options: RenderOptions,
                            correction: PreparedDeviceCorrection?, configureRAW: ((CIRAWFilter) throws -> Void)?) async throws -> CIImage {
         let developed = try developRAW(filter, dynamicRange: options.dynamicRange, configure: configureRAW)
         let image = developed.image, properties = developed.properties

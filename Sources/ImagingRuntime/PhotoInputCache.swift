@@ -95,7 +95,7 @@ struct PhotoInputKey: Hashable, Sendable {
     let precision: ExecutionPrecision
     let device: UInt64
 
-    init(source: PhotoSource, model: PreparedCameraModel) {
+    init(source: PhotoSource, model: PreparedStyleModel) {
         revision = source.revision
         recipe = source.recipeID
         working = source.workingID
@@ -122,7 +122,7 @@ final class PhotoInputLease: @unchecked Sendable {
         self.charge = charge
     }
 
-    func residency(for model: PreparedCameraModel) throws -> PhotoInputResidency {
+    func residency(for model: PreparedStyleModel) throws -> PhotoInputResidency {
         lock.lock(); defer { lock.unlock() }
         if origin.budgetID == model.photoBudgetID { return origin }
         if let current = borrowed[model.photoBudgetID]?.residency { return current }

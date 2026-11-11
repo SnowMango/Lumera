@@ -6,12 +6,12 @@ import ImageRendering
 final class GrainReferenceTests: XCTestCase {
     func testPreparationRejectsInvalidScaleParametersAndFootprint() throws {
         var grain = FilmGrain()
-        XCTAssertThrowsError(try CameraEffectUniforms.grain(grain,scale:0,seed:1))
-        XCTAssertThrowsError(try CameraEffectUniforms.grain(grain,scale:.infinity,seed:1))
+        XCTAssertThrowsError(try EffectUniforms.grain(grain,scale:0,seed:1))
+        XCTAssertThrowsError(try EffectUniforms.grain(grain,scale:.infinity,seed:1))
         XCTAssertThrowsError(try GrainSamplingReference.sample(footprint:CGRect(x:0,y:0,width:4096,height:1),seed:1,parameters:grain))
         grain.size = .nan
         XCTAssertThrowsError(try GrainSamplingReference(parameters:grain))
-        XCTAssertThrowsError(try CameraEffectUniforms.grain(grain,scale:1,seed:1))
+        XCTAssertThrowsError(try EffectUniforms.grain(grain,scale:1,seed:1))
     }
 
     func testReferenceAmountAndRadialHalfCorrelation() throws {

@@ -190,7 +190,7 @@ struct JSONStructureScanner {
                     skipWhitespace()
                     guard consume(58) else { throw LabError.invalid("\(child): 缺少冒号") }
                 } else {
-                    // Shared persisted contract: every Profile/CameraModel array has at most 36 items.
+                    // Shared persisted contract: every Profile/StyleModel array has at most 36 items.
                     guard index < 36 else { throw LabError.invalid("\(path): 数组超过 36 项") }
                     child = "\(path)[\(index)]"
                 }

@@ -36,7 +36,7 @@ public enum ResponseExpression: Codable, Equatable, Sendable {
     case constant(ControlValue)
     case singleAxis(axis: ObservationAxis, nodes: [ResponseNode], boundary: ResponseBoundaryPolicy)
     /// x varies fastest: values[yIndex * x.count + xIndex].
-    /// CameraModel's persisted array budget also requires x.count * y.count <= 36.
+    /// StyleModel's persisted array budget also requires x.count * y.count <= 36.
     case twoAxisGrid(xAxis: ObservationAxis, yAxis: ObservationAxis, x: [Double], y: [Double], values: [ControlValue], boundary: ResponseBoundaryPolicy)
     public var axes: [ObservationAxis] {
         switch self { case .constant: return []; case .singleAxis(let a, _, _): return [a]; case .twoAxisGrid(let x, let y, _, _, _, _): return [x, y] }

@@ -35,10 +35,10 @@ private final class SessionTestOnce: @unchecked Sendable {
 }
 private enum SessionTestFailure: Error { case injectedGPUFailure }
 
-final class CameraSessionTests: XCTestCase {
+final class FrameProcessingSessionTests: XCTestCase {
     struct Fixture {
         let renderer: LumeraRenderer
-        let model: PreparedCameraModel
+        let model: PreparedStyleModel
         let input: PreparedInput
     }
     func stamp(_ i:UInt64 = 0, generation:UInt64 = 0) -> FrameStamp {
@@ -48,7 +48,7 @@ final class CameraSessionTests: XCTestCase {
         guard MTLCreateSystemDefaultDevice() != nil else { throw XCTSkip("Metal unavailable") }
         let renderer = try LumeraRenderer()
         let working = WorkingImageContract(referenceRenditionID:"fixture")
-        var definition = CameraModel(identity:.init(id:"session",camera:"fixture",mode:"test"))
+        var definition = StyleModel(identity:.init(id:"session",name: "test"))
         definition.compatibility.referenceRenditionIDs = [working.referenceRenditionID]
         definition.edits.overrideTargets = ["color.exposureEV"]
         definition.observations.features = [.init(id:"mean",statistic:.meanGreen)]
@@ -62,7 +62,7 @@ final class CameraSessionTests: XCTestCase {
             definition.observations.validity.maxAgeSeconds = 1
             execution.statisticsLatency = .delayed(maxFrames:2,maxSeconds:1)
         }
-        let model = try ModelPreparer(renderer:renderer).prepare(CameraModelCompiler.compile(definition),resources:.init(),execution:execution)
+        let model = try ModelPreparer(renderer:renderer).prepare(StyleModelCompiler.compile(definition),resources:.init(),execution:execution)
         let image = CIImage(color:CIColor(red:0.5,green:0.5,blue:0.5)).cropped(to:CGRect(x:0,y:0,width:4,height:4))
         let recipe = InputRecipe(id:"ci",backend:"coreImage",version:"1",decodedRendition:.baseImage)
         var descriptor = SourceDescriptor(id:"input",path:.processedPhoto); descriptor.recipeID = recipe.id
@@ -76,7 +76,7 @@ final class CameraSessionTests: XCTestCase {
         XCTAssertEqual(frame.width,4,file:file,line:line)
     }
     func testSameFrameRecordsReplayWithoutReindexing() async throws {
-        let f = try await fixture(); let session = try CameraSession(renderer:f.renderer,model:f.model,seed:42)
+        let f = try await fixture(); let session = try FrameProcessingSession(renderer:f.renderer,model:f.model,seed:42)
         for index in [UInt64(3),9] { assertRendered(try await session.enqueue(f.input,stamp:stamp(index)),stamp:stamp(index)) }
         let records = await session.takeRecords()
         XCTAssertEqual(records.map { $0.context.evaluationStamp.index },[3,9])
@@ -91,7 +91,7 @@ final class CameraSessionTests: XCTestCase {
         let driver = SessionRenderDriver(observe:{ input,stamp,requirements,maxBytes in
             await gate.enter(); return try await live.observe(input,stamp,requirements,maxBytes)
         },submit:live.submit)
-        let session = try CameraSession(model:f.model,backpressure:.dropUnsubmitted,seed:42,driver:driver)
+        let session = try FrameProcessingSession(model:f.model,backpressure:.dropUnsubmitted,seed:42,driver:driver)
         let first = Task { self.assertRendered(try await session.enqueue(f.input,stamp:self.stamp(4)),stamp:self.stamp(4)) }
         await gate.waitForArrival()
         let rejected = try await session.enqueue(f.input,stamp:stamp(7))
@@ -107,7 +107,7 @@ final class CameraSessionTests: XCTestCase {
         let driver = SessionRenderDriver(observe:{ input,stamp,requirements,maxBytes in
             await gate.enter(); return try await live.observe(input,stamp,requirements,maxBytes)
         },submit:live.submit)
-        let session = try CameraSession(model:f.model,backpressure:.wait,seed:42,driver:driver)
+        let session = try FrameProcessingSession(model:f.model,backpressure:.wait,seed:42,driver:driver)
         let pending = Task { try await session.enqueue(f.input,stamp:self.stamp(5)) }
         await gate.waitForArrival(); pending.cancel(); await gate.release()
         let cancelled = try await pending.value
@@ -118,13 +118,13 @@ final class CameraSessionTests: XCTestCase {
         assertRendered(try await session.enqueue(f.input,stamp:stamp(6)),stamp:stamp(6))
         let accepted = await session.takeRecords(); XCTAssertEqual(accepted.count,1)
         guard let record = accepted.first else { return }
-        let raw = try CameraModelEvaluator.evaluate(f.model.compiled,context:record.context)
+        let raw = try StyleModelEvaluator.evaluate(f.model.compiled,context:record.context)
         let replayed = try DecisionReplay.evaluate(accepted,model:f.model.compiled)
         XCTAssertEqual(replayed[0].controls.parameters.color.exposureEV,raw.parameters.color.exposureEV)
         XCTAssertEqual(record.context.evaluationStamp,stamp(6))
     }
     func testDuplicateReverseFramesRequireExplicitReset() async throws {
-        let f = try await fixture(); let session = try CameraSession(renderer:f.renderer,model:f.model)
+        let f = try await fixture(); let session = try FrameProcessingSession(renderer:f.renderer,model:f.model)
         assertRendered(try await session.enqueue(f.input,stamp:stamp(10)),stamp:stamp(10))
         for index in [UInt64(10),9] {
             do { _ = try await session.enqueue(f.input,stamp:stamp(index)); XCTFail("Invalid chronology accepted") } catch { }
@@ -135,7 +135,7 @@ final class CameraSessionTests: XCTestCase {
     }
     func testDelayedModeUsesOneWholePriorPacketAfterColdFallback() async throws {
         let f = try await fixture(delayed:true)
-        let session = try CameraSession(renderer:f.renderer,model:f.model)
+        let session = try FrameProcessingSession(renderer:f.renderer,model:f.model)
         assertRendered(try await session.enqueue(f.input,stamp:stamp(0)),stamp:stamp(0))
         assertRendered(try await session.enqueue(f.input,stamp:stamp(1)),stamp:stamp(1))
         let records = await session.takeRecords()
@@ -160,7 +160,7 @@ final class CameraSessionTests: XCTestCase {
                 throw SessionTestFailure.injectedGPUFailure
             })
         })
-        let session = try CameraSession(model:f.model,driver:driver)
+        let session = try FrameProcessingSession(model:f.model,driver:driver)
         do { _ = try await session.enqueue(f.input,stamp:stamp(5)); XCTFail("Injected GPU failure was hidden") }
         catch SessionTestFailure.injectedGPUFailure { }
         let failedRecords = await session.takeRecords()
@@ -170,7 +170,7 @@ final class CameraSessionTests: XCTestCase {
         XCTAssertEqual(restarted.first?.event,.reset(.gpuFailure))
         let decisions = try DecisionReplay.evaluate(restarted,model:f.model.compiled)
         let record = try XCTUnwrap(restarted.first)
-        let raw = try CameraModelEvaluator.evaluate(f.model.compiled,context:record.context)
+        let raw = try StyleModelEvaluator.evaluate(f.model.compiled,context:record.context)
         XCTAssertEqual(decisions[0].controls.parameters.color.exposureEV,raw.parameters.color.exposureEV)
     }
     func testExplicitResetIgnoresLateCompletionAndItsObservation() async throws {
@@ -185,7 +185,7 @@ final class CameraSessionTests: XCTestCase {
                 return result
             })
         })
-        let session = try CameraSession(model:f.model,driver:driver)
+        let session = try FrameProcessingSession(model:f.model,driver:driver)
         let first = Task { try await session.enqueue(f.input,stamp:self.stamp(5)) }
         await gate.waitForArrival()
         try await session.reset(.reset(.seek)); await gate.release()
@@ -201,7 +201,7 @@ final class CameraSessionTests: XCTestCase {
         XCTAssertEqual(restarted.first?.context.observations.stamp,stamp(1,generation:1))
     }
     func testPendingResetCannotBeOverwrittenByLockEvent() async throws {
-        let f = try await fixture(); let session = try CameraSession(renderer:f.renderer,model:f.model)
+        let f = try await fixture(); let session = try FrameProcessingSession(renderer:f.renderer,model:f.model)
         assertRendered(try await session.enqueue(f.input,stamp:stamp(5)),stamp:stamp(5))
         _ = await session.takeRecords()
         try await session.reset(.reset(.seek))
@@ -216,7 +216,7 @@ final class CameraSessionTests: XCTestCase {
         XCTAssertEqual(records.first?.event,.reset(.seek))
         XCTAssertNoThrow(try DecisionReplay.evaluate(records,model:f.model.compiled))
     }
-    func waitForWaitingCount(_ expected:Int, session:CameraSession) async -> Bool {
+    func waitForWaitingCount(_ expected:Int, session:FrameProcessingSession) async -> Bool {
         // Poll actor state, yielding cooperatively; never assume a GPU or wall-clock delay.
         for _ in 0..<10000 {
             if await session.queueSnapshot().waiting == expected { return true }
@@ -229,7 +229,7 @@ final class CameraSessionTests: XCTestCase {
         let driver = SessionRenderDriver(observe:{ input,stamp,requirements,bytes in
             await gate.enter(); return try await live.observe(input,stamp,requirements,bytes)
         },submit:live.submit)
-        let session = try CameraSession(model:f.model,backpressure:.wait,driver:driver)
+        let session = try FrameProcessingSession(model:f.model,backpressure:.wait,driver:driver)
         let first = Task { self.assertRendered(try await session.enqueue(f.input,stamp:self.stamp(1)),stamp:self.stamp(1)) }
         await gate.waitForArrival()
         let second = Task { self.assertRendered(try await session.enqueue(f.input,stamp:self.stamp(2)),stamp:self.stamp(2)) }
@@ -252,7 +252,7 @@ final class CameraSessionTests: XCTestCase {
         let driver = SessionRenderDriver(observe:{ input,stamp,requirements,bytes in
             await gate.enter(); return try await live.observe(input,stamp,requirements,bytes)
         },submit:live.submit)
-        let session = try CameraSession(model:f.model,backpressure:.wait,driver:driver)
+        let session = try FrameProcessingSession(model:f.model,backpressure:.wait,driver:driver)
         let first = Task { self.assertRendered(try await session.enqueue(f.input,stamp:self.stamp(1)),stamp:self.stamp(1)) }
         await gate.waitForArrival()
         let second = Task { try await session.enqueue(f.input,stamp:self.stamp(2)) }
@@ -276,7 +276,7 @@ final class CameraSessionTests: XCTestCase {
             if once.take() { throw ModelGPUFailure(message: "injected statistics failure") }
             return try await live.observe(input, stamp, requirements, bytes)
         }, submit: live.submit)
-        let session = try CameraSession(model: f.model, driver: driver)
+        let session = try FrameProcessingSession(model: f.model, driver: driver)
         do { _ = try await session.enqueue(f.input, stamp: stamp(5)); XCTFail("GPU failure ignored") } catch { }
         assertRendered(try await session.enqueue(f.input, stamp: stamp(0)), stamp: stamp(0))
         let records = await session.takeRecords()
@@ -289,7 +289,7 @@ final class CameraSessionTests: XCTestCase {
         let driver = SessionRenderDriver(observe: { input, stamp, requirements, bytes in
             await gate.enter(); return try await live.observe(input, stamp, requirements, bytes)
         }, submit: live.submit)
-        let session = try CameraSession(model: f.model, backpressure: .wait, driver: driver)
+        let session = try FrameProcessingSession(model: f.model, backpressure: .wait, driver: driver)
         let first = Task { try await session.enqueue(f.input, stamp: self.stamp(1)) }
         await gate.waitForArrival()
         let second = Task { try await session.enqueue(f.input, stamp: self.stamp(2)) }
@@ -309,25 +309,25 @@ final class CameraSessionTests: XCTestCase {
 
 }
 
-extension CameraSessionTests {
+extension FrameProcessingSessionTests {
     func testLazyWaiterAndRejectedProducerDoNotPrepareBeforeAdmission() async throws {
         let f = try await fixture(maxFrames: 1), active = SessionTestGate(), waiting = SessionTestGate()
-        let session = try CameraSession(renderer: f.renderer, model: f.model)
+        let session = try FrameProcessingSession(renderer: f.renderer, model: f.model)
         let first = Task {
-            try await session.enqueue(CameraFrameSource(knownResidentBytes: 0) { _ in
+            try await session.enqueue(FrameSource(knownResidentBytes: 0) { _ in
                 await active.enter(); return f.input
             }, stamp: self.stamp(1))
         }
         await active.waitForArrival()
         let second = Task {
-            try await session.enqueue(CameraFrameSource(knownResidentBytes: 0) { _ in
+            try await session.enqueue(FrameSource(knownResidentBytes: 0) { _ in
                 await waiting.enter(); return f.input
             }, stamp: self.stamp(2))
         }
         let isWaiting = await waitForWaitingCount(1, session: session)
         XCTAssertTrue(isWaiting)
         do {
-            _ = try await session.enqueue(CameraFrameSource(knownResidentBytes: 0) { _ in
+            _ = try await session.enqueue(FrameSource(knownResidentBytes: 0) { _ in
                 XCTFail("Rejected producer prepared"); return f.input
             }, stamp: stamp(3))
             XCTFail("Expected bounded queue rejection")
@@ -343,12 +343,12 @@ extension CameraSessionTests {
         let f = try await fixture(maxFrames: 1), active = SessionTestGate()
         let cancelled = expectation(description: "Preparation task received cancellation")
         let live = SessionRenderDriver.live(f.renderer)
-        let session = try CameraSession(model: f.model, driver: .init(observe: { input, stamp, requirements, bytes in
+        let session = try FrameProcessingSession(model: f.model, driver: .init(observe: { input, stamp, requirements, bytes in
             XCTAssertEqual(stamp.generation, 1, "Old preparation reached observation")
             return try await live.observe(input, stamp, requirements, bytes)
         }, submit: live.submit))
         let first = Task {
-            try await session.enqueue(CameraFrameSource(knownResidentBytes: 0) { _ in
+            try await session.enqueue(FrameSource(knownResidentBytes: 0) { _ in
                 await withTaskCancellationHandler {
                     await active.enter() // Simulates work which has to finish even after cancellation.
                 } onCancel: {
@@ -371,9 +371,9 @@ extension CameraSessionTests {
 
     func testDeclaredBackingExhaustionRejectsBeforeProviderRuns() async throws {
         let f = try await fixture(maxFrames: 1)
-        let session = try CameraSession(renderer: f.renderer, model: f.model, backpressure: .dropUnsubmitted)
+        let session = try FrameProcessingSession(renderer: f.renderer, model: f.model, backpressure: .dropUnsubmitted)
         do {
-            _ = try await session.enqueue(CameraFrameSource(knownResidentBytes: f.model.execution.budget.maxResidentBytes) { _ in
+            _ = try await session.enqueue(FrameSource(knownResidentBytes: f.model.execution.budget.maxResidentBytes) { _ in
                 XCTFail("Over-budget provider prepared"); return f.input
             }, stamp: stamp(1))
             XCTFail("Expected budget rejection")
@@ -382,18 +382,18 @@ extension CameraSessionTests {
     }
 }
 
-extension CameraSessionTests {
+extension FrameProcessingSessionTests {
     func testPendingLazySourceIsDroppedWithoutPreparing() async throws {
         let f = try await fixture(), active = SessionTestGate()
-        let session = try CameraSession(renderer: f.renderer, model: f.model, backpressure: .dropUnsubmitted)
+        let session = try FrameProcessingSession(renderer: f.renderer, model: f.model, backpressure: .dropUnsubmitted)
         let first = Task {
-            try await session.enqueue(CameraFrameSource(knownResidentBytes: 0) { _ in
+            try await session.enqueue(FrameSource(knownResidentBytes: 0) { _ in
                 await active.enter(); return f.input
             }, stamp: self.stamp(1))
         }
         await active.waitForArrival()
         let second = Task {
-            try await session.enqueue(CameraFrameSource(knownResidentBytes: 0) { _ in
+            try await session.enqueue(FrameSource(knownResidentBytes: 0) { _ in
                 XCTFail("Dropped source prepared"); return f.input
             }, stamp: self.stamp(2))
         }
@@ -419,7 +419,7 @@ extension CameraSessionTests {
     func testBorrowedBuiltInSourceReturnsOnlyAfterRenderCompletion() async throws {
         let f = try await fixture(maxFrames: 1), completion = SessionTestGate()
         let live = SessionRenderDriver.live(f.renderer)
-        let session = try CameraSession(model: f.model, driver: .init(observe: live.observe, submit: { input, plan, requirements, beforeCommit in
+        let session = try FrameProcessingSession(model: f.model, driver: .init(observe: live.observe, submit: { input, plan, requirements, beforeCommit in
             let submission = try live.submit(input, plan, requirements, beforeCommit)
             return .init(completion: {
                 await completion.enter()
@@ -428,7 +428,7 @@ extension CameraSessionTests {
         }))
         let preparer = try f.model.prepareRealtimeInput(working: f.input.working)
         let image = CIImage(color: CIColor(red: 0.5, green: 0.5, blue: 0.5)).cropped(to: CGRect(x: 0, y: 0, width: 4, height: 4))
-        let source = CameraFrameSource(.image(image), using: preparer, descriptor: f.input.source.descriptor,
+        let source = FrameSource(.image(image), using: preparer, descriptor: f.input.source.descriptor,
             recipe: f.input.source.effectiveRecipe.declared, trustedNormalizedRGBBounds: .init(lower: 0, upper: 1))
         let result = Task {
             do { return try await session.enqueue(source, stamp: self.stamp(1)) }

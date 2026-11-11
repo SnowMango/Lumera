@@ -1,21 +1,21 @@
 import XCTest
 @testable import ImagingCore
 
-final class CameraModelContractTests: XCTestCase {
+final class StyleModelContractTests: XCTestCase {
     func testModelRoundTripAndRejectUnknownVersion() throws {
-        let model = CameraModel(identity: .init(id: "fixture", camera: "synthetic", mode: "neutral"))
-        let bytes = try CameraModelCodec.encode(model)
-        XCTAssertEqual(try CameraModelCodec.decode(bytes), model)
+        let model = StyleModel(identity: .init(id: "fixture", name: "neutral"))
+        let bytes = try StyleModelCodec.encode(model)
+        XCTAssertEqual(try StyleModelCodec.decode(bytes), model)
         var invalid = model
-        invalid.schemaVersion = 2
-        XCTAssertThrowsError(try CameraModelCodec.encode(invalid))
+        invalid.schemaVersion = 99
+        XCTAssertThrowsError(try StyleModelCodec.encode(invalid))
         var json = try XCTUnwrap(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
-        json["schemaVersion"] = 2
-        XCTAssertThrowsError(try CameraModelCodec.decode(JSONSerialization.data(withJSONObject: json)))
+        json["schemaVersion"] = 99
+        XCTAssertThrowsError(try StyleModelCodec.decode(JSONSerialization.data(withJSONObject: json)))
     }
 
     func testArrayBudgetsAgreeAcrossModelBoundaries() throws {
-        let base = CameraModel(identity: .init(id: "budget", camera: "test", mode: "test"))
+        let base = StyleModel(identity: .init(id: "budget", name: "test"))
         for count in [32, 33, 36, 37] {
             var permissions = base
             permissions.edits.overrideTargets = Array(ParameterSpecification.all.prefix(count)).map(\.id)
@@ -35,7 +35,7 @@ final class CameraModelContractTests: XCTestCase {
 
     func testGridBudgetCountsAllValuesRatherThanEachAxis() throws {
         for (width, height, accepted) in [(4, 8, true), (4, 9, true), (6, 6, true), (6, 7, false), (36, 36, false)] {
-            var model = CameraModel(identity: .init(id: "grid", camera: "test", mode: "test"))
+            var model = StyleModel(identity: .init(id: "grid", name: "test"))
             model.observations.sourceConditions = [.iso]
             model.responses = [.init(target: "glow.amount", expression: .twoAxisGrid(
                 xAxis: .source(.iso), yAxis: .target(.iso),
@@ -47,7 +47,7 @@ final class CameraModelContractTests: XCTestCase {
 
     func testSingleAxisResponseAllows36NodesButRejects37() throws {
         for count in [36, 37] {
-            var model = CameraModel(identity: .init(id: "axis", camera: "test", mode: "test"))
+            var model = StyleModel(identity: .init(id: "axis", name: "test"))
             model.responses = [.init(target: "glow.amount", expression: .singleAxis(
                 axis: .target(.iso), nodes: (1...count).map { .init(Double($0 * 100), .scalar(0.1)) },
                 boundary: .clamp))]
@@ -55,24 +55,24 @@ final class CameraModelContractTests: XCTestCase {
         }
     }
 
-    private func assertBudget(_ model: CameraModel, accepted: Bool,
+    private func assertBudget(_ model: StyleModel, accepted: Bool,
                               file: StaticString = #filePath, line: UInt = #line) throws {
         // Raw encoding deliberately bypasses the codec to exercise untrusted input rejection.
         let raw = try JSONEncoder().encode(model)
         if accepted {
             XCTAssertNoThrow(try model.validate(), file: file, line: line)
-            XCTAssertNoThrow(try CameraModelCompiler.compile(model), file: file, line: line)
-            XCTAssertEqual(try CameraModelCodec.decode(CameraModelCodec.encode(model)), model, file: file, line: line)
+            XCTAssertNoThrow(try StyleModelCompiler.compile(model), file: file, line: line)
+            XCTAssertEqual(try StyleModelCodec.decode(StyleModelCodec.encode(model)), model, file: file, line: line)
         } else {
             XCTAssertThrowsError(try model.validate(), file: file, line: line)
-            XCTAssertThrowsError(try CameraModelCompiler.compile(model), file: file, line: line)
-            XCTAssertThrowsError(try CameraModelCodec.encode(model), file: file, line: line)
-            XCTAssertThrowsError(try CameraModelCodec.decode(raw), file: file, line: line)
+            XCTAssertThrowsError(try StyleModelCompiler.compile(model), file: file, line: line)
+            XCTAssertThrowsError(try StyleModelCodec.encode(model), file: file, line: line)
+            XCTAssertThrowsError(try StyleModelCodec.decode(raw), file: file, line: line)
         }
     }
 
     func testInvalidResponseValuesAndOwnershipAreRejected() throws {
-        var model = CameraModel(identity: .init(id: "fixture", camera: "synthetic", mode: "neutral"))
+        var model = StyleModel(identity: .init(id: "fixture", name: "neutral"))
         model.responses = [.init(target: "glow.amount", expression: .constant(.scalar(.nan)))]
         XCTAssertThrowsError(try model.validate())
         model.responses = [.init(target: "unknown", expression: .constant(.scalar(0)))]
@@ -87,7 +87,7 @@ final class CameraModelContractTests: XCTestCase {
     }
 
     func testResourceValidationAndUnresolvedWeights() throws {
-        var model = CameraModel(identity: .init(id: "fixture", camera: "synthetic", mode: "neutral"))
+        var model = StyleModel(identity: .init(id: "fixture", name: "neutral"))
         let resource = ModelResourceDescriptor(id: "lut", sha256: String(repeating: "a", count: 64), dimension: 17)
         model.appearance.resources = [resource, resource]
         XCTAssertThrowsError(try model.validate())
@@ -109,7 +109,7 @@ final class CameraModelContractTests: XCTestCase {
         bad = stamp
         bad.duration = 0
         XCTAssertThrowsError(try bad.validate())
-        let model = CameraModel(identity: .init(id: "fixture", camera: "synthetic", mode: "neutral"))
+        let model = StyleModel(identity: .init(id: "fixture", name: "neutral"))
         XCTAssertTrue(model.observations.features.isEmpty, "Constant models require no statistics")
         XCTAssertEqual(ExecutionPrecision.default, .float16)
         XCTAssertThrowsError(try ExecutionBudget(maxInFlightFrames: 0, maxResidentBytes: 1024).validate())
@@ -127,7 +127,7 @@ final class CameraModelContractTests: XCTestCase {
         XCTAssertThrowsError(try recipe.validate())
     }
     func testEveryPolicyResourceReferenceMustResolve() throws {
-        var model = CameraModel(identity: .init(id: "fixture", camera: "synthetic", mode: "neutral"))
+        var model = StyleModel(identity: .init(id: "fixture", name: "neutral"))
         let weights = [ResourceWeight(resourceID: "missing", weight: 1)]
         model.edits.strength = .init(neutralParameters: .init(), neutralLUTWeights: weights)
         XCTAssertThrowsError(try model.validate())
@@ -146,11 +146,11 @@ final class CameraModelContractTests: XCTestCase {
     }
 
     func testCodecRejectsDuplicateJSONMembers() throws {
-        let model = CameraModel(identity: .init(id: "fixture", camera: "synthetic", mode: "neutral"))
-        let json = String(decoding: try CameraModelCodec.encode(model), as: UTF8.self)
-        let duplicated = json.replacingOccurrences(of: "\"schemaVersion\" : 1", with: "\"schemaVersion\" : 1, \"schemaVersion\" : 1")
+        let model = StyleModel(identity: .init(id: "fixture", name: "neutral"))
+        let json = String(decoding: try StyleModelCodec.encode(model), as: UTF8.self)
+        let duplicated = json.replacingOccurrences(of: "\"schemaVersion\" : 2", with: "\"schemaVersion\" : 2, \"schemaVersion\" : 2")
         XCTAssertNotEqual(json, duplicated)
-        XCTAssertThrowsError(try CameraModelCodec.decode(Data(duplicated.utf8)))
+        XCTAssertThrowsError(try StyleModelCodec.decode(Data(duplicated.utf8)))
     }
 
     func testZeroChangeToleranceAndTypedInitialization() throws {

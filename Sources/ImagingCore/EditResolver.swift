@@ -4,7 +4,7 @@ import Foundation
 public enum EditResolver {
     /// 先混合整体强度，再合并视觉偏移，最后应用显式覆盖或锁定并检查约束。
     /// 输入曝光与白平衡作为独立字段传给渲染阶段。
-    public static func resolve(_ edits: EditRequest, automatic: AutomaticControls, model: CompiledCameraModel) throws -> ResolvedControls {
+    public static func resolve(_ edits: EditRequest, automatic: AutomaticControls, model: CompiledStyleModel) throws -> ResolvedControls {
         guard automatic.modelID == model.identity, automatic.featureDigest == model.featureDigest else { throw LabError.invalid("Edit model identity mismatch") }
         try automatic.parameters.validate(resolved: true)
         try validateResources(automatic.lutWeights, resources: model.definition.appearance.resources)

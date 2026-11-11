@@ -35,7 +35,7 @@ package final class ReferenceRenderSession {
         cacheLimitBytes=min(recommended,requested ?? recommended)
         pool=TexturePool(device:device,limit:min(536_870_912,cacheLimitBytes/2))
         let library=try RenderingResources.makeLibrary(device:device)
-        for name in ["weightedLUTMap","lutMapExtrapolated","transfer","lutMap","gaussianPrepared","detailCombine","sharpen","vignette","highlights","glowCombine","resizeLinear","randomField","finish"] + CameraEffectUniforms.kernels {
+        for name in ["weightedLUTMap","lutMapExtrapolated","transfer","lutMap","gaussianPrepared","detailCombine","sharpen","vignette","highlights","glowCombine","resizeLinear","randomField","finish"] + EffectUniforms.kernels {
             guard let f=library.makeFunction(name:name) else {throw LabError.io("缺少图像处理函数： \(name)")}
             pipelines[name]=try device.makeComputePipelineState(function:f)
         }

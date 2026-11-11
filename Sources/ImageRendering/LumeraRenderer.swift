@@ -43,12 +43,12 @@ public final class LumeraRenderer: @unchecked Sendable {
     }
 
     /// Validates and prepares a fixed style on this renderer's device. LUT resources are optional.
-    public func prepare(_ profile: Profile, lut: LUTAsset? = nil) throws -> PreparedCameraStyle {
+    public func prepare(_ profile: Profile, lut: LUTAsset? = nil) throws -> PreparedResolvedStyle {
         try encoder.prepare(ResolvedStyle(profile: profile), lut: lut)
     }
 
     /// Prepares an already resolved parameter snapshot without evaluating capture conditions again.
-    public func prepare(_ style: ResolvedStyle, lut: LUTAsset? = nil) throws -> PreparedCameraStyle {
+    public func prepare(_ style: ResolvedStyle, lut: LUTAsset? = nil) throws -> PreparedResolvedStyle {
         try encoder.prepare(style, lut: lut)
     }
 
@@ -63,7 +63,7 @@ public final class LumeraRenderer: @unchecked Sendable {
     }
 
     /// Assesses the selected precision for a fixed style using the supplied trusted input range.
-    public func assessPrecision(style: PreparedCameraStyle, correction: PreparedDeviceCorrection? = nil,
+    public func assessPrecision(style: PreparedResolvedStyle, correction: PreparedDeviceCorrection? = nil,
                                 request: RenderRequest) throws -> PrecisionAssessment {
         try encoder.assessPrecision(style: style, correction: correction, request: request)
     }
@@ -81,7 +81,7 @@ public final class LumeraRenderer: @unchecked Sendable {
     /// - Important: Consume or copy the result in the same command buffer before committing.
     ///   It may alias the input or pool storage recycled after completion. It is not an owned snapshot.
     /// - Throws: Invalid descriptors/options, incompatible devices/formats or GPU encoding failures.
-    public func render(_ input: MTLTexture, style: PreparedCameraStyle,
+    public func render(_ input: MTLTexture, style: PreparedResolvedStyle,
                        inputDescriptor: InputDescriptor, options: RenderOptions = .init(),
                        correction: PreparedDeviceCorrection? = nil,
                        commandBuffer: MTLCommandBuffer) throws -> MTLTexture {

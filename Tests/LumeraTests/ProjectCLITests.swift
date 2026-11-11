@@ -3,12 +3,12 @@ import XCTest
 import ImagingCore
 import ImageAnalysis
 
-final class CameraProjectCLITests: XCTestCase {
+final class ProjectCLITests: XCTestCase {
     private func run(_ args: [String]) throws -> Int32 {
         let sibling = Bundle(for: Self.self).bundleURL.deletingLastPathComponent().appendingPathComponent("ccdlab")
         let process = Process()
         process.executableURL = ProcessInfo.processInfo.environment["CCDCLI_BINARY"].map { URL(fileURLWithPath: $0) } ?? sibling
-        process.arguments = ["camera-project"] + args
+        process.arguments = ["project"] + args
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         try process.run(); process.waitUntilExit()
@@ -19,7 +19,7 @@ final class CameraProjectCLITests: XCTestCase {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
         var source = SourceDescriptor(id: "source", path: .processedPhoto); source.recipeID = "recipe"
-        let project = CalibrationProject(id: "project", target: .init(id: "target", camera: "camera", mode: "standard"),
+        let project = CalibrationProject(id: "project", target: .init(id: "target", name: "standard"),
                                          source: source, inputRecipe: .init(id: "recipe", backend: "test", version: "1"),
                                          working: .init(referenceRenditionID: "reference"), samples: [])
         let input = dir.appendingPathComponent("project.json"), output = dir.appendingPathComponent("report.json")
@@ -47,7 +47,7 @@ final class CameraProjectCLITests: XCTestCase {
         let reference = CalibrationFile(path: "reference.bin", sha256: Digest.data(referenceBytes), byteCount: referenceBytes.count)
         let sample = CalibrationSample(id: "sample", input: file, target: file, reference: reference, sceneID: "scene", split: .train)
         var source = SourceDescriptor(id: "source", path: .processedPhoto); source.recipeID = "recipe"
-        let project = CalibrationProject(id: "project", target: .init(id: "target", camera: "camera", mode: "standard"), source: source,
+        let project = CalibrationProject(id: "project", target: .init(id: "target", name: "standard"), source: source,
                                          inputRecipe: .init(id: "recipe", backend: "test", version: "1"), working: .init(referenceRenditionID: "reference"), samples: [sample])
         let input = dir.appendingPathComponent("project.json"), output = dir.appendingPathComponent("report.json")
         try JSONEncoder().encode(project).write(to: input)

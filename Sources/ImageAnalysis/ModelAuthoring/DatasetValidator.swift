@@ -12,15 +12,15 @@ public struct DatasetValidator: Sendable {
     }
     /// 核验项目文件的字节身份、样本元数据和集合边界，返回包含就绪报告的数据集。
     public func validate(_ project: CalibrationProject) throws -> CalibrationDataset {
-        guard project.schemaVersion == 1, nonempty(project.id), nonempty(project.target.id),
-              nonempty(project.target.camera), nonempty(project.target.mode) else {
-            throw LabError.invalid("Project schema 1 and target camera/mode identity are required")
+        guard project.schemaVersion == 2, nonempty(project.id), nonempty(project.target.id),
+              nonempty(project.target.name) else {
+            throw LabError.invalid("Project schema 2 and model identity are required")
         }
         if let axes = project.inputQualificationAxes, axes.isEmpty || Set(axes).count != axes.count {
             throw LabError.invalid("Input qualification axes must be explicit, nonempty and unique")
         }
         try project.source.validate(); try project.working.validate(); try project.validationPolicy.validate()
-        guard project.working.dynamicRange == .sdr else { throw LabError.invalid("Camera authoring requires an explicit SDR working reference") }
+        guard project.working.dynamicRange == .sdr else { throw LabError.invalid("Model authoring requires an explicit SDR working reference") }
         guard let recipe = project.inputRecipe else { throw LabError.invalid("Input recipe is required") }
         try recipe.validate()
         guard project.source.recipeID == recipe.id else { throw LabError.invalid("Source input recipe identity does not match") }
@@ -55,7 +55,6 @@ public struct DatasetValidator: Sendable {
         if project.samples.isEmpty { missing.append("samples") }
         for split in CalibrationSplit.allCases where counts[split.rawValue] == 0 { missing.append("split." + split.rawValue) }
         if project.validationPolicy.thresholds.isEmpty { missing.append("validationPolicy.thresholds") }
-        if !nonempty(project.target.firmware ?? "") { missing.append("target.firmware") }
         if !nonempty(project.authorizationSource ?? "") { missing.append("authorizationSource") }
         if project.source.path == .unknown { missing.append("source.path") }
         let baselines = CalibrationBaselineAvailability.Metric.allCases.map {
@@ -63,7 +62,7 @@ public struct DatasetValidator: Sendable {
                                             reason: project.samples.isEmpty ? "No real sample measurements available" : "File/metadata check only; pixel measurement has not run")
         }
         let report = CalibrationCheckReport(schemaVersion: 1, projectID: project.id,
-                                            projectDigest: Digest.data(try JSON.encode(project)), recipeDigest: try recipe.digest(),
+                                            projectDigest: try project.persistedDigest(), recipeDigest: try recipe.digest(),
                                             workingDigest: try project.working.digest(), status: missing.isEmpty ? .readyForDevelopment : .incomplete,
                                             sampleCounts: counts, missingInformation: missing, baselines: baselines)
         return CalibrationDataset(project: project, baseDirectory: baseDirectory, report: report)

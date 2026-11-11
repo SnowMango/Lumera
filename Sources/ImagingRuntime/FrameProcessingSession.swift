@@ -6,10 +6,10 @@ import ImageRendering
 /// admitted frames share the prepared model's bounded slots and memory ledger.
 /// Waiting callers own their source buffers until admission. At most one additional
 /// queue of maxInFlightFrames callers may wait; unlimited producer fan-out rejects.
-public actor CameraSession {
+public actor FrameProcessingSession {
     private enum Input {
         case prepared(PreparedInput)
-        case lazy(CameraFrameSource)
+        case lazy(FrameSource)
     }
     private struct Request {
         let input: Input
@@ -22,7 +22,7 @@ public actor CameraSession {
         var reservation: FrameReservation?
         let epoch: UInt64
     }
-    private let model: PreparedCameraModel
+    private let model: PreparedStyleModel
     private let driver: SessionRenderDriver
     private let backpressure: SessionBackpressure
     private let seed: UInt32
@@ -44,11 +44,11 @@ public actor CameraSession {
 
     /// 为一个有序视频流创建会话；模型须已准备资源和执行预算。
     /// 延迟观测的帧数/秒数限制不能超过模型声明的有效期；采集和输出编码仍由宿主负责。
-    public init(renderer: LumeraRenderer, model: PreparedCameraModel,
+    public init(renderer: LumeraRenderer, model: PreparedStyleModel,
                 backpressure: SessionBackpressure = .wait, seed: UInt32 = 42) throws {
         try self.init(model: model, backpressure: backpressure, seed: seed, driver: .live(renderer))
     }
-    init(model: PreparedCameraModel, backpressure: SessionBackpressure = .wait,
+    init(model: PreparedStyleModel, backpressure: SessionBackpressure = .wait,
          seed: UInt32 = 42, driver: SessionRenderDriver) throws {
         try model.execution.validate()
         if case .delayed(let frames, let seconds) = model.execution.statisticsLatency,
@@ -65,7 +65,7 @@ public actor CameraSession {
 
     /// 接收已准备好的完整输入，等待渲染完成或明确的丢帧结果。
     /// stamp 必须使用源帧序号与 PTS；被丢弃的已接收帧也消耗序号，不能重新编号重试。
-    /// targetConditions 是目标相机条件；源拍摄事实只从 input 获取。
+    /// targetConditions 是目标条件；源拍摄事实只从 input 获取。
     /// reset 必须走会话边界方法，不能作为普通排队事件；取消已提交帧只抑制结果发布。
     public func enqueue(_ input: PreparedInput, stamp: FrameStamp, edits: EditRequest = .init(),
                         targetConditions: CaptureConditions = .init(), event: AdaptationEvent? = nil) async throws -> FrameOutcome {
@@ -74,7 +74,7 @@ public actor CameraSession {
 
     /// Admit a descriptor before invoking its preparation. Keep borrowed source backing immutable
     /// and unavailable for reuse until this call returns, including after cancellation or reset.
-    public func enqueue(_ source: CameraFrameSource, stamp: FrameStamp, edits: EditRequest = .init(),
+    public func enqueue(_ source: FrameSource, stamp: FrameStamp, edits: EditRequest = .init(),
                         targetConditions: CaptureConditions = .init(), event: AdaptationEvent? = nil) async throws -> FrameOutcome {
         try await enqueue(.lazy(source), stamp: stamp, edits: edits, targetConditions: targetConditions, event: event)
     }
@@ -83,7 +83,7 @@ public actor CameraSession {
                          targetConditions: CaptureConditions, event: AdaptationEvent?) async throws -> FrameOutcome {
         try Task.checkCancellation(); try targetConditions.validate()
         // Reset is a session boundary, not a queued event that could leave old jobs live.
-        if case .reset = event { throw LabError.invalid("Use CameraSession.reset for stream reset events") }
+        if case .reset = event { throw LabError.invalid("Use FrameProcessingSession.reset for stream reset events") }
         guard pendingReset == nil || event == nil else { throw LabError.invalid("Submit the reset frame before applying lock/unlock events") }
         try order.accept(stamp)
         let token = SessionCancellation()

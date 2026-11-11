@@ -3,14 +3,14 @@ import ImagingCore
 import ImageRendering
 
 /// 绑定模型字节、输入与外观资源、项目身份和准备配置，并记录制作来源。
-public struct CameraPackageManifest: Codable, Equatable, Sendable {
+public struct ModelPackageManifest: Codable, Equatable, Sendable {
     public enum Derivation: String, Codable, Sendable { case manual, forwardFit, visualRevision }
-    public let version: Int
-    public let modelDigest: String
-    public let modelBytesDigest: String
+    public var version: Int
+    public var modelDigest: String
+    public var modelBytesDigest: String
     public let resourceDigests: [String: String]
     public let inputResourceDigests: [String: String]
-    public let projectDigest: String
+    public var projectDigest: String
     public let source: SourceDescriptor
     public let recipe: InputRecipe
     public let working: WorkingImageContract
@@ -23,18 +23,36 @@ public struct CameraPackageManifest: Codable, Equatable, Sendable {
     public let visualRevision: ModelVisualRevision?
 }
 /// 可移植的模型定义、资源字节和清单。原始照片与独立验收报告单独保存。
-public struct CameraModelPackage: Codable, Equatable, Sendable {
+public struct StyleModelPackage: Codable, Equatable, Sendable {
     public let modelJSON: Data
     public let resources: [String: Data]
     public let inputResources: [String: Data]
-    public let manifest: CameraPackageManifest
-    public func digest() throws -> String { Digest.data(try JSON.encode(self)) }
+    public let manifest: ModelPackageManifest
+    private struct Persisted: Encodable {
+        let modelJSON: Data
+        let resources: [String: Data]
+        let inputResources: [String: Data]
+        let manifest: ModelPackageManifest
+    }
+    /// Existing report bindings refer to the original package, not a migrated save.
+    public func digest() throws -> String {
+        Digest.data(try JSON.encode(Persisted(modelJSON: modelJSON, resources: resources, inputResources: inputResources, manifest: manifest)))
+    }
+    public func encode(to encoder: Encoder) throws {
+        let loaded = try load()
+        let bytes = try StyleModelCodec.encode(loaded.model)
+        var updated = manifest
+        updated.version = 2
+        updated.modelDigest = try loaded.model.digest()
+        updated.modelBytesDigest = Digest.data(bytes)
+        try Persisted(modelJSON: bytes, resources: resources, inputResources: inputResources, manifest: updated).encode(to: encoder)
+    }
     /// 校验模型及资源字节的清单绑定，返回编译后的模型与两组资源。
-    public func load() throws -> LoadedCameraModelPackage {
-        guard manifest.version == 1, !manifest.algorithmVersion.isEmpty,
+    public func load() throws -> LoadedStyleModelPackage {
+        guard [1, 2].contains(manifest.version), !manifest.algorithmVersion.isEmpty,
               Digest.data(modelJSON) == manifest.modelBytesDigest else { throw LabError.invalid("Package model content changed") }
-        let model = try CameraModelCodec.decode(modelJSON), compiled = try CameraModelCompiler.compile(model)
-        guard compiled.identity == manifest.modelDigest else { throw LabError.invalid("Package model semantics changed") }
+        guard try StyleModelCodec.persistedModelDigest(modelJSON) == manifest.modelDigest else { throw LabError.invalid("Package model semantics changed") }
+        let model = try StyleModelCodec.decode(modelJSON), compiled = try StyleModelCompiler.compile(model)
         try manifest.source.validate(); try manifest.recipe.validate(); try manifest.working.validate(); try manifest.preparedFor.validate()
         guard manifest.source.recipeID == manifest.recipe.id else { throw LabError.invalid("Package source recipe mismatch") }
         if let calibration = manifest.calibration {
@@ -45,6 +63,22 @@ public struct CameraModelPackage: Codable, Equatable, Sendable {
         let input = try Self.decodeResources(inputResources, descriptors: manifest.calibration?.resources ?? [], digests: manifest.inputResourceDigests)
         if let calibration = manifest.calibration { try InputNormalizer.validateResources(calibration, resources: input) }
         return .init(model: model, compiled: compiled, resources: style, inputResources: input)
+    }
+    /// Migrates a verified project/package pair. Existing reports remain bound to the old package.
+    public func migrated(project: CalibrationProject) throws -> (project: CalibrationProject, package: StyleModelPackage) {
+        let loaded = try load()
+        guard try project.matchesDigest(manifest.projectDigest), loaded.model.identity == project.target,
+              manifest.source == project.source, manifest.recipe == project.inputRecipe,
+              manifest.working == project.working else { throw LabError.invalid("Migration project does not match package") }
+        let newProject = try JSONDecoder().decode(CalibrationProject.self, from: JSON.encode(project))
+        let bytes = try StyleModelCodec.encode(loaded.model)
+        var updated = manifest
+        updated.version = 2; updated.modelDigest = try loaded.model.digest()
+        updated.modelBytesDigest = Digest.data(bytes)
+        updated.projectDigest = Digest.data(try JSON.encode(newProject))
+        let package = StyleModelPackage(modelJSON: bytes, resources: resources, inputResources: inputResources, manifest: updated)
+        _ = try package.load()
+        return (newProject, package)
     }
     /// 逐条核对回放记录的完整有效配方及其内容绑定。
     public func validateReplayInputs(_ records: [DecisionRecord]) throws {
@@ -80,9 +114,9 @@ public struct CameraModelPackage: Codable, Equatable, Sendable {
         return try .init(luts: luts, curves: curves)
     }
 }
-public struct LoadedCameraModelPackage: Sendable {
-    public let model: CameraModel
-    public let compiled: CompiledCameraModel
+public struct LoadedStyleModelPackage: Sendable {
+    public let model: StyleModel
+    public let compiled: CompiledStyleModel
     public let resources: ModelResourceSet
     public let inputResources: ModelResourceSet
 }
@@ -95,15 +129,15 @@ public struct ModelBuilder {
         try execution.validate(); self.renderer = renderer; self.execution = execution
     }
     /// 以显式模型和资源制作手动来源的模型包。
-    public func build(_ project: CalibrationProject, model: CameraModel, resources: ModelResourceSet,
-                      calibration: InputCalibration? = nil, inputResources: ModelResourceSet? = nil) throws -> CameraModelPackage {
+    public func build(_ project: CalibrationProject, model: StyleModel, resources: ModelResourceSet,
+                      calibration: InputCalibration? = nil, inputResources: ModelResourceSet? = nil) throws -> StyleModelPackage {
         try assemble(project, model: model, resources: resources, calibration: calibration,
-            inputResources: inputResources, derivation: .manual, algorithm: "manual-camera-package-v1", parent: nil, reason: nil)
+            inputResources: inputResources, derivation: .manual, algorithm: "manual-model-package-v2", parent: nil, reason: nil)
     }
     /// 核对拟合的项目和样本绑定，将模型、校准与输入及外观资源封包。
-    public func build(_ project: CalibrationProject, fit: CameraFitResult, inputResources: ModelResourceSet? = nil) throws -> CameraModelPackage {
-        let projectDigest = Digest.data(try JSON.encode(project))
-        guard fit.projectDigest == nil || fit.projectDigest == projectDigest,
+    public func build(_ project: CalibrationProject, fit: ModelFitResult, inputResources: ModelResourceSet? = nil) throws -> StyleModelPackage {
+        let projectMatches = try fit.projectDigest.map { try project.matchesDigest($0) } ?? true
+        guard projectMatches,
               Set(fit.consumedSampleIDs).isSubset(of: Set(project.samples.filter { $0.split != .acceptance }.map(\.id))) else {
             throw LabError.invalid("Fit consumed another project or independent acceptance samples")
         }
@@ -111,9 +145,9 @@ public struct ModelBuilder {
             inputResources: inputResources, derivation: fit.derivation == .manual ? .manual : .forwardFit,
             algorithm: fit.algorithmVersion, parent: nil, reason: nil)
     }
-    func assemble(_ project: CalibrationProject, model: CameraModel, resources: ModelResourceSet,
-                  calibration: InputCalibration?, inputResources: ModelResourceSet?, derivation: CameraPackageManifest.Derivation,
-                  algorithm: String, parent: String?, reason: String?, revision: ModelVisualRevision? = nil) throws -> CameraModelPackage {
+    func assemble(_ project: CalibrationProject, model: StyleModel, resources: ModelResourceSet,
+                  calibration: InputCalibration?, inputResources: ModelResourceSet?, derivation: ModelPackageManifest.Derivation,
+                  algorithm: String, parent: String?, reason: String?, revision: ModelVisualRevision? = nil) throws -> StyleModelPackage {
         guard model.identity == project.target, let recipe = project.inputRecipe else { throw LabError.invalid("Package target or input recipe differs from project") }
         try project.source.validate(); try recipe.validate(); try project.working.validate(); try project.validationPolicy.validate()
         guard project.source.recipeID == recipe.id, model.coverage.evidenceDigests.isEmpty else {
@@ -123,17 +157,17 @@ public struct ModelBuilder {
             try calibration.validate()
             guard calibration.source == project.source, calibration.working == project.working else { throw LabError.invalid("Input calibration differs from project") }
         }
-        let compiled = try CameraModelCompiler.compile(model)
+        let compiled = try StyleModelCompiler.compile(model)
         _ = try ModelPreparer(renderer: renderer).prepare(compiled, resources: resources, execution: execution)
-        let modelBytes = try CameraModelCodec.encode(model)
+        let modelBytes = try StyleModelCodec.encode(model)
         let values = try Self.encodeResources(resources, descriptors: model.appearance.resources)
         let inputValues = try Self.encodeResources(inputResources ?? ModelResourceSet(), descriptors: calibration?.resources ?? [])
-        let manifest = CameraPackageManifest(version: 1, modelDigest: compiled.identity, modelBytesDigest: Digest.data(modelBytes),
+        let manifest = ModelPackageManifest(version: 2, modelDigest: compiled.identity, modelBytesDigest: Digest.data(modelBytes),
             resourceDigests: values.mapValues(Digest.data), inputResourceDigests: inputValues.mapValues(Digest.data),
             projectDigest: Digest.data(try JSON.encode(project)), source: project.source, recipe: recipe, working: project.working,
             calibration: calibration, preparedFor: execution, derivation: derivation, algorithmVersion: algorithm,
             parentPackageDigest: parent, revisionReason: reason, visualRevision: revision)
-        let package = CameraModelPackage(modelJSON: modelBytes, resources: values, inputResources: inputValues, manifest: manifest)
+        let package = StyleModelPackage(modelJSON: modelBytes, resources: values, inputResources: inputValues, manifest: manifest)
         _ = try package.load()
         return package
     }
@@ -165,10 +199,10 @@ public struct ModelVisualRevision: Codable, Equatable, Sendable {
 }
 extension ModelBuilder {
     /// 将运行时共用的视觉映射写入指定基础外观或锚点。会话输入调整、覆盖和锁定留在会话内。
-    public func revise(_ package: CameraModelPackage, project: CalibrationProject,
-                       revision: ModelVisualRevision, reason: String) throws -> CameraModelPackage {
+    public func revise(_ package: StyleModelPackage, project: CalibrationProject,
+                       revision: ModelVisualRevision, reason: String) throws -> StyleModelPackage {
         let loaded = try package.load(), edits = revision.edits
-        guard package.manifest.projectDigest == Digest.data(try JSON.encode(project)),
+        guard try project.matchesDigest(package.manifest.projectDigest),
               !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               edits.inputExposureEV == 0, edits.inputWhiteBalance == nil,
               edits.overrides.isEmpty, edits.locks.isEmpty, edits.strength == nil,

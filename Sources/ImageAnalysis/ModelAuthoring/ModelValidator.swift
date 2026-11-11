@@ -21,7 +21,7 @@ public struct ModelValidator {
     }
     /// 在同帧统计的 SDR 路径渲染验收集，并与目标外观逐像素比较，报告归一化编码 RGB 最大绝对误差。
     /// 其余验证域标记为证据不足。开发数据可用于误差比较，实测域需要实拍目标证据。
-    public func validate(_ package: CameraModelPackage, dataset: CalibrationDataset, policy: ValidationPolicy,
+    public func validate(_ package: StyleModelPackage, dataset: CalibrationDataset, policy: ValidationPolicy,
                          execution: ExecutionProfile) async throws -> ModelValidationReport {
         try Task.checkCancellation(); try execution.validate(); try policy.validate()
         let loaded = try package.load(), project = dataset.project
@@ -29,8 +29,8 @@ public struct ModelValidator {
             throw LabError.unsupported("Whole-scene encoded RGB validation currently requires SDR input and execution")
         }
         guard package.manifest.preparedFor == execution, policy == project.validationPolicy,
-              package.manifest.projectDigest == dataset.report.projectDigest,
-              dataset.report.projectDigest == Digest.data(try JSON.encode(project)),
+              try project.matchesDigest(package.manifest.projectDigest),
+              dataset.report.projectDigest == (try project.persistedDigest()),
               loaded.model.identity == project.target, package.manifest.source == project.source,
               package.manifest.recipe == project.inputRecipe, package.manifest.working == project.working else {
             throw LabError.invalid("Validation package, project, frozen policy or execution differs")
@@ -81,7 +81,7 @@ public struct ModelValidator {
             domain == .colorTone ? color : ModelDomainValidation(domain: domain, status: .insufficient,
                 reasons: ["No independent \(domain.rawValue) measurement is implemented by this color validator"])
         }
-        return try .init(version: 1, packageDigest: package.digest(), modelDigest: loaded.compiled.identity,
+        return try .init(version: 1, packageDigest: package.digest(), modelDigest: package.manifest.modelDigest,
             projectDigest: dataset.report.projectDigest, policyDigest: Digest.data(JSON.encode(policy)), execution: execution,
             measurementExecution: measurementExecution, source: project.source, targetSource: targetSource,
             targetRecipeDigest: targetRecipe.digest(),
@@ -94,8 +94,8 @@ public struct ModelValidator {
         let pixels: Int
         let sourceID: String, targetID: String
     }
-    private func measure(_ sample: CalibrationSample, index: Int, dataset: CalibrationDataset, package: CameraModelPackage,
-                         loaded: LoadedCameraModelPackage, model: PreparedCameraModel, adapter: InputAdapter,
+    private func measure(_ sample: CalibrationSample, index: Int, dataset: CalibrationDataset, package: StyleModelPackage,
+                         loaded: LoadedStyleModelPackage, model: PreparedStyleModel, adapter: InputAdapter,
                          normalizer: InputNormalizer, targetExecution: ExecutionProfile, fileBudget: Int) async throws -> FrameMeasurement {
         let reservation = try model.reserveFrame(); defer { reservation.cancel() }
         let inputBytes = try CalibrationReferenceLoader.checkedBytes(sample.input, baseDirectory: dataset.baseDirectory, maximumBytes: fileBudget)
@@ -113,7 +113,7 @@ public struct ModelValidator {
         // Source observations are exactly the runtime B2 facts. Manifest declarations
         // can reject contradictions, but cannot supply facts missing from live input.
         let observations = try await renderer.observe(prepared, stamp: stamp, requirements: model.compiled.definition.observations)
-        let automatic = try CameraModelEvaluator.evaluate(model.compiled, context: .init(evaluationStamp: stamp, observations: observations, targetConditions: targetConditions))
+        let automatic = try StyleModelEvaluator.evaluate(model.compiled, context: .init(evaluationStamp: stamp, observations: observations, targetConditions: targetConditions))
         let resolved = try EditResolver.resolve(.init(), automatic: automatic, model: model.compiled)
         let plan = try RenderPlanner().plan(resolved, input: prepared, model: model, stamp: stamp, seed: 42, reservation: reservation)
         let output = try await renderer.renderTiled(prepared, plan: plan)
@@ -173,7 +173,7 @@ public struct ModelValidator {
         } }
         return (maximum, pixels)
     }
-    private static func workspace(package: CameraModelPackage, execution: ExecutionProfile) throws -> (render: Int, target: Int, file: Int) {
+    private static func workspace(package: StyleModelPackage, execution: ExecutionProfile) throws -> (render: Int, target: Int, file: Int) {
         // Package bytes, two 128x128 RGBAf readbacks and bounded overhead stay outside
         // the rendering allowance. Platform decoder internals are not process-wide accounting.
         let packageBytes = package.modelJSON.count + package.resources.values.reduce(0) { $0+$1.count } + package.inputResources.values.reduce(0) { $0+$1.count }

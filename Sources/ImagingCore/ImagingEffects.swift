@@ -32,7 +32,7 @@ public struct Halation: Codable, Equatable, Sendable {
 }
 
 extension ParameterDescriptor {
-    public static var cameraEffects:[ParameterDescriptor] {[
+    public static var imagingEffects:[ParameterDescriptor] {[
         .init("softening.amount","柔化强度","softening",\.softening.amount,0...1),
         .init("softening.sigma","柔化尺度 / px","softening",\.softening.sigma,0.1...8, .referencePixels),
         .init("grain.amount","胶片颗粒强度","grain",\.grain.amount,0...0.1),

@@ -2,11 +2,11 @@ import Foundation
 import ImagingCore
 import ImageAnalysis
 
-/// `camera-project` command arguments, excluding the command name. No rendering/GPU creation.
-enum CameraModelCommands {
+/// `project` command arguments, excluding the command name. No rendering/GPU creation.
+enum StyleModelCommands {
     /// 仅校验项目结构、分组和文件摘要并写报告；不会拟合像素或授予实拍资格。
     static func run(_ arguments: [String]) throws {
-        guard arguments.first == "check" else { throw LabError.invalid("Expected camera-project check") }
+        guard arguments.first == "check" else { throw LabError.invalid("Expected project check") }
         var values = [String: String](), force = false, index = 1
         while index < arguments.count {
             let key = arguments[index]
@@ -20,7 +20,7 @@ enum CameraModelCommands {
             values[key] = arguments[index + 1]; index += 2
         }
         guard let projectPath = values["--project"], let outputPath = values["--output"] else {
-            throw LabError.invalid("camera-project check requires --project and --output")
+            throw LabError.invalid("project check requires --project and --output")
         }
         let input = URL(fileURLWithPath: projectPath), output = URL(fileURLWithPath: outputPath)
         let project = try JSON.load(CalibrationProject.self, from: input)
@@ -36,6 +36,6 @@ enum CameraModelCommands {
         let dataset = try validator.validate(project)
         try Task.checkCancellation()
         try SafeFiles.write(JSON.encode(dataset.report), to: output, overwrite: force)
-        print("Camera project \(project.id): \(dataset.report.status.rawValue); no measured qualification granted")
+        print("Model project \(project.id): \(dataset.report.status.rawValue); no measured qualification granted")
     }
 }

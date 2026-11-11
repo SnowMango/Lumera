@@ -5,13 +5,13 @@ import ImageRendering
 @testable import ImageAnalysis
 
 final class TemporalResponseFitterTests: XCTestCase {
-    func model() throws -> CompiledCameraModel {
-        var model=CameraModel(identity:.init(id:"temporal",camera:"synthetic",mode:"SDR"))
+    func model() throws -> CompiledStyleModel {
+        var model=StyleModel(identity:.init(id:"temporal",name: "SDR"))
         func matrix(_ gain:Double)->ControlValue { .matrix(.init(values:[gain,0,0,0,gain,0,0,0,gain])) }
         model.responses=[.init(target:"color.matrix",expression:.singleAxis(axis:.target(.exposureBiasEV),nodes:[.init(0,matrix(0.4)),.init(1,matrix(0.9))],boundary:.reject))]
-        return try CameraModelCompiler.compile(model)
+        return try StyleModelCompiler.compile(model)
     }
-    func sequence(_ model:CompiledCameraModel,id:String,dt:[Double],split:CalibrationSplit = .train,delay:Double?=0) throws -> ResponseSequence {
+    func sequence(_ model:CompiledStyleModel,id:String,dt:[Double],split:CalibrationSplit = .train,delay:Double?=0) throws -> ResponseSequence {
         var times=[0.0]
         for i in 1..<90 { times.append(times.last!+dt[(i-1)%dt.count]) }
         let transition=12,start=times[transition-1]
@@ -66,7 +66,7 @@ final class TemporalResponseFitterTests: XCTestCase {
     func testDeclaredDelayHasSeparateModeAndSameReducerRecovery() async throws {
         var definition=try model().definition
         definition.observations.validity.maxAgeFrames=1;definition.observations.validity.maxAgeSeconds=0.04
-        let compiled=try CameraModelCompiler.compile(definition)
+        let compiled=try StyleModelCompiler.compile(definition)
         let original=try sequence(compiled,id:"delayed",dt:[1.0/30])
         let frames=original.frames.map { frame -> ResponseSequence.Frame in
             var record=frame.record
@@ -103,7 +103,7 @@ final class TemporalResponseFitterTests: XCTestCase {
         definition.responses[0].missing = .hold(maxAgeSeconds:10)
         var rule=AdaptationRule(target:"color.matrix",timeConstantSeconds:0.2);rule.maximumMissingSeconds=10
         definition.adaptation.rules=[rule]
-        let compiled=try CameraModelCompiler.compile(definition),original=try sequence(compiled,id:"held-step",dt:[1.0/30])
+        let compiled=try StyleModelCompiler.compile(definition),original=try sequence(compiled,id:"held-step",dt:[1.0/30])
         let frames=original.frames.enumerated().map { index,frame -> ResponseSequence.Frame in
             var record=frame.record
             if index>=14 { record.context.targetConditions.exposureBiasEV=nil }
@@ -132,7 +132,7 @@ final class TemporalResponseFitterTests: XCTestCase {
     }
     func testFlatActualForwardResponseCannotIdentifyTiming() async throws {
         struct Black:TemporalResponsePredicting {
-            func predict(_ frame:ResponseSequence.Frame,controls:AutomaticControls,model:CompiledCameraModel) async throws -> [Double] { [Double](repeating:0,count:9) }
+            func predict(_ frame:ResponseSequence.Frame,controls:AutomaticControls,model:CompiledStyleModel) async throws -> [Double] { [Double](repeating:0,count:9) }
         }
         let compiled=try model(),original=try sequence(compiled,id:"black",dt:[1.0/30])
         let frames=original.frames.map{ResponseSequence.Frame(record:$0.record,targetPresentationTime:$0.targetPresentationTime,measurements:[Double](repeating:0,count:9))}
@@ -164,11 +164,11 @@ final class TemporalResponseFitterTests: XCTestCase {
         let fit=try await TemporalResponseFitter.fit([sequence],model:model,policy:.init(),options:options(),predictor:TypedControlTemporalPredictor(targets:["color.matrix"]))
         var execution=ExecutionProfile(width:1,height:1,budget:.init(maxInFlightFrames:1,maxResidentBytes:64*1024*1024));execution.precision = .float32
         let renderer=try LumeraRenderer(device:device,precision:.float32)
-        let predictor=try B7CameraResponseScorer(renderer:renderer,working:.init(referenceRenditionID:"temporal-working"),execution:execution,resources:ModelResourceSet())
+        let predictor=try B7ResponseScorer(renderer:renderer,working:.init(referenceRenditionID:"temporal-working"),execution:execution,resources:ModelResourceSet())
         let source=[0.4,0.5,0.6],indices=Set([0,11,12,20,50,89])
         var state:AdaptationState?,rendered=[[Double]]()
         for (index,frame) in sequence.frames.enumerated() {
-            let controls=try CameraModelEvaluator.evaluate(model,context:frame.record.context)
+            let controls=try StyleModelEvaluator.evaluate(model,context:frame.record.context)
             let reduced=try AdaptationReducer.reduce(controls,state:state,stamp:frame.record.context.evaluationStamp,event:nil,policy:fit.policy)
             state=reduced.state
             guard indices.contains(index) else { continue }

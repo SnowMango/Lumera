@@ -1,12 +1,12 @@
 import XCTest
 @testable import ImagingCore
 
-final class CameraStrengthCapabilityTests: XCTestCase {
+final class StyleStrengthCapabilityTests: XCTestCase {
     func testCompilerRejectsAdvertisedUnrepresentableStrength() throws {
-        var model = CameraModel(identity: .init(id: "fixture", camera: "synthetic", mode: "neutral"))
+        var model = StyleModel(identity: .init(id: "fixture", name: "neutral"))
         model.appearance.parameters.tone.enabled = true
         model.appearance.parameters.tone.curve = .init(function: .init(family: .power))
         model.edits.strength = .init(neutralParameters: .init())
-        XCTAssertThrowsError(try CameraModelCompiler.compile(model))
+        XCTAssertThrowsError(try StyleModelCompiler.compile(model))
     }
 }

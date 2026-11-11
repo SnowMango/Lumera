@@ -3,7 +3,7 @@ import Metal
 import ImagingCore
 
 /// 已验证的设备风格快照，LUT 在准备时解析并上传。
-public final class PreparedCameraStyle: @unchecked Sendable {
+public final class PreparedResolvedStyle: @unchecked Sendable {
     public let style: ResolvedStyle
     fileprivate let curves:PreparedResponseCurves
     fileprivate let color: PreparedColorTransform
@@ -21,7 +21,7 @@ public final class PreparedCameraStyle: @unchecked Sendable {
         self.executionPlan = PreparedExecutionPlan(parameters: style.parameters, color: color)
         self.curves=PreparedResponseCurves(style.parameters);self.style=style; self.color=color; self.lut=lut; self.deviceID=deviceID
     }
-    fileprivate init(base: PreparedCameraStyle, blend: PreparedLUTBlend) {
+    fileprivate init(base: PreparedResolvedStyle, blend: PreparedLUTBlend) {
         style = base.style; curves = base.curves; color = base.color; executionPlan = base.executionPlan
         deviceID = base.deviceID; lut = nil; lutBlend = blend
     }
@@ -78,7 +78,7 @@ public final class TextureEffectEncoder: @unchecked Sendable {
         self.device=device;self.precision=precision
         let library=try RenderingResources.makeLibrary(device:device)
         var compiled=[String:MTLComputePipelineState]()
-        for name in ["weightedLUTMap", "copyPixels", "lutMapExtrapolated","toneResponseExtended","finishExtended","filmGrainExtended","grainReduceExtended","transfer","lutMap","gaussianPrepared","detailCombine","sharpen","vignette","highlights","glowCombine","resizeLinear","randomField","finish"] + CameraEffectUniforms.kernels + ["opticalReduceRegion", "softenCombineReducedRegion", "glowCombineReducedRegion", "halationCombineReducedRegion", "randomFieldRegion", "vignetteRegion", "resizeLinearRegion"] {
+        for name in ["weightedLUTMap", "copyPixels", "lutMapExtrapolated","toneResponseExtended","finishExtended","filmGrainExtended","grainReduceExtended","transfer","lutMap","gaussianPrepared","detailCombine","sharpen","vignette","highlights","glowCombine","resizeLinear","randomField","finish"] + EffectUniforms.kernels + ["opticalReduceRegion", "softenCombineReducedRegion", "glowCombineReducedRegion", "halationCombineReducedRegion", "randomFieldRegion", "vignetteRegion", "resizeLinearRegion"] {
             guard let function=library.makeFunction(name:name) else {throw LabError.io("缺少 风格处理函数："+name)}
             compiled[name]=try device.makeComputePipelineState(function:function)
         }
@@ -98,10 +98,10 @@ public final class TextureEffectEncoder: @unchecked Sendable {
         if retain { preparedLUTs.append(prepared); if preparedLUTs.count>2 {preparedLUTs.removeFirst()} }
         return prepared
     }
-    public func prepare(_ style:ResolvedStyle,lut:LUTAsset?=nil) throws -> PreparedCameraStyle {
+    public func prepare(_ style:ResolvedStyle,lut:LUTAsset?=nil) throws -> PreparedResolvedStyle {
         try style.parameters.validate(resolved:true)
         let prepared = try prepareLUT(lut)
-        return PreparedCameraStyle(style:style,color:try ColorTransform.prepare(style.parameters.color),lut:prepared,deviceID:device.registryID)
+        return PreparedResolvedStyle(style:style,color:try ColorTransform.prepare(style.parameters.color),lut:prepared,deviceID:device.registryID)
     }
 
     public func prepareCorrection(_ correction:DeviceCorrection?,lut:LUTAsset?=nil) throws -> PreparedDeviceCorrection? {
@@ -110,23 +110,23 @@ public final class TextureEffectEncoder: @unchecked Sendable {
 
     /// Assesses the selected precision for a fixed style without encoding GPU work.
     /// Supply trusted encoded-RGB bounds for EDR. SDR defaults to 0...1.
-    public func assessPrecision(style: PreparedCameraStyle, correction: PreparedDeviceCorrection? = nil,
+    public func assessPrecision(style: PreparedResolvedStyle, correction: PreparedDeviceCorrection? = nil,
                                 request: RenderRequest) throws -> PrecisionAssessment {
         try assessPrecision(style: style, parameters: style.style.parameters, correction: correction, request: request)
     }
 
-    public func encode(_ input: MTLTexture, style: PreparedCameraStyle, correction:PreparedDeviceCorrection? = nil, request:RenderRequest,
+    public func encode(_ input: MTLTexture, style: PreparedResolvedStyle, correction:PreparedDeviceCorrection? = nil, request:RenderRequest,
                        commandBuffer: MTLCommandBuffer) throws -> MTLTexture {
         try encodeFrame(input, style: style, parameters: style.style.parameters, color: style.color, curves: style.curves,
                         temporal: style.style.temporalPolicy, correction: correction, request: request, commandBuffer: commandBuffer)
     }
-    func encodeBounded(_ input: MTLTexture, style: PreparedCameraStyle, correction: PreparedDeviceCorrection?,
+    func encodeBounded(_ input: MTLTexture, style: PreparedResolvedStyle, correction: PreparedDeviceCorrection?,
                        request: RenderRequest, workingSet: TileWorkingSet, commandBuffer: MTLCommandBuffer) throws -> MTLTexture {
         try encodeFrame(input, style: style, parameters: style.style.parameters, color: style.color, curves: style.curves,
                         temporal: style.style.temporalPolicy, correction: correction, request: request,
                         workingSet: workingSet, commandBuffer: commandBuffer)
     }
-    func encodeRegion(_ input: MTLTexture, style: PreparedCameraStyle, correction: PreparedDeviceCorrection?,
+    func encodeRegion(_ input: MTLTexture, style: PreparedResolvedStyle, correction: PreparedDeviceCorrection?,
                       request: RenderRequest, geometry: RenderGeometry, workingSet: TileWorkingSet, commandBuffer: MTLCommandBuffer) throws -> MTLTexture {
         try encodeFrame(input, style: style, parameters: style.style.parameters, color: style.color, curves: style.curves,
                         temporal: style.style.temporalPolicy, correction: correction, request: request,
@@ -145,7 +145,7 @@ public final class TextureEffectEncoder: @unchecked Sendable {
                                temporal: values.temporalPolicy, correction: correction, request: request, commandBuffer: commandBuffer)
     }
     /// 复用已上传的 LUT 和执行缓存，每帧仅组装同设备、同边界语义的绑定及权重。
-    func blendStyle(base: PreparedCameraStyle, styles: [PreparedCameraStyle], weights: [Double]) throws -> PreparedCameraStyle {
+    func blendStyle(base: PreparedResolvedStyle, styles: [PreparedResolvedStyle], weights: [Double]) throws -> PreparedResolvedStyle {
         guard (1...4).contains(styles.count), styles.count == weights.count,
               weights.allSatisfy({ $0.isFinite && $0 >= 0 }), abs(weights.reduce(0,+) - 1) <= 1e-9,
               styles.allSatisfy({ $0.deviceID == base.deviceID && $0.lut?.boundaryPolicy == styles[0].lut?.boundaryPolicy }) else {
@@ -157,10 +157,10 @@ public final class TextureEffectEncoder: @unchecked Sendable {
         }
         var coefficients = weights.map(Float.init)
         while luts.count < 4 { luts.append(luts[0]); coefficients.append(0) }
-        return PreparedCameraStyle(base: base, blend: .init(luts: luts, weights: coefficients, boundaryPolicy: luts[0].boundaryPolicy))
+        return PreparedResolvedStyle(base: base, blend: .init(luts: luts, weights: coefficients, boundaryPolicy: luts[0].boundaryPolicy))
     }
 
-    func assessPrecision(style: PreparedCameraStyle, parameters: StyleParameters, correction: PreparedDeviceCorrection?,
+    func assessPrecision(style: PreparedResolvedStyle, parameters: StyleParameters, correction: PreparedDeviceCorrection?,
                          request: RenderRequest, geometry: RenderGeometry? = nil) throws -> PrecisionAssessment {
         try request.validate()
         guard style.deviceID == device.registryID, correction == nil || correction?.deviceID == device.registryID else {
@@ -171,12 +171,12 @@ public final class TextureEffectEncoder: @unchecked Sendable {
     }
 
     /// Check the full-frame geometry before encoding any model tiles.
-    func checkModelSafety(style: PreparedCameraStyle, parameters: StyleParameters, prefix: PreparedDeviceCorrection?,
+    func checkModelSafety(style: PreparedResolvedStyle, parameters: StyleParameters, prefix: PreparedDeviceCorrection?,
                           request: RenderRequest, geometry: RenderGeometry? = nil) throws {
         try PrecisionSafety.require(assessPrecision(style: style, parameters: parameters, correction: prefix,
                                                     request: request, geometry: geometry))
     }
-    func encodeModel(_ input: MTLTexture, style: PreparedCameraStyle, parameters: StyleParameters,
+    func encodeModel(_ input: MTLTexture, style: PreparedResolvedStyle, parameters: StyleParameters,
                      prefix: PreparedDeviceCorrection?, request: RenderRequest, workingSet: TileWorkingSet,
                      geometry: RenderGeometry? = nil, commandBuffer: MTLCommandBuffer) throws -> MTLTexture {
         try encodeFrame(input, style: style, parameters: parameters, color: style.executionPlan.color(for: parameters.color),
@@ -193,12 +193,12 @@ public final class TextureEffectEncoder: @unchecked Sendable {
                               sourceWidth: input.width, sourceHeight: input.height,
                               sourceArea: CGRect(x: 0, y: 0, width: input.width, height: input.height))
     }
-    private func hasEffects(_ p: StyleParameters, style: PreparedCameraStyle, correction: PreparedDeviceCorrection?, request: RenderRequest) -> Bool {
+    private func hasEffects(_ p: StyleParameters, style: PreparedResolvedStyle, correction: PreparedDeviceCorrection?, request: RenderRequest) -> Bool {
         correction != nil || p.color.isActive || style.lut != nil || style.lutBlend != nil || p.tone.isActive ||
             p.detail.isActive || p.softening.isActive || p.vignette.isActive ||
             (request.previewGlow && (p.glow.isActive || p.halation.isActive)) || p.noise.isActive || p.grain.isActive
     }
-    private func assess(style: PreparedCameraStyle, parameters: StyleParameters, color: PreparedColorTransform,
+    private func assess(style: PreparedResolvedStyle, parameters: StyleParameters, color: PreparedColorTransform,
                         correction: PreparedDeviceCorrection?, request: RenderRequest, geometry: RenderGeometry) -> PrecisionAssessment {
         PrecisionSafety.assess(parameters: parameters, color: color, correction: correction, lut: style.lut,
             blend: style.lutBlend, precision: precision, request: request,
@@ -207,7 +207,7 @@ public final class TextureEffectEncoder: @unchecked Sendable {
             hasEffects: hasEffects(parameters, style: style, correction: correction, request: request),
             preparedGrain: precision == .float16 && parameters.grain.isActive ? style.executionPlan.grain(for: parameters.grain) : nil)
     }
-    private func encodeFrame(_ input:MTLTexture,style:PreparedCameraStyle,parameters p:StyleParameters,color:PreparedColorTransform,curves:PreparedResponseCurves,
+    private func encodeFrame(_ input:MTLTexture,style:PreparedResolvedStyle,parameters p:StyleParameters,color:PreparedColorTransform,curves:PreparedResponseCurves,
                              temporal:TemporalPolicy,correction:PreparedDeviceCorrection?,request:RenderRequest,geometry:RenderGeometry? = nil,
                              workingSet:TileWorkingSet? = nil,commandBuffer:MTLCommandBuffer,precisionChecked:Bool = false) throws -> MTLTexture {
         try request.validate()

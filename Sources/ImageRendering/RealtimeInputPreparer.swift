@@ -2,13 +2,13 @@ import ImagingCore
 
 /// Reusable, model-bound configuration for source preparation after frame admission.
 public final class RealtimeInputPreparer: Sendable {
-    package let model: PreparedCameraModel
+    package let model: PreparedStyleModel
     private let adapter: InputAdapter
     private let normalizer: InputNormalizer
     private let calibration: InputCalibration?
     private let resources: ModelResourceSet
 
-    init(model: PreparedCameraModel, working: WorkingImageContract, calibration: InputCalibration?, resources: ModelResourceSet) throws {
+    init(model: PreparedStyleModel, working: WorkingImageContract, calibration: InputCalibration?, resources: ModelResourceSet) throws {
         self.model = model; self.calibration = calibration
         let selected = Set(calibration?.resources.map(\.id) ?? [])
         self.resources = try ModelResourceSet(luts: resources.luts.filter { selected.contains($0.key) })
@@ -28,7 +28,7 @@ public final class RealtimeInputPreparer: Sendable {
     }
 }
 
-extension PreparedCameraModel {
+extension PreparedStyleModel {
     /// Prepare reusable calibration resources against the model ledger before frame admission.
     public func prepareRealtimeInput(working: WorkingImageContract, calibration: InputCalibration? = nil,
                                      resources: ModelResourceSet? = nil) throws -> RealtimeInputPreparer {

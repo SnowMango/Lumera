@@ -3,9 +3,9 @@ import ImageRendering
 
 /// A lightweight source descriptor for the ordered camera worker. Do not prepare input textures
 /// or start tasks while building descriptors. The caller owns backing storage while waiting.
-public struct CameraFrameSource: Sendable {
+public struct FrameSource: Sendable {
     let knownResidentBytes: Int
-    let model: PreparedCameraModel?
+    let model: PreparedStyleModel?
     let prepare: @Sendable (ExecutionProfile) async throws -> PreparedInput
 
     /// A custom provider receives the frame allowance after declared backing is deducted.

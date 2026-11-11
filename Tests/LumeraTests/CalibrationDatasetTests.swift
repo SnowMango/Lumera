@@ -29,8 +29,8 @@ final class CalibrationDatasetTests: XCTestCase {
                          policy: ValidationPolicy = .init()) -> CalibrationProject {
         var source = SourceDescriptor(id: "source", path: .processedPhoto)
         source.recipeID = "recipe"
-        var target = TargetIdentity(id: "target", camera: "test-camera", mode: targetMode)
-        target.firmware = "test-version"
+        var target = ModelIdentity(id: "target", name: targetMode)
+        target.metadata["firmware"] = "test-version"
         return CalibrationProject(id: "project", target: target, source: source, inputRecipe: recipe,
                                   working: .init(referenceRenditionID: "reference"), samples: samples,
                                   validationPolicy: policy, authorizationSource: "synthetic development test")

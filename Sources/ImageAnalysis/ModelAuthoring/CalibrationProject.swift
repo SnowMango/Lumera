@@ -71,8 +71,9 @@ public struct CalibrationSample: Codable, Equatable, Sendable {
 /// 制作阶段的项目定义，固定输入、目标、样本和验证策略。原始图像路径留在制作项目中。
 public struct CalibrationProject: Codable, Equatable, Sendable {
     public let schemaVersion: Int
+    private var originalFormatDigest: String? = nil
     public let id: String
-    public let target: TargetIdentity
+    public let target: ModelIdentity
     public let source: SourceDescriptor
     public let inputRecipe: InputRecipe?
     public let working: WorkingImageContract
@@ -81,7 +82,7 @@ public struct CalibrationProject: Codable, Equatable, Sendable {
     public let authorizationSource: String?
     /// 输入校准资格声明覆盖的条件轴。未指定时仍可拟合，资格只覆盖实际声明并测量的轴。
     public let inputQualificationAxes: [ConditionAxis]?
-    public init(schemaVersion: Int = 1, id: String, target: TargetIdentity, source: SourceDescriptor,
+    public init(schemaVersion: Int = 2, id: String, target: ModelIdentity, source: SourceDescriptor,
                 inputRecipe: InputRecipe?, working: WorkingImageContract, samples: [CalibrationSample],
                 validationPolicy: ValidationPolicy = .init(), authorizationSource: String? = nil, inputQualificationAxes: [ConditionAxis]? = nil) {
         self.schemaVersion = schemaVersion; self.id = id; self.target = target; self.source = source
@@ -89,4 +90,90 @@ public struct CalibrationProject: Codable, Equatable, Sendable {
         self.validationPolicy = validationPolicy; self.authorizationSource = authorizationSource
         self.inputQualificationAxes = inputQualificationAxes
     }
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.schemaVersion == rhs.schemaVersion &&
+        lhs.id == rhs.id &&
+        lhs.target == rhs.target &&
+        lhs.source == rhs.source &&
+        lhs.inputRecipe == rhs.inputRecipe &&
+        lhs.working == rhs.working &&
+        lhs.samples == rhs.samples &&
+        lhs.validationPolicy == rhs.validationPolicy &&
+        lhs.authorizationSource == rhs.authorizationSource &&
+        lhs.inputQualificationAxes == rhs.inputQualificationAxes
+    }
+    // All project fields are immutable, so this original identity cannot outlive a content edit.
+    public func persistedDigest() throws -> String {
+        if let originalFormatDigest { return originalFormatDigest }
+        return Digest.data(try JSON.encode(self))
+    }
+    public func matchesDigest(_ digest: String) throws -> Bool {
+        if digest == (try persistedDigest()) { return true }
+        return digest == Digest.data(try JSON.encode(self))
+    }
+    private struct LegacyIdentity: Codable {
+        let id: String, camera: String, mode: String
+        let firmware: String?
+        let settings: [String: String]
+    }
+    private struct LegacyProject: Codable {
+        let schemaVersion: Int
+        let id: String
+        let target: LegacyIdentity
+        let source: SourceDescriptor
+        let inputRecipe: InputRecipe?
+        let working: WorkingImageContract
+        let samples: [CalibrationSample]
+        let validationPolicy: ValidationPolicy
+        let authorizationSource: String?
+        let inputQualificationAxes: [ConditionAxis]?
+    }
+    private enum NeutralIdentityKeys: String, CodingKey { case name, metadata, camera, mode, firmware, settings }
+    private enum CodingKeys: String, CodingKey { case schemaVersion, id, target, source, inputRecipe, working, samples, validationPolicy, authorizationSource, inputQualificationAxes }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let version = try c.decode(Int.self, forKey: .schemaVersion)
+        guard [1, 2].contains(version) else { throw LabError.invalid("Unsupported project schema") }
+        if version == 2 {
+            let identity = try c.nestedContainer(keyedBy: NeutralIdentityKeys.self, forKey: .target)
+            _ = try identity.decode(String.self, forKey: .name)
+            guard !identity.contains(.camera), !identity.contains(.mode), !identity.contains(.firmware), !identity.contains(.settings) else {
+                throw LabError.invalid("Schema 2 requires neutral identity fields")
+            }
+        }
+        if version == 1 {
+            let identity = try c.nestedContainer(keyedBy: NeutralIdentityKeys.self, forKey: .target)
+            _ = try identity.decode(String.self, forKey: .camera)
+            _ = try identity.decode(String.self, forKey: .mode)
+            guard !identity.contains(.name), !identity.contains(.metadata) else {
+                throw LabError.invalid("Schema 1 requires legacy identity fields")
+            }
+        }
+        schemaVersion = 2
+        id = try c.decode(String.self, forKey: .id)
+        target = try c.decode(ModelIdentity.self, forKey: .target)
+        source = try c.decode(SourceDescriptor.self, forKey: .source)
+        inputRecipe = try c.decodeIfPresent(InputRecipe.self, forKey: .inputRecipe)
+        working = try c.decode(WorkingImageContract.self, forKey: .working)
+        samples = try c.decode([CalibrationSample].self, forKey: .samples)
+        validationPolicy = try c.decode(ValidationPolicy.self, forKey: .validationPolicy)
+        authorizationSource = try c.decodeIfPresent(String.self, forKey: .authorizationSource)
+        inputQualificationAxes = try c.decodeIfPresent([ConditionAxis].self, forKey: .inputQualificationAxes)
+        if version == 1 { originalFormatDigest = Digest.data(try JSON.encode(LegacyProject(from: decoder))) }
+    }
+    public func encode(to encoder: Encoder) throws {
+        guard schemaVersion == 2 else { throw LabError.invalid("Only schema 2 can be encoded") }
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(2, forKey: .schemaVersion)
+        try c.encode(id, forKey: .id)
+        try c.encode(target, forKey: .target)
+        try c.encode(source, forKey: .source)
+        try c.encodeIfPresent(inputRecipe, forKey: .inputRecipe)
+        try c.encode(working, forKey: .working)
+        try c.encode(samples, forKey: .samples)
+        try c.encode(validationPolicy, forKey: .validationPolicy)
+        try c.encodeIfPresent(authorizationSource, forKey: .authorizationSource)
+        try c.encodeIfPresent(inputQualificationAxes, forKey: .inputQualificationAxes)
+    }
+
 }

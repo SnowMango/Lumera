@@ -117,7 +117,7 @@ struct RenderHarness {
         }
         return t
     }
-    func encode(_ input:MTLTexture,_ style:PreparedCameraStyle,_ request:RenderRequest) throws -> MTLTexture {
+    func encode(_ input:MTLTexture,_ style:PreparedResolvedStyle,_ request:RenderRequest) throws -> MTLTexture {
         let cmd=try XCTUnwrap(queue.makeCommandBuffer()),done=DispatchSemaphore(value:0)
         let output=try encoder.encode(input,style:style,request:request,commandBuffer:cmd)
         let snapshot = output === input ? input : try Self.ownedCopy(output, commandBuffer: cmd)

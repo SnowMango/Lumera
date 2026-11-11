@@ -3,15 +3,15 @@ import ImagingCore
 @testable import ImagingRuntime
 final class DecisionReplayTests: XCTestCase {
     let recipe = String(repeating:"a",count:64)
-    func model() throws -> CompiledCameraModel {
-        var m = CameraModel(identity:.init(id:"test",camera:"test",mode:"test"))
+    func model() throws -> CompiledStyleModel {
+        var m = StyleModel(identity:.init(id:"test",name: "test"))
         m.observations.features = [.init(id:"mean",statistic:.meanGreen)]
         m.responses = [.init(target:"glow.amount",expression:.singleAxis(axis:.feature("mean"),nodes:[.init(0,.scalar(0)),.init(1,.scalar(1))],boundary:.clamp))]
         m.adaptation.rules = [.init(target:"glow.amount",timeConstantSeconds:1)]
         m.edits.overrideTargets = ["glow.amount"]
-        return try CameraModelCompiler.compile(m)
+        return try StyleModelCompiler.compile(m)
     }
-    func record(_ m:CompiledCameraModel,_ t:Double = 0,_ i:UInt64 = 0,_ value:Double = 0) throws -> DecisionRecord {
+    func record(_ m:CompiledStyleModel,_ t:Double = 0,_ i:UInt64 = 0,_ value:Double = 0) throws -> DecisionRecord {
         let stamp = FrameStamp(streamID:"s",generation:1,index:i,presentationTime:t,duration:0.1)
         var o = FrameObservations(stamp:stamp,sourceID:"source",calibrationID:"cal",featureDigest:m.featureDigest); o.features = [.init(id:"mean",value:value)]
         return .init(modelDigest:m.identity,inputRecipeDigest:recipe,resourceDigest:Digest.data(try JSON.encode(m.definition.appearance.resources)),context:.init(evaluationStamp:stamp,observations:o),seed:UInt32(i+10),currentInput:.init(stamp:stamp,inputID:"input-\(i)",sourceID:o.sourceID,calibrationID:o.calibrationID,effectiveRecipeDigest:recipe,captureConditions:o.captureConditions))
@@ -41,7 +41,7 @@ final class DecisionReplayTests: XCTestCase {
         records[1].edits.overrides = [.init(target:"glow.amount",value:.scalar(0.8))]
         var state: AdaptationState?
         for (r,actual) in zip(records,try DecisionReplay.evaluate(records,model:m)) {
-            let a = try CameraModelEvaluator.evaluate(m,context:r.context)
+            let a = try StyleModelEvaluator.evaluate(m,context:r.context)
             let t = try AdaptationReducer.reduce(a,state:state,stamp:r.context.evaluationStamp,event:r.event,policy:m.definition.adaptation)
             let e = try EditResolver.resolve(r.edits,automatic:t.controls,model:m)
             state = t.state
@@ -63,7 +63,7 @@ final class DecisionReplayTests: XCTestCase {
         definition.responses[0].missing = .constant(.scalar(0.1))
         definition.adaptation.rules[0].maximumMissingSeconds = 1
         definition.adaptation.rules[0].expired = .constant(.scalar(0.2))
-        let m = try CameraModelCompiler.compile(definition)
+        let m = try StyleModelCompiler.compile(definition)
         var records = try [record(m),record(m,0.5,1),record(m,2,2)]
         for i in records.indices { records[i].context.observations.features[0].value = nil }
         let missing = try DecisionReplay.evaluate(records,model:m)
@@ -82,7 +82,7 @@ final class DecisionReplayTests: XCTestCase {
         var definition = try model().definition
         definition.observations.validity.maxAgeFrames = 2; definition.observations.validity.maxAgeSeconds = 1
         definition.observations.validity.sourceChangeTolerances = [.init(axis:.iso,maxCoordinateDelta:0.1)]
-        let m = try CameraModelCompiler.compile(definition)
+        let m = try StyleModelCompiler.compile(definition)
         var r = try record(m,0.5,1,0.5)
         r.context.observations.stamp = try record(m).context.evaluationStamp
         r.context.observations.captureConditions.iso = 100
@@ -112,7 +112,7 @@ final class DecisionReplayTests: XCTestCase {
         definition.observations.validity.maxAgeSeconds = 1
         definition.responses[0].expression = .singleAxis(axis:.source(.iso),nodes:[.init(100,.scalar(0)),.init(400,.scalar(1))],boundary:.clamp)
         definition.responses[0].missing = .constant(.scalar(0.25))
-        let m = try CameraModelCompiler.compile(definition)
+        let m = try StyleModelCompiler.compile(definition)
         let sameFrame = try record(m)
         XCTAssertNil(sameFrame.context.observations.captureConditions.iso)
         let result = try DecisionReplay.step(sameFrame,model:m)
@@ -125,7 +125,7 @@ final class DecisionReplayTests: XCTestCase {
     func testAutomaticAndTemporalDiagnosticsAppearOnceInFinalList() throws {
         var definition = try model().definition
         definition.responses[0].missing = .constant(.scalar(0.25))
-        let m = try CameraModelCompiler.compile(definition)
+        let m = try StyleModelCompiler.compile(definition)
         var r = try record(m)
         r.context.observations.features[0].value = nil
         r.event = .reset(.sceneCut)
@@ -138,7 +138,7 @@ final class DecisionReplayTests: XCTestCase {
     func testExplicitLockSurvivesMissingRejectWithoutRefreshingValidity() throws {
         var definition = try model().definition
         definition.responses[0].missing = .reject
-        let m = try CameraModelCompiler.compile(definition)
+        let m = try StyleModelCompiler.compile(definition)
         let lock = ControlOverride(target:"glow.amount",value:.scalar(0.7))
         var first = try record(m); first.context.observations.features[0].value = nil; first.event = .lock([lock])
         let initial = try DecisionReplay.step(first,model:m)
@@ -162,12 +162,12 @@ final class DecisionReplayTests: XCTestCase {
         var definition = try model().definition; definition.responses[0].missing = .reject
         let lock = ControlOverride(target:"glow.amount",value:.scalar(0.7))
         var second = definition.responses[0]; second.target = "color.exposureEV"; definition.responses.append(second)
-        let twoOwners = try CameraModelCompiler.compile(definition)
+        let twoOwners = try StyleModelCompiler.compile(definition)
         var missing = try record(twoOwners); missing.context.observations.features[0].value = nil; missing.event = .lock([lock])
         XCTAssertThrowsError(try DecisionReplay.step(missing,model:twoOwners))
         definition.responses.removeLast()
         definition.responses[0].expression = .singleAxis(axis:.feature("mean"),nodes:[.init(0,.scalar(0)),.init(1,.scalar(1))],boundary:.reject)
-        let m = try CameraModelCompiler.compile(definition)
+        let m = try StyleModelCompiler.compile(definition)
         var outside = try record(m,0,0,2); outside.event = .lock([lock])
         XCTAssertThrowsError(try DecisionReplay.step(outside,model:m))
         outside.context.observations.featureDigest = "wrong"
@@ -178,9 +178,9 @@ final class DecisionReplayTests: XCTestCase {
     func testEvaluatorValidatesExplicitLockContextEvenWithValidObservations() throws {
         let m = try model(); let context = try record(m).context
         let lock = ControlOverride(target:"glow.amount",value:.scalar(0.7))
-        XCTAssertThrowsError(try CameraModelEvaluator.evaluate(m,context:context,lockedControls:[lock,lock]))
-        XCTAssertThrowsError(try CameraModelEvaluator.evaluate(m,context:context,lockedControls:[.init(target:"color.exposureEV",value:.scalar(0))]))
-        XCTAssertThrowsError(try CameraModelEvaluator.evaluate(m,context:context,lockedControls:[.init(target:"glow.amount",value:.scalar(.nan))]))
-        XCTAssertEqual(try CameraModelEvaluator.evaluate(m,context:context,lockedControls:[lock]).parameters.glow.amount,0)
+        XCTAssertThrowsError(try StyleModelEvaluator.evaluate(m,context:context,lockedControls:[lock,lock]))
+        XCTAssertThrowsError(try StyleModelEvaluator.evaluate(m,context:context,lockedControls:[.init(target:"color.exposureEV",value:.scalar(0))]))
+        XCTAssertThrowsError(try StyleModelEvaluator.evaluate(m,context:context,lockedControls:[.init(target:"glow.amount",value:.scalar(.nan))]))
+        XCTAssertEqual(try StyleModelEvaluator.evaluate(m,context:context,lockedControls:[lock]).parameters.glow.amount,0)
     }
 }

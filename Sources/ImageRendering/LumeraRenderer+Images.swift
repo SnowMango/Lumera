@@ -40,7 +40,7 @@ extension LumeraRenderer {
     ///   Cancellation after GPU submission waits for safe completion before returning an error.
     public func render(_ image: CIImage, metadata: [String: Any]? = nil,
                        orientation: CGImagePropertyOrientation? = nil,
-                       style: PreparedCameraStyle, options: RenderOptions = .init(),
+                       style: PreparedResolvedStyle, options: RenderOptions = .init(),
                        correction: PreparedDeviceCorrection? = nil) async throws -> CIImage {
         try Task.checkCancellation()
         let (normalized, bounds, sourceProperties) = try normalizedSource(image, metadata: metadata, orientation: orientation, dynamicRange: options.dynamicRange)
@@ -103,7 +103,7 @@ extension LumeraRenderer {
     /// - Throws: Unsupported input layout/color, invalid options, allocation/GPU errors or cancellation.
     public func render(_ buffer: CVPixelBuffer, metadata: [String: Any]? = nil,
                        orientation: CGImagePropertyOrientation? = nil,
-                       style: PreparedCameraStyle, options: RenderOptions = .init(),
+                       style: PreparedResolvedStyle, options: RenderOptions = .init(),
                        correction: PreparedDeviceCorrection? = nil) async throws -> CVPixelBuffer {
         try Task.checkCancellation()
         let decoded = try interpretedBuffer(buffer, metadata: metadata, orientation: orientation)

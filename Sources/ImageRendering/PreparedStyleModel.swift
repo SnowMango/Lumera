@@ -3,15 +3,15 @@ import Metal
 import ImagingCore
 
 /// 已校验并准备到设备上的模型资源，持有用于分配帧槽和驻留预算的账本。
-public final class PreparedCameraModel: @unchecked Sendable {
-    public let compiled: CompiledCameraModel
+public final class PreparedStyleModel: @unchecked Sendable {
+    public let compiled: CompiledStyleModel
     public let execution: ExecutionProfile
     /// 外观资源描述的摘要，用于标记输出采用的资源版本。
     public let resourceDigest: String
     public let resources: ModelResourceSet
     package let renderer: LumeraRenderer
-    let base: PreparedCameraStyle
-    let lutStyles: [String: PreparedCameraStyle]
+    let base: PreparedResolvedStyle
+    let lutStyles: [String: PreparedResolvedStyle]
     let budget: ModelFrameBudget
     private let resourceLease: ModelResourceLease?
     private let inputLock = NSLock()
@@ -90,9 +90,9 @@ public final class PreparedCameraModel: @unchecked Sendable {
     }
 
     public var preparationStatistics: StylePreparationStatistics { base.preparationStatistics }
-    init(compiled: CompiledCameraModel, execution: ExecutionProfile, resources: ModelResourceSet,
-         resourceDigest: String, renderer: LumeraRenderer, base: PreparedCameraStyle,
-         lutStyles: [String: PreparedCameraStyle], budget: ModelFrameBudget, resourceLease: ModelResourceLease?) {
+    init(compiled: CompiledStyleModel, execution: ExecutionProfile, resources: ModelResourceSet,
+         resourceDigest: String, renderer: LumeraRenderer, base: PreparedResolvedStyle,
+         lutStyles: [String: PreparedResolvedStyle], budget: ModelFrameBudget, resourceLease: ModelResourceLease?) {
         self.compiled = compiled; self.execution = execution; self.resources = resources; self.resourceDigest = resourceDigest
         self.renderer = renderer; self.base = base; self.lutStyles = lutStyles
         self.budget = budget; self.resourceLease = resourceLease
@@ -106,7 +106,7 @@ public final class ModelPreparer {
 
     /// Device-independent runtime preflight for native authoring. This does not
     /// replace resource-byte, execution-budget or GPU validation during prepare.
-    public static func validateModelContract(_ model: CompiledCameraModel) throws {
+    public static func validateModelContract(_ model: CompiledStyleModel) throws {
         guard model.definition.compatibility.requiredCapabilities.isEmpty else {
             throw LabError.unsupported("当前运行管线不支持声明的扩展能力")
         }
@@ -129,20 +129,20 @@ public final class ModelPreparer {
     private let renderer: LumeraRenderer
     public init(renderer: LumeraRenderer) { self.renderer = renderer }
     /// 以指定执行配置准备独立的模型预算和 GPU 资源。
-    public func prepare(_ model: CompiledCameraModel, resources: ModelResourceSet, execution: ExecutionProfile) throws -> PreparedCameraModel {
+    public func prepare(_ model: CompiledStyleModel, resources: ModelResourceSet, execution: ExecutionProfile) throws -> PreparedStyleModel {
         try prepare(model, resources: resources, execution: execution, sharing: nil)
     }
     /// Prepare a model for bounded region work. Full-frame admission still checks complete frame bytes.
-    public func prepareStreaming(_ model: CompiledCameraModel, resources: ModelResourceSet, execution: ExecutionProfile) throws -> PreparedCameraModel {
+    public func prepareStreaming(_ model: CompiledStyleModel, resources: ModelResourceSet, execution: ExecutionProfile) throws -> PreparedStyleModel {
         try prepare(model, resources: resources, execution: execution, sharing: nil, streaming: true)
     }
     /// 用不同执行配置准备变体，沿用原模型的总内存预算与帧槽。
-    public func prepareVariant(of original: PreparedCameraModel, execution: ExecutionProfile, streaming: Bool = false) throws -> PreparedCameraModel {
+    public func prepareVariant(of original: PreparedStyleModel, execution: ExecutionProfile, streaming: Bool = false) throws -> PreparedStyleModel {
         guard execution.budget == original.execution.budget else { throw LabError.invalid("An execution variant cannot replace its model budget") }
         return try prepare(original.compiled, resources: original.resources, execution: execution, sharing: original.budget, streaming: streaming)
     }
-    private func prepare(_ model: CompiledCameraModel, resources: ModelResourceSet, execution: ExecutionProfile,
-                         sharing originalBudget: ModelFrameBudget?, streaming: Bool = false) throws -> PreparedCameraModel {
+    private func prepare(_ model: CompiledStyleModel, resources: ModelResourceSet, execution: ExecutionProfile,
+                         sharing originalBudget: ModelFrameBudget?, streaming: Bool = false) throws -> PreparedStyleModel {
         try execution.validate()
         try Self.validateModelContract(model)
         guard renderer.imageInputFormat == (execution.precision == .float16 ? .rgba16Float : .rgba32Float),
@@ -190,7 +190,7 @@ public final class ModelPreparer {
         // Even zero-amplitude effects can be activated by a response or permitted edit.
         if parameters.halation.enabled { _ = base.executionPlan.halation(for: parameters.halation) }
         if parameters.grain.enabled { _ = base.executionPlan.grain(for: parameters.grain) }
-        var lutStyles: [String: PreparedCameraStyle] = [:]
+        var lutStyles: [String: PreparedResolvedStyle] = [:]
         var cubes: [String: CubeLUT] = [:]
         for descriptor in model.definition.appearance.resources {
             if descriptor.role == .toneCurve {
@@ -235,7 +235,7 @@ public final class ModelPreparer {
                 }
             } } }
         }
-        let prepared = try PreparedCameraModel(compiled: model, execution: execution, resources: resources,
+        let prepared = try PreparedStyleModel(compiled: model, execution: execution, resources: resources,
             resourceDigest: Digest.data(JSON.encode(model.definition.appearance.resources)), renderer: renderer,
             base: base, lutStyles: lutStyles, budget: budget, resourceLease: resourceLease)
         resourceLease?.finishPreparation()
@@ -247,12 +247,12 @@ public final class ModelPreparer {
 public final class FrameReservation: @unchecked Sendable {
     /// 执行配置副本，预算收窄到当前帧实际取得的份额。
     public let execution: ExecutionProfile
-    let model: PreparedCameraModel
+    let model: PreparedStyleModel
     let lease: FrameBudgetLease
     let residentInput: PhotoInputResidency?
     private let lock = NSLock()
     private var issued = false
-    init(model: PreparedCameraModel, residentInput: PhotoInputResidency? = nil, sourceBytes: Int = 0) throws {
+    init(model: PreparedStyleModel, residentInput: PhotoInputResidency? = nil, sourceBytes: Int = 0) throws {
         self.model = model; self.residentInput = residentInput; lease = try model.budget.acquire(retainedInputBytes: 0)
         guard sourceBytes >= 0, sourceBytes < lease.allowance else {
             throw LabError.invalid("Source backing exceeds the admitted frame memory allowance")

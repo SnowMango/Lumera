@@ -43,10 +43,10 @@ extension BoundedPhotoTests {
     func testStreamingRejectsFullFrameProviderRequestsAndPreservesStatistics() async throws {
         let renderer = try LumeraRenderer()
         let provider = try SyntheticRegionProvider(width: 701, height: 509, renderer: renderer)
-        var definition = CameraModel(identity: .init(id: "stream", camera: "fixture", mode: "manual"))
+        var definition = StyleModel(identity: .init(id: "stream", name: "manual"))
         definition.observations.features = [.init(id: "red", statistic: .meanRed)]
         let execution = ExecutionProfile(width: 701, height: 509, budget: .init(maxInFlightFrames: 1, maxResidentBytes: 8 * 1024 * 1024))
-        let model = try ModelPreparer(renderer: renderer).prepareStreaming(CameraModelCompiler.compile(definition), resources: .init(), execution: execution)
+        let model = try ModelPreparer(renderer: renderer).prepareStreaming(StyleModelCompiler.compile(definition), resources: .init(), execution: execution)
         XCTAssertThrowsError(try model.reserveFrame())
         let stamp = FrameStamp(streamID: "stream", generation: 0, index: 1, presentationTime: 0, duration: 1)
         var count = 0
@@ -65,9 +65,9 @@ extension BoundedPhotoTests {
         for (w,h) in [(4000,3000),(8000,6000)] {
             let renderer = try LumeraRenderer()
             let provider = try SyntheticRegionProvider(width: w, height: h, renderer: renderer)
-            let definition = CameraModel(identity: .init(id: "large-photo", camera: "fixture", mode: "manual"))
+            let definition = StyleModel(identity: .init(id: "large-photo", name: "manual"))
             let execution = ExecutionProfile(width: w, height: h, budget: .init(maxInFlightFrames: 1, maxResidentBytes: 16 * 1024 * 1024))
-            let model = try ModelPreparer(renderer: renderer).prepareStreaming(CameraModelCompiler.compile(definition), resources: .init(), execution: execution)
+            let model = try ModelPreparer(renderer: renderer).prepareStreaming(StyleModelCompiler.compile(definition), resources: .init(), execution: execution)
             var pixels = 0
             let result = try await renderer.streamPhoto(provider, model: model,
                 stamp: .init(streamID: "large-photo", generation: 0, index: 1, presentationTime: 0, duration: 1)) { tile in pixels += Int(tile.core.width * tile.core.height) }
@@ -101,9 +101,9 @@ extension BoundedPhotoTests {
     func testSinkFailureAndCancellationReleaseReservation() async throws {
         let renderer = try LumeraRenderer()
         let provider = try SyntheticRegionProvider(width: 701, height: 509, renderer: renderer)
-        let definition = CameraModel(identity: .init(id: "cancel", camera: "fixture", mode: "manual"))
+        let definition = StyleModel(identity: .init(id: "cancel", name: "manual"))
         let execution = ExecutionProfile(width: 701, height: 509, budget: .init(maxInFlightFrames: 1, maxResidentBytes: 8 * 1024 * 1024))
-        let model = try ModelPreparer(renderer: renderer).prepareStreaming(CameraModelCompiler.compile(definition), resources: .init(), execution: execution)
+        let model = try ModelPreparer(renderer: renderer).prepareStreaming(StyleModelCompiler.compile(definition), resources: .init(), execution: execution)
         let stamp = FrameStamp(streamID: "cancel", generation: 0, index: 1, presentationTime: 0, duration: 1)
         for _ in 0..<2 {
             do { _ = try await renderer.streamPhoto(provider, model: model, stamp: stamp) { _ in throw CancellationError() }; XCTFail("Must abort") }
@@ -165,9 +165,9 @@ extension BoundedPhotoTests {
         let renderer = try LumeraRenderer()
         let a = try SyntheticRegionProvider(width: 701, height: 509, renderer: renderer)
         let b = try SyntheticRegionProvider(width: 701, height: 509, renderer: renderer)
-        let definition = CameraModel(identity: .init(id: "concurrent", camera: "fixture", mode: "manual"))
+        let definition = StyleModel(identity: .init(id: "concurrent", name: "manual"))
         let execution = ExecutionProfile(width: 701, height: 509, budget: .init(maxInFlightFrames: 2, maxResidentBytes: 16 * 1024 * 1024))
-        let model = try ModelPreparer(renderer: renderer).prepareStreaming(CameraModelCompiler.compile(definition), resources: .init(), execution: execution)
+        let model = try ModelPreparer(renderer: renderer).prepareStreaming(StyleModelCompiler.compile(definition), resources: .init(), execution: execution)
         let stamp = FrameStamp(streamID: "concurrent", generation: 0, index: 1, presentationTime: 0, duration: 1)
         async let first = renderer.streamPhoto(a, model: model, stamp: stamp) { _ in await Task.yield() }
         async let second = renderer.streamPhoto(b, model: model, stamp: stamp) { _ in await Task.yield() }

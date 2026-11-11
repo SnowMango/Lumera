@@ -12,7 +12,7 @@ public final class InputNormalizer: @unchecked Sendable {
         let resources: ModelResourceSet
         let identity: String
         let correction: PreparedDeviceCorrection?
-        let tone: PreparedCameraStyle
+        let tone: PreparedResolvedStyle
         let resourceBytes: Int
     }
     private var cache: Cached?

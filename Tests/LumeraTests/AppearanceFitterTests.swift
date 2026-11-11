@@ -109,15 +109,15 @@ final class AppearanceFitterTests: XCTestCase {
         XCTAssertTrue(fit.unresolved.contains { $0.contains("forward") && $0.contains("matrix") })
     }
     func testBaselineBindingRejectsTargetAndLUTSemanticMismatch() throws {
-        let target = TargetIdentity(id:"target",camera:"synthetic",mode:"SDR")
-        var model = CameraModel(identity:target)
+        let target = ModelIdentity(id:"target",name: "SDR")
+        var model = StyleModel(identity:target)
         let asset = try LUTSampleGrid.identity(dimension:17).asset()
         var descriptor = ModelResourceDescriptor(id:"fixed",sha256:asset.sha256,dimension:17)
         model.appearance.resources = [descriptor]
         model.appearance.lutWeights = [.init(resourceID:"fixed",weight:1)]
         let resources = try ModelResourceSet(luts:["fixed":asset])
         XCTAssertEqual(try AppearanceFitter.validateBaseline(model,target:target,resources:resources),asset.sha256)
-        var other = target; other.mode = "another mode"
+        var other = target; other.name = "another mode"
         XCTAssertThrowsError(try AppearanceFitter.validateBaseline(model,target:other,resources:resources))
         descriptor.inputDomain = .linearSRGB; model.appearance.resources = [descriptor]
         XCTAssertThrowsError(try AppearanceFitter.validateBaseline(model,target:target,resources:resources))
@@ -127,7 +127,7 @@ final class AppearanceFitterTests: XCTestCase {
         XCTAssertThrowsError(try AppearanceFitter.validateBaseline(model,target:target,resources:resources))
     }
     func testGeneratedAppearanceKeepsNeutralEditResourceReachable() throws {
-        var model = CameraModel(identity:.init(id:"target",camera:"synthetic",mode:"SDR"))
+        var model = StyleModel(identity:.init(id:"target",name: "SDR"))
         let neutral = try LUTSampleGrid.identity(dimension:17).asset(name:"neutral")
         let descriptor = ModelResourceDescriptor(id:"neutral",sha256:neutral.sha256,dimension:17)
         model.appearance.resources = [descriptor]
@@ -187,7 +187,7 @@ final class AppearanceFitterTests: XCTestCase {
             let file=CalibrationFile(path:name,sha256:Digest.data(bytes),byteCount:bytes.count)
             samples.append(.init(id:name,input:file,target:file,sceneID:name,split:split))
         }
-        let identity=TargetIdentity(id:"target",camera:"synthetic",mode:"SDR")
+        let identity=ModelIdentity(id:"target",name: "SDR")
         let project=CalibrationProject(id:"fixture",target:identity,source:source,inputRecipe:recipe,working:working,samples:samples)
         let dataset=try DatasetValidator(baseDirectory:directory).validate(project)
         try FileManager.default.removeItem(at:directory.appendingPathComponent(samples[2].input.path))
@@ -245,7 +245,7 @@ final class AppearanceFitterTests: XCTestCase {
             var sourceConditions=CaptureConditions(),targetConditions=CaptureConditions()
             sourceConditions.iso=sourceContradiction ? 400:100;targetConditions.iso=sourceContradiction ? 100:400
             let sample=CalibrationSample(id:"sample",input:file,target:file,sceneID:"scene",split:.train,sourceConditions:sourceConditions,targetConditions:targetConditions)
-            let project=CalibrationProject(id:"metadata",target:.init(id:"target",camera:"synthetic",mode:"SDR"),source:source,inputRecipe:recipe,working:working,samples:[sample])
+            let project=CalibrationProject(id:"metadata",target:.init(id:"target",name: "SDR"),source:source,inputRecipe:recipe,working:working,samples:[sample])
             let dataset=try DatasetValidator(baseDirectory:directory).validate(project)
             do {
                 _ = try await loader.load(dataset,calibration:calibration,resources:ModelResourceSet(),maximumSamples:16)
@@ -272,7 +272,7 @@ final class AppearanceFitterTests: XCTestCase {
         var source=SourceDescriptor(id:"source",path:.processedPhoto);source.recipeID=recipe.id
         let targetRecipe=InputRecipe(id:"target",backend:"coreImage",version:"1",decodedRendition:.baseImage)
         var targetSource=SourceDescriptor(id:"target",path:.processedPhoto);targetSource.recipeID=targetRecipe.id
-        let target=TargetIdentity(id:"target",camera:"synthetic",mode:"SDR")
+        let target=ModelIdentity(id:"target",name: "SDR")
         let project=CalibrationProject(id:"vertical",target:target,source:source,inputRecipe:recipe,working:working,samples:[masked,labeled])
         let dataset=try DatasetValidator(baseDirectory:directory).validate(project)
         let calibration=try InputCalibrationSolver.identity(source:source,effectiveRecipe:.init(declared:recipe,backendVersion:ProcessInfo.processInfo.operatingSystemVersionString),reference:working)
@@ -308,7 +308,7 @@ final class AppearanceFitterTests: XCTestCase {
             let file=CalibrationFile(path:name,sha256:Digest.data(bytes),byteCount:bytes.count)
             samples.append(.init(id:name,input:file,target:file,sceneID:name,split:split))
         }
-        let project=CalibrationProject(id:"binding",target:.init(id:"target",camera:"synthetic",mode:"SDR"),source:source,inputRecipe:recipe,working:working,samples:samples)
+        let project=CalibrationProject(id:"binding",target:.init(id:"target",name: "SDR"),source:source,inputRecipe:recipe,working:working,samples:samples)
         let dataset=try DatasetValidator(baseDirectory:directory).validate(project)
         let calibration=try InputCalibrationSolver.identity(source:source,effectiveRecipe:.init(declared:recipe,backendVersion:"fixture"),reference:working)
         func loaded(_ project:String?,_ ids:[String]) throws -> LoadedAppearanceDataset {

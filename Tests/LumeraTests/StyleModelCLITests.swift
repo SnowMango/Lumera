@@ -3,9 +3,9 @@ import Foundation
 import ImagingCore
 import ImageAnalysis
 
-final class CameraModelCLITests: XCTestCase {
+final class StyleModelCLITests: XCTestCase {
     struct Settings: Encodable {
-        var model: CameraModel
+        var model: StyleModel
         let execution: ExecutionProfile
         var resources: [String:String] = [:]
         let targetSource: SourceDescriptor
@@ -15,14 +15,14 @@ final class CameraModelCLITests: XCTestCase {
         let sibling = Bundle(for: Self.self).bundleURL.deletingLastPathComponent().appendingPathComponent("ccdlab")
         let process = Process()
         process.executableURL = ProcessInfo.processInfo.environment["CCDCLI_BINARY"].map { URL(fileURLWithPath: $0) } ?? sibling
-        process.arguments = ["camera-model"] + args
+        process.arguments = ["model"] + args
         process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
         try process.run(); process.waitUntilExit(); return process.terminationStatus
     }
     func setup(_ directory: URL) throws -> (CalibrationProject, Settings, URL, URL) {
         var source = SourceDescriptor(id: "input", path: .processedPhoto); source.recipeID = "ci"
         let recipe = InputRecipe(id: "ci", backend: "coreImage", version: "1", decodedRendition: .baseImage)
-        let p = CalibrationProject(id: "fixture", target: .init(id: "manual", camera: "synthetic", mode: "test"), source: source,
+        let p = CalibrationProject(id: "fixture", target: .init(id: "manual", name: "test"), source: source,
             inputRecipe: recipe, working: .init(referenceRenditionID: "fixture"), samples: [])
         let settings = Settings(model: .init(identity: p.target), execution: .init(width: 4, height: 4,
             budget: .init(maxInFlightFrames: 1, maxResidentBytes: 32 * 1024 * 1024)), targetSource: source, targetRecipe: recipe)
@@ -37,7 +37,7 @@ final class CameraModelCLITests: XCTestCase {
         let (_,_,project,settings) = try setup(directory), output = directory.appendingPathComponent("package.json")
         let build = ["build", "--project", project.path, "--settings", settings.path, "--output", output.path]
         XCTAssertEqual(try run(build), 0)
-        let package = try JSONDecoder().decode(CameraModelPackage.self, from: Data(contentsOf: output))
+        let package = try JSONDecoder().decode(StyleModelPackage.self, from: Data(contentsOf: output))
         XCTAssertEqual(package.manifest.derivation, .manual)
         XCTAssertNoThrow(try package.load())
         XCTAssertNotEqual(try run(build), 0)

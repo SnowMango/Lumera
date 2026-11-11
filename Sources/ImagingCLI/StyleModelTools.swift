@@ -8,9 +8,9 @@ import ImagingRuntime
 
 /// File paths and GPU creation stay in the CLI adapter, never in Core authoring math.
 /// CLI 文件适配配置；路径留在命令层，传给拟合器/渲染器的是已校验资源值。
-private struct CameraToolSettings: Codable {
+private struct ModelToolSettings: Codable {
     enum CalibrationMode: String, Codable { case provided, identityReference, fitReference }
-    let model: CameraModel
+    let model: StyleModel
     let execution: ExecutionProfile
     let resources: [String: String]?
     let inputResources: [String: String]?
@@ -27,7 +27,7 @@ private struct CameraToolSettings: Codable {
     let grayRegions: [String: [Region]]?
     let capturedAuthorizationReference: String?
 }
-private struct CameraFitSummary: Encodable {
+private struct ModelFitSummary: Encodable {
     let algorithm: String
     let packageDigest: String
     let converged: Bool
@@ -36,7 +36,7 @@ private struct CameraFitSummary: Encodable {
     let unresolved: [String]
     let options: AppearanceFitOptions
 }
-private struct CameraConditionFitSummary: Encodable {
+private struct ModelConditionFitSummary: Encodable {
     let algorithm: String
     let packageDigest: String
     let trainResidual: Double?
@@ -49,27 +49,27 @@ private struct CameraConditionFitSummary: Encodable {
     let consumedSampleIDs: [String]
     let measurementDigests: [String]
 }
-private struct CameraReplayReport: Encodable {
+private struct ModelReplayReport: Encodable {
     let mode: String
     let packageDigest: String
     let recordsDigest: String
     let decisions: [FrameDecision]
 }
 
-/// 相机模型的构建、前向拟合、独立验证和纯决策回放入口。
+/// 风格模型的构建、前向拟合、独立验证和纯决策回放入口。
 /// 文件读取与覆盖保护集中在此，模型编译和拟合仍调用各自模块的共享实现。
-enum CameraModelTools {
-    /// 参数解析与输出预检完成后进入对应流程；候选包生成不等于机型效果验收通过。
+enum StyleModelTools {
+    /// 参数解析与输出预检完成后进入对应流程；候选包生成不等于效果验证验收通过。
     static func run(_ args: [String]) async throws {
         guard let command = args.first, ["fit", "build", "validate", "replay"].contains(command) else {
-            throw LabError.invalid("Expected camera-model fit|build|validate|replay")
+            throw LabError.invalid("Expected model fit|build|validate|replay")
         }
         var values = [String: String](), force = false, i = 1
         while i < args.count {
             let key = args[i]
             if key == "--force" { guard !force else { throw LabError.invalid("Duplicate --force") }; force = true; i += 1; continue }
             guard ["--project", "--settings", "--model", "--records", "--output", "--fit-report", "--mode", "--condition-design"].contains(key),
-                  values[key] == nil, i + 1 < args.count, !args[i+1].hasPrefix("--") else { throw LabError.invalid("Unknown or duplicated camera-model argument: \(key)") }
+                  values[key] == nil, i + 1 < args.count, !args[i+1].hasPrefix("--") else { throw LabError.invalid("Unknown or duplicated model argument: \(key)") }
             values[key] = args[i+1]; i += 2
         }
         func url(_ key: String) throws -> URL {
@@ -86,20 +86,20 @@ enum CameraModelTools {
             guard Set(values.keys).isSubset(of: ["--model", "--records", "--output", "--mode"]), values["--mode"] == nil || values["--mode"] == "automatic" else {
                 throw LabError.invalid("Replay mode is automatic; frozen decisions are FrameDecision values, not automatic replay records")
             }
-            let package = try JSONDecoder().decode(CameraModelPackage.self, from: boundedRead(url("--model")))
+            let package = try JSONDecoder().decode(StyleModelPackage.self, from: boundedRead(url("--model")))
             let loaded = try package.load(), recordBytes = try boundedRead(url("--records"))
             let records = try JSONDecoder().decode([DecisionRecord].self, from: recordBytes)
             // 包级配方/校正身份先校验，随后纯 Runtime 回放只处理可重建决策。
             try package.validateReplayInputs(records)
             let decisions = try DecisionReplay.evaluate(records, model: loaded.compiled)
             try protect(output, inputs: protected)
-            try SafeFiles.write(JSON.encode(CameraReplayReport(mode: "automatic", packageDigest: package.digest(), recordsDigest: Digest.data(recordBytes), decisions: decisions)), to: output, overwrite: force)
-            print("Replayed \(decisions.count) decisions; no camera qualification granted")
+            try SafeFiles.write(JSON.encode(ModelReplayReport(mode: "automatic", packageDigest: package.digest(), recordsDigest: Digest.data(recordBytes), decisions: decisions)), to: output, overwrite: force)
+            print("Replayed \(decisions.count) decisions; no measured qualification granted")
             return
         }
         let projectURL = try url("--project"), settingsURL = try url("--settings")
         let project = try JSONDecoder().decode(CalibrationProject.self, from: boundedRead(projectURL))
-        let settings = try JSONDecoder().decode(CameraToolSettings.self, from: boundedRead(settingsURL))
+        let settings = try JSONDecoder().decode(ModelToolSettings.self, from: boundedRead(settingsURL))
         try settings.execution.validate()
         let validator = DatasetValidator(baseDirectory: projectURL.deletingLastPathComponent())
         let dataset = try validator.validate(project)
@@ -116,7 +116,7 @@ enum CameraModelTools {
         let renderer = try LumeraRenderer(device: device, precision: .init(settings.execution.precision))
         if command == "validate" {
             guard Set(values.keys).isSubset(of: ["--project", "--settings", "--model", "--output"]) else { throw LabError.invalid("Unexpected validation option") }
-            let package = try JSONDecoder().decode(CameraModelPackage.self, from: boundedRead(url("--model")))
+            let package = try JSONDecoder().decode(StyleModelPackage.self, from: boundedRead(url("--model")))
             guard let source = settings.targetSource, let recipe = settings.targetRecipe else { throw LabError.invalid("Validation requires explicit target source/recipe") }
             let provenance: CalibrationEvidenceProvenance = settings.capturedAuthorizationReference.map { .captured(authorizationReference: $0) } ?? .development
             let evaluator = try ModelValidator(renderer: renderer, targetSource: source, targetRecipe: recipe, provenance: provenance)
@@ -165,15 +165,15 @@ enum CameraModelTools {
             let design = try JSONDecoder().decode(ConditionFitDesign.self, from: boundedRead(url("--condition-design")))
             let options = settings.conditionFitOptions ?? FitOptions()
             let appearanceOptions = settings.appearanceOptions ?? AppearanceFitOptions()
-            let scorer = try B7CameraResponseScorer(renderer: renderer, working: project.working, execution: settings.execution, resources: resources)
-            let fit = try await CameraResponseFitter.fit(dataset, baseline: settings.model, calibration: calibration, resources: resources,
+            let scorer = try B7ResponseScorer(renderer: renderer, working: project.working, execution: settings.execution, resources: resources)
+            let fit = try await ResponseFitter.fit(dataset, baseline: settings.model, calibration: calibration, resources: resources,
                 inputResources: inputResources, design: design, options: options, appearanceOptions: appearanceOptions,
                 loader: loader, predictor: prediction, scorer: scorer)
             let package = try builder.build(project, fit: fit, inputResources: inputResources)
             try Task.checkCancellation()
             try SafeFiles.write(JSON.encode(package), to: output, overwrite: force)
             if let path = values["--fit-report"] {
-                let report = CameraConditionFitSummary(algorithm: fit.algorithmVersion, packageDigest: try package.digest(),
+                let report = ModelConditionFitSummary(algorithm: fit.algorithmVersion, packageDigest: try package.digest(),
                     trainResidual: fit.trainResidual, tuneResidual: fit.tuneResidual, unresolved: fit.unresolved, design: design,
                     options: options, appearanceOptions: appearanceOptions, conditionDomains: fit.conditionDomains,
                     consumedSampleIDs: fit.consumedSampleIDs, measurementDigests: fit.measurementDigests)
@@ -184,13 +184,13 @@ enum CameraModelTools {
         }
         let fit = try await AppearanceFitter.fit(dataset, calibration: calibration, baseline: settings.model, resources: resources,
             options: settings.appearanceOptions ?? .init(), loader: loader, predictor: prediction, inputResources: inputResources)
-        let camera = try CameraFitResult.constant(base: fit, baseline: settings.model, resources: resources, calibration: calibration)
-        let package = try builder.build(project, fit: camera, inputResources: inputResources)
+        let modelFit = try ModelFitResult.constant(base: fit, baseline: settings.model, resources: resources, calibration: calibration)
+        let package = try builder.build(project, fit: modelFit, inputResources: inputResources)
         let data = try JSON.encode(package)
         try Task.checkCancellation()
         try SafeFiles.write(data, to: output, overwrite: force)
         if let path = values["--fit-report"] {
-            let report = CameraFitSummary(algorithm: fit.algorithmVersion, packageDigest: try package.digest(), converged: fit.converged,
+            let report = ModelFitSummary(algorithm: fit.algorithmVersion, packageDigest: try package.digest(), converged: fit.converged,
                 trainMaximumError: fit.trainMaximumError, tuneMaximumError: fit.tuneMaximumError, unresolved: fit.unresolved, options: fit.options)
             try SafeFiles.write(JSON.encode(report), to: URL(fileURLWithPath: path), overwrite: force)
         }

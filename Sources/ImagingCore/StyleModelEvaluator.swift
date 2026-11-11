@@ -1,10 +1,10 @@
 import Foundation
 
 /// 在 CPU 上将观测包和目标条件求值为自动控制及其来源记录。
-public enum CameraModelEvaluator {
+public enum StyleModelEvaluator {
     /// Explicit locks supply only missing controls; valid observations still evaluate normally.
     /// Lock fallback retains original validity and does not bypass packet/domain validation.
-    public static func evaluate(_ model: CompiledCameraModel, context: EvaluationContext, lockedControls: [ControlOverride] = []) throws -> AutomaticControls {
+    public static func evaluate(_ model: CompiledStyleModel, context: EvaluationContext, lockedControls: [ControlOverride] = []) throws -> AutomaticControls {
         try ParameterSpecification.validateOwners(lockedControls.map(\.target))
         for lock in lockedControls {
             guard model.definition.edits.overrideTargets.contains(lock.target) else { throw LabError.invalid("Unsupported locked control") }
@@ -97,7 +97,7 @@ public enum CameraModelEvaluator {
     }
 
     /// Constant fallback may retain provenance, but never creates fresh evidence.
-    private static func priorValidStamp(_ model: CompiledCameraModel, context: EvaluationContext, target: String) -> FrameStamp? {
+    private static func priorValidStamp(_ model: CompiledStyleModel, context: EvaluationContext, target: String) -> FrameStamp? {
         guard let history = context.fallback else { return nil }
         let controls = history.controls, observation = context.observations
         let entries = controls.provenance.filter { $0.target == target }

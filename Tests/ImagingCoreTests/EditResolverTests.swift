@@ -2,8 +2,8 @@ import XCTest
 @testable import ImagingCore
 
 final class EditResolverTests: XCTestCase {
-    private func fixture(_ configure: (inout CameraModel) -> Void = { _ in }) throws -> (CompiledCameraModel, AutomaticControls) {
-        var definition = CameraModel(identity: .init(id: "edit", camera: "test", mode: "standard"))
+    private func fixture(_ configure: (inout StyleModel) -> Void = { _ in }) throws -> (CompiledStyleModel, AutomaticControls) {
+        var definition = StyleModel(identity: .init(id: "edit", name: "standard"))
         // Declare only the controls exercised below, within the persisted array budget.
         definition.edits.overrideTargets = [
             "detail.fineSigma", "detail.midSigma", "detail.fineGain", "color.matrix", "color.matrix.0",
@@ -12,7 +12,7 @@ final class EditResolverTests: XCTestCase {
         ]
         definition.edits.visualControls = [.init(id: "texture", unit: .normalized, bounds: .init(lower: -1, upper: 1), links: [.init(target: "detail.fineSigma", coefficient: 4)])]
         configure(&definition)
-        let model = try CameraModelCompiler.compile(definition)
+        let model = try StyleModelCompiler.compile(definition)
         return (model, AutomaticControls(parameters: definition.appearance.parameters, lutWeights: definition.appearance.lutWeights, modelID: model.identity, sourceID: "source", calibrationID: "calibration", featureDigest: model.featureDigest))
     }
     func testDefaultIsIdentity() throws {

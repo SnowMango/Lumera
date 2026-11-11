@@ -116,7 +116,7 @@ struct EffectPipeline<Backend: EffectPipelineBackend> {
             let reduced=request.halationScale != .full
             let hi=reduced ? try pass("opticalReduce",current,[],[1,Float(h.threshold),Float(h.knee)],size:(geometry.width,geometry.height)):try pass("highlights",current,[],[Float(h.threshold),Float(h.knee)])
             let scattered=try executionPlan.halation(for:h).sigmas.map { try blur(hi,$0*scale,scaleX:geometry.scaleX,scaleY:geometry.scaleY,integrated:true) }
-            let next=reduced ? try pass("halationCombineReduced",current,scattered,CameraEffectUniforms.halation(h)+[Float(h.threshold),Float(h.knee)]):try pass("halationCombine",current,[hi]+scattered,CameraEffectUniforms.halation(h))
+            let next=reduced ? try pass("halationCombineReduced",current,scattered,EffectUniforms.halation(h)+[Float(h.threshold),Float(h.knee)]):try pass("halationCombine",current,[hi]+scattered,EffectUniforms.halation(h))
             backend.release(hi);scattered.forEach(backend.release);backend.release(current);current=next
         }
         return current
@@ -139,10 +139,10 @@ struct EffectPipeline<Backend: EffectPipelineBackend> {
                 backend.noise=EffectNoiseField(key:key,luma:luma,chroma:chroma)
             }
         }
-        let result=try pass(extended ? "finishExtended" : "finish",current,[luma,chroma],CameraEffectUniforms.noise(p.noise,envelope:curves.noise))
+        let result=try pass(extended ? "finishExtended" : "finish",current,[luma,chroma],EffectUniforms.noise(p.noise,envelope:curves.noise))
         if p.grain.isActive {
             let prepared = executionPlan.grain(for:p.grain)
-            let uniforms = CameraEffectUniforms.grain(p.grain,scale:scale,seed:request.seed,
+            let uniforms = EffectUniforms.grain(p.grain,scale:scale,seed:request.seed,
                 frameIndex:temporal.grain == .fixed ? 0:request.frameIndex,envelope:curves.grain,
                 originX:frameGeometry.originX,originY:frameGeometry.originY,prepared:prepared)
             let factor = prepared.subdivision(scale:scale)

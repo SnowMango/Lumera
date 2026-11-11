@@ -4,7 +4,7 @@ import ImageRendering
 import ImageAnalysis
 @testable import ImagingRuntime
 
-final class CameraModelAcceptanceTests: XCTestCase {
+final class StyleModelAcceptanceTests: XCTestCase {
     var execution: ExecutionProfile { .init(width: 4, height: 4, budget: .init(maxInFlightFrames: 2, maxResidentBytes: 32 * 1024 * 1024)) }
     func specification(device: String = "iPhone15-test-requirement", duration: Double = 60, latency: Double = 0.1, fps: Double = 30) -> DeliverySpecification {
         .init(device: device, operatingSystem: "host-declared", inputPath: .videoYUV, medium: .video(framesPerSecond: fps), execution: execution,
@@ -21,7 +21,7 @@ final class CameraModelAcceptanceTests: XCTestCase {
             maxLatencySeconds: 1, sustainedDurationSeconds: 1, maximumDroppedFrameFraction: 0).validate())
     }
     func testReplaySeedAndSourceFrameIdentityMatch() throws {
-        let model = try CameraModelCompiler.compile(CameraModel(identity: .init(id: "synthetic", camera: "fixture", mode: "test")))
+        let model = try StyleModelCompiler.compile(StyleModel(identity: .init(id: "synthetic", name: "test")))
         let stamp = FrameStamp(streamID: "source", generation: 7, index: UInt64(UInt32.max) + 19, presentationTime: 40, duration: 1 / 30)
         let observations = FrameObservations(stamp: stamp, sourceID: "input", calibrationID: "identity", featureDigest: model.featureDigest)
         let recipe = String(repeating: "a", count: 64)
@@ -35,7 +35,7 @@ final class CameraModelAcceptanceTests: XCTestCase {
     func incompleteReport() async throws -> ModelValidationReport {
         var source = SourceDescriptor(id: "input", path: .processedPhoto); source.recipeID = "ci"
         let recipe = InputRecipe(id: "ci", backend: "coreImage", version: "1", decodedRendition: .baseImage)
-        let project = CalibrationProject(id: "no-samples", target: .init(id: "unverified", camera: "synthetic", mode: "neutral"),
+        let project = CalibrationProject(id: "no-samples", target: .init(id: "unverified", name: "neutral"),
             source: source, inputRecipe: recipe, working: .init(referenceRenditionID: "test"), samples: [])
         let dataset = try DatasetValidator(baseDirectory: FileManager.default.temporaryDirectory).validate(project)
         let renderer = try LumeraRenderer()

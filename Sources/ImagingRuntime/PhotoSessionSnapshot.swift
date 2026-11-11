@@ -16,11 +16,11 @@ public final class PhotoSessionSnapshot: Sendable {
     public var canRedevelopRAW: Bool { source.canRedevelopRAW }
 
     let owner: UUID
-    let model: PreparedCameraModel
+    let model: PreparedStyleModel
     let variants: PhotoExecutionVariants
 
     init(source: PhotoSource, inputFacts: FrameInputFacts, inputWidth: Int, inputHeight: Int,
-         observations: FrameObservations, automatic: AutomaticControls, owner: UUID, model: PreparedCameraModel, seed: UInt32) {
+         observations: FrameObservations, automatic: AutomaticControls, owner: UUID, model: PreparedStyleModel, seed: UInt32) {
         self.source = source
         self.inputFacts = inputFacts
         self.inputWidth = inputWidth

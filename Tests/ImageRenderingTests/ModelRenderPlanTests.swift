@@ -8,7 +8,7 @@ final class ModelRenderPlanTests: XCTestCase {
     func execution(bytes: Int = 32 * 1024 * 1024) -> ExecutionProfile {
         .init(width: 2, height: 2, budget: .init(maxInFlightFrames: 1, maxResidentBytes: bytes))
     }
-    func model() -> CameraModel { .init(identity: .init(id: "fixture", camera: "synthetic", mode: "test")) }
+    func model() -> StyleModel { .init(identity: .init(id: "fixture", name: "test")) }
     func input(_ renderer: LumeraRenderer, execution: ExecutionProfile? = nil) async throws -> PreparedInput {
         var descriptor = SourceDescriptor(id: "input", path: .processedPhoto); descriptor.recipeID = "ci"
         let image = CIImage(color: .init(red: 0.5, green: 0.5, blue: 0.5)).cropped(to: .init(x: 0, y: 0, width: 2, height: 2))
@@ -16,7 +16,7 @@ final class ModelRenderPlanTests: XCTestCase {
             recipe: .init(id: "ci", backend: "coreImage", version: "1", decodedRendition: .baseImage), execution: execution ?? self.execution())
         return try await InputNormalizer(renderer: renderer).normalize(normalized, calibration: nil, resources: .init())
     }
-    func controls(_ model: CompiledCameraModel, input: PreparedInput) -> ResolvedControls {
+    func controls(_ model: CompiledStyleModel, input: PreparedInput) -> ResolvedControls {
         let automatic = AutomaticControls(parameters: model.definition.appearance.parameters, modelID: model.identity, sourceID: input.sourceID, calibrationID: input.calibrationID, featureDigest: model.featureDigest)
         return .init(automatic: automatic, parameters: automatic.parameters, lutWeights: [])
     }
@@ -24,14 +24,14 @@ final class ModelRenderPlanTests: XCTestCase {
         let renderer = try LumeraRenderer(), preparer = ModelPreparer(renderer: renderer)
         var definition = model()
         definition.appearance.resources = [.init(id: "missing", sha256: String(repeating: "a", count: 64), dimension: 2)]
-        XCTAssertThrowsError(try preparer.prepare(CameraModelCompiler.compile(definition), resources: .init(), execution: execution()))
-        XCTAssertThrowsError(try preparer.prepare(CameraModelCompiler.compile(model()), resources: .init(), execution: execution(bytes: 1)))
+        XCTAssertThrowsError(try preparer.prepare(StyleModelCompiler.compile(definition), resources: .init(), execution: execution()))
+        XCTAssertThrowsError(try preparer.prepare(StyleModelCompiler.compile(model()), resources: .init(), execution: execution(bytes: 1)))
     }
     func testInputEditsPrecedeTargetTransformAndPlanRejectsForeignInput() async throws {
         let renderer = try LumeraRenderer(), preparedInput = try await input(renderer)
         var definition = model(); definition.appearance.parameters.tone.enabled = true
         definition.appearance.parameters.tone.curve = .init(function: .init(family: .power))
-        let compiled = try CameraModelCompiler.compile(definition)
+        let compiled = try StyleModelCompiler.compile(definition)
         let prepared = try ModelPreparer(renderer: renderer).prepare(compiled, resources: .init(), execution: execution())
         var values = controls(compiled, input: preparedInput); values.inputExposureEV = 1
         let plan = try RenderPlanner().plan(values, input: preparedInput, model: prepared)
@@ -58,7 +58,7 @@ final class ModelRenderPlanTests: XCTestCase {
         var definition = model(); definition.appearance.parameters.halation.enabled = true; definition.appearance.parameters.halation.amount = 0
         definition.observations.sourceConditions = [.iso]
         definition.responses = [.init(target: "halation.amount", expression: .singleAxis(axis: .source(.iso), nodes: [.init(100, .scalar(0)), .init(800, .scalar(0.2))], boundary: .clamp))]
-        let compiled = try CameraModelCompiler.compile(definition)
+        let compiled = try StyleModelCompiler.compile(definition)
         let prepared = try ModelPreparer(renderer: renderer).prepare(compiled, resources: .init(), execution: execution())
         XCTAssertGreaterThan(prepared.preparationStatistics.halations, 0)
         let first = try RenderPlanner().plan(controls(compiled, input: input), input: input, model: prepared)
@@ -67,7 +67,7 @@ final class ModelRenderPlanTests: XCTestCase {
     }
     func testInvalidCommandDoesNotConsumePlanAndTimingSurvives() async throws {
         let renderer = try LumeraRenderer(), input = try await input(renderer)
-        let compiled = try CameraModelCompiler.compile(model())
+        let compiled = try StyleModelCompiler.compile(model())
         let prepared = try ModelPreparer(renderer: renderer).prepare(compiled, resources: .init(), execution: execution())
         let stamp = FrameStamp(streamID: "camera", generation: 2, index: UInt64(UInt32.max) + 5, presentationTime: 3.5, duration: 0.02)
         let plan = try RenderPlanner().plan(controls(compiled, input: input), input: input, model: prepared, stamp: stamp)
@@ -80,7 +80,7 @@ final class ModelRenderPlanTests: XCTestCase {
     }
     func testExecutionGeometryAndComputationalScaleAreExplicit() async throws {
         let renderer = try LumeraRenderer(), input = try await input(renderer)
-        let compiled = try CameraModelCompiler.compile(model())
+        let compiled = try StyleModelCompiler.compile(model())
         var e = execution(); e.effectScale = 0.5
         let prepared = try ModelPreparer(renderer: renderer).prepare(compiled, resources: .init(), execution: e)
         let plan = try RenderPlanner().plan(controls(compiled, input: input), input: input, model: prepared)
@@ -93,7 +93,7 @@ final class ModelRenderPlanTests: XCTestCase {
 
     func testPreparationReservationIsSingleUseAndCanBeCancelled() async throws {
         let renderer = try LumeraRenderer(), input = try await input(renderer)
-        let compiled = try CameraModelCompiler.compile(model())
+        let compiled = try StyleModelCompiler.compile(model())
         let prepared = try ModelPreparer(renderer: renderer).prepare(compiled, resources: .init(), execution: execution())
         let cancelled = try prepared.reserveFrame()
         XCTAssertThrowsError(try prepared.reserveFrame())
@@ -106,7 +106,7 @@ final class ModelRenderPlanTests: XCTestCase {
     }
     func testEscapedOutputImageRetainsMemoryReservation() async throws {
         let renderer = try LumeraRenderer(), input = try await input(renderer)
-        let compiled = try CameraModelCompiler.compile(model())
+        let compiled = try StyleModelCompiler.compile(model())
         let prepared = try ModelPreparer(renderer: renderer).prepare(compiled, resources: .init(), execution: execution())
         func renderImage() async throws -> CIImage {
             let plan = try RenderPlanner().plan(controls(compiled, input: input), input: input, model: prepared)
@@ -123,7 +123,7 @@ final class ModelRenderPlanTests: XCTestCase {
 
     func testPrecisionRejectionBeforeEncodingCanReleaseReservation() async throws {
         let renderer = try LumeraRenderer(), input = try await input(renderer)
-        let compiled = try CameraModelCompiler.compile(model())
+        let compiled = try StyleModelCompiler.compile(model())
         let prepared = try ModelPreparer(renderer: renderer).prepare(compiled, resources: .init(), execution: execution())
         var values = controls(compiled, input: input); values.inputExposureEV = 10; values.parameters.color.exposureEV = 10
         let plan = try RenderPlanner().plan(values, input: input, model: prepared)
@@ -135,7 +135,7 @@ final class ModelRenderPlanTests: XCTestCase {
 
     func testRepeatedTiledPlanRejectsWithoutIncreasingWorkingSet() async throws {
         let renderer = try LumeraRenderer(), input = try await input(renderer)
-        let compiled = try CameraModelCompiler.compile(model())
+        let compiled = try StyleModelCompiler.compile(model())
         let prepared = try ModelPreparer(renderer:renderer).prepare(compiled,resources:.init(),execution:execution())
         let plan = try RenderPlanner().plan(controls(compiled,input:input),input:input,model:prepared)
         let output = try await renderer.renderTiled(input,plan:plan)
@@ -148,7 +148,7 @@ final class ModelRenderPlanTests: XCTestCase {
     func testBeforeCommitFailureReleasesActiveSlotWhilePlanIsRetained() async throws {
         enum CancellationAtCommit: Error { case injected }
         let renderer = try LumeraRenderer(), input = try await input(renderer)
-        let compiled = try CameraModelCompiler.compile(model())
+        let compiled = try StyleModelCompiler.compile(model())
         let prepared = try ModelPreparer(renderer:renderer).prepare(compiled,resources:.init(),execution:execution())
         let plan = try RenderPlanner().plan(controls(compiled,input:input),input:input,model:prepared)
         var called = false
@@ -167,7 +167,7 @@ final class ModelRenderPlanTests: XCTestCase {
     }
     func testAsyncOwnedRenderHonorsCancellationAfterEncodingStarts() async throws {
         let renderer = try LumeraRenderer(), input = try await input(renderer)
-        let compiled = try CameraModelCompiler.compile(model())
+        let compiled = try StyleModelCompiler.compile(model())
         let prepared = try ModelPreparer(renderer: renderer).prepare(compiled, resources: .init(), execution: execution())
         let plan = try RenderPlanner().plan(controls(compiled, input: input), input: input, model: prepared)
         let event = try XCTUnwrap(renderer.device.makeSharedEvent()), blocker = try XCTUnwrap(renderer.queue.makeCommandBuffer())
@@ -185,7 +185,7 @@ final class ModelRenderPlanTests: XCTestCase {
 
     func testFailedTiledOutputDoesNotRetainUnpublishedImageCharge() async throws {
         let renderer = try LumeraRenderer(), input = try await input(renderer)
-        let compiled = try CameraModelCompiler.compile(model())
+        let compiled = try StyleModelCompiler.compile(model())
         let prepared = try ModelPreparer(renderer: renderer).prepare(compiled, resources: .init(), execution: execution())
         let plan = try RenderPlanner().plan(controls(compiled, input: input), input: input, model: prepared)
         let initialAllowance = plan.workingSet.limit
@@ -216,7 +216,7 @@ extension ModelRenderPlanTests {
 
     func testExecutionEffectsReachRenderPlanAndOverrideLegacyFallback() async throws {
         let renderer = try LumeraRenderer(), input = try await input(renderer)
-        let compiled = try CameraModelCompiler.compile(model())
+        let compiled = try StyleModelCompiler.compile(model())
         var e = execution(); e.effectScale = 0.5
         e.glowScale = .quarter; e.softeningScale = .eighth; e.previewGlow = false
         let prepared = try ModelPreparer(renderer: renderer).prepare(compiled, resources: .init(), execution: e)
@@ -230,7 +230,7 @@ extension ModelRenderPlanTests {
 
     func testStandaloneInputAcceptsLegacyScaleWhileModelRequiresSupportedEffectResolutions() async throws {
         let renderer = try LumeraRenderer(), preparer = ModelPreparer(renderer: renderer)
-        let compiled = try CameraModelCompiler.compile(model())
+        let compiled = try StyleModelCompiler.compile(model())
         var execution = self.execution()
         execution.effectScale = 0.75
         let input = try await input(renderer, execution: execution)
@@ -252,7 +252,7 @@ extension ModelRenderPlanTests {
 
 extension ModelRenderPlanTests {
     func testStreamingPreparationRejectsOverflowingFrameWorkingSet() throws {
-        let compiled = try CameraModelCompiler.compile(model())
+        let compiled = try StyleModelCompiler.compile(model())
         for precision in [ExecutionPrecision.float16, .float32] {
             let renderer = try LumeraRenderer(precision: precision == .float16 ? .float16 : .float32)
             let preparer = ModelPreparer(renderer: renderer)

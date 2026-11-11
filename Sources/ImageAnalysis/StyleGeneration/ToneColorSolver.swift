@@ -71,7 +71,7 @@ public enum ToneColorSolver {
             guard limit.accepts(error),error<=(baselineWorst[group] ?? 0)+0.0001 else {throw LabError.measurement("\(group)：独立颜色验证失败（最大通道差 \(error)），不自动应用或用该组重选参数")}
             evidence.append(.init(algorithm:.toneColor,caseID:group,status:.passed,measured:error,limit:limit,detail:"独立中档/重复帧及固定色样留出；encoded sRGB 最大通道差。"))
         }
-        return .init(profile:candidate,evidence:evidence,unresolved:["相对颜色等效建议，不推断目标相机的白点或内部参数；固定中灰与曝光锚点不自动补偿拍摄曝光差。","此旧版建议器限定近恒等矩阵与固定中灰单调曲线；更一般的相机外观关系请使用 AppearanceFitter 正向拟合。"],resourceDigests:try resources.validatedDigests(),validatedModules:[.toneColor])
+        return .init(profile:candidate,evidence:evidence,unresolved:["相对颜色等效建议，不推断参考图像来源的白点或内部参数；固定中灰与曝光锚点不自动补偿拍摄曝光差。","此旧版建议器限定近恒等矩阵与固定中灰单调曲线；更一般的外观关系请使用 AppearanceFitter 正向拟合。"],resourceDigests:try resources.validatedDigests(),validatedModules:[.toneColor])
     }
     private static func invert(_ curve:ResponseCurve,_ y:Double)->Double {
         var low=0.0,high=1.0

@@ -119,7 +119,7 @@ public final class AppearanceDatasetLoader: AppearanceDatasetLoading {
 extension AppearanceFitter {
     /// 在冻结的目标条件下通过正向渲染拟合外观，返回与数据集及输入校准绑定的结果。
     /// 整场景与独立验收另行测量。
-    public static func fit(_ dataset:CalibrationDataset,calibration:InputCalibration,baseline:CameraModel,resources:ModelResourceSet,
+    public static func fit(_ dataset:CalibrationDataset,calibration:InputCalibration,baseline:StyleModel,resources:ModelResourceSet,
                            options:AppearanceFitOptions,loader:any AppearanceDatasetLoading,predictor:ReferenceAppearancePredictor,
                            inputResources:ModelResourceSet? = nil) async throws -> AppearanceFitResult {
         try calibration.validate();try options.validate()
@@ -163,11 +163,11 @@ extension AppearanceFitter {
         }
         return appearance
     }
-    static func validateBaseline(_ baseline:CameraModel,target:TargetIdentity,resources:ModelResourceSet) throws -> String? {
+    static func validateBaseline(_ baseline:StyleModel,target:ModelIdentity,resources:ModelResourceSet) throws -> String? {
         try baseline.validate()
         guard baseline.identity == target else { throw LabError.invalid("Appearance baseline target identity differs from the frozen project") }
         guard baseline.responses.isEmpty,baseline.legacyProfile == nil else {
-            throw LabError.unsupported("Fixed-condition appearance fitting requires a constant camera baseline")
+            throw LabError.unsupported("Fixed-condition appearance fitting requires a constant model baseline")
         }
         let weights=baseline.appearance.lutWeights
         guard weights.count<=1,weights.allSatisfy({$0.weight == 1}) else { throw LabError.unsupported("Appearance fit requires one fixed LUT or none") }

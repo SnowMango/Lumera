@@ -20,7 +20,7 @@ final class ModelValidationTests: XCTestCase {
         return .init(path: name, sha256: Digest.data(bytes), byteCount: bytes.count)
     }
     func project(samples: [CalibrationSample], policy: ValidationPolicy? = nil) -> CalibrationProject {
-        .init(id: "synthetic-validation", target: .init(id: "target", camera: "fixture", mode: "SDR"), source: source,
+        .init(id: "synthetic-validation", target: .init(id: "target", name: "SDR"), source: source,
             inputRecipe: recipe("source"), working: .init(referenceRenditionID: "fixture"), samples: samples,
             validationPolicy: policy ?? self.policy, authorizationSource: "synthetic development fixture")
     }
@@ -82,7 +82,7 @@ final class ModelValidationTests: XCTestCase {
         let dir = try directory(); defer { try? FileManager.default.removeItem(at: dir) }
         let p = project(samples: [try sample(directory: dir)])
         let dataset = try DatasetValidator(baseDirectory: dir).validate(p), renderer = try LumeraRenderer()
-        var model = CameraModel(identity: p.target); model.appearance.parameters.color.exposureEV = 1
+        var model = StyleModel(identity: p.target); model.appearance.parameters.color.exposureEV = 1
         let package = try ModelBuilder(renderer: renderer, execution: execution).build(p, model: model, resources: .init())
         let before = try package.digest()
         let report = try await ModelValidator(renderer: renderer, targetSource: target, targetRecipe: recipe("target")).validate(package, dataset: dataset, policy: policy, execution: execution)
@@ -148,7 +148,7 @@ final class ModelValidationTests: XCTestCase {
         let effective = EffectiveInputRecipe(declared: recipe("source"), backendVersion: ProcessInfo.processInfo.operatingSystemVersionString)
         var calibration = try InputCalibrationSolver.identity(source: source, effectiveRecipe: effective, reference: p.working)
         calibration.correction.matrix.values = [0.5,0,0,0,0.5,0,0,0,0.5]
-        var model = CameraModel(identity: p.target); model.appearance.parameters.color.exposureEV = 1
+        var model = StyleModel(identity: p.target); model.appearance.parameters.color.exposureEV = 1
         let package = try ModelBuilder(renderer: renderer, execution: execution).build(p, model: model, resources: .init(), calibration: calibration)
         let report = try await ModelValidator(renderer: renderer, targetSource: target, targetRecipe: recipe("target")).validate(package, dataset: dataset, policy: policy, execution: execution)
         XCTAssertEqual(report.domains.first { $0.domain == .colorTone }?.status, .passed)
@@ -161,18 +161,18 @@ final class ModelValidationTests: XCTestCase {
         let inputSample = CalibrationSample(id: original.id, input: original.input, target: original.target,
             sceneID: original.sceneID, split: .acceptance, sourceConditions: declared)
         let p = project(samples: [inputSample]), renderer = try LumeraRenderer()
-        var model = CameraModel(identity: p.target); model.observations.sourceConditions = [.iso]
+        var model = StyleModel(identity: p.target); model.observations.sourceConditions = [.iso]
         model.responses = [.init(target: "color.exposureEV", expression: .singleAxis(axis: .source(.iso),
             nodes: [.init(100, .scalar(0)), .init(400, .scalar(1))], boundary: .clamp), missing: .constant(.scalar(0)))]
         let normalized = try await InputAdapter(renderer: renderer, working: p.working).prepare(
             .image(try XCTUnwrap(CIImage(contentsOf: dir.appendingPathComponent(original.input.path)))),
             descriptor: source, recipe: recipe("source"), execution: execution)
         XCTAssertNil(normalized.captureConditions.iso)
-        let compiled = try CameraModelCompiler.compile(model)
+        let compiled = try StyleModelCompiler.compile(model)
         let input = try await InputNormalizer(renderer: renderer).normalize(normalized, calibration: nil, resources: .init())
         let stamp = FrameStamp(streamID: "live", generation: 0, index: 0, presentationTime: 0, duration: 1)
         let observed = try await renderer.observe(input, stamp: stamp, requirements: model.observations)
-        XCTAssertEqual(try CameraModelEvaluator.evaluate(compiled, context: .init(evaluationStamp: stamp, observations: observed)).parameters.color.exposureEV, 0)
+        XCTAssertEqual(try StyleModelEvaluator.evaluate(compiled, context: .init(evaluationStamp: stamp, observations: observed)).parameters.color.exposureEV, 0)
         let package = try ModelBuilder(renderer: renderer, execution: execution).build(p, model: model, resources: .init())
         let report = try await ModelValidator(renderer: renderer, targetSource: target, targetRecipe: recipe("target")).validate(package,
             dataset: DatasetValidator(baseDirectory: dir).validate(p), policy: policy, execution: execution)
@@ -191,7 +191,7 @@ final class ModelValidationTests: XCTestCase {
         let dataset = CalibrationDataset(project: hdr, baseDirectory: dir, report: check)
         var hdrExecution = execution; hdrExecution.dynamicRange = .edr
         let renderer = try LumeraRenderer()
-        var model = CameraModel(identity: hdr.target); model.compatibility.dynamicRanges = [.edr]
+        var model = StyleModel(identity: hdr.target); model.compatibility.dynamicRanges = [.edr]
         let package = try ModelBuilder(renderer: renderer, execution: hdrExecution).build(hdr, model: model, resources: .init())
         do {
             _ = try await ModelValidator(renderer: renderer, targetSource: target, targetRecipe: recipe("target")).validate(package, dataset: dataset, policy: policy, execution: hdrExecution)

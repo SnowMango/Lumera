@@ -40,7 +40,7 @@ public struct ModelValidationReport: Codable, Equatable, Sendable {
         domains.filter { $0.status == .passed && $0.evidence == .capturedTarget }.map(\.domain)
     }
     /// 复核报告所绑定的输入、模型、策略、精度和执行配置，并重新检查原始文件。摘要用于内容核对。
-    public func validateBinding(package: CameraModelPackage, dataset: CalibrationDataset, policy: ValidationPolicy,
+    public func validateBinding(package: StyleModelPackage, dataset: CalibrationDataset, policy: ValidationPolicy,
                                 execution: ExecutionProfile, targetSource: SourceDescriptor, targetRecipe: InputRecipe) throws {
         _ = try package.load()
         try targetSource.validate()

@@ -1,8 +1,8 @@
 # Lumera
 
-版本：**0.3.2**。产品版本、相机模型 schema 和固定风格 schema 分别管理。
+版本：**0.4.0**。产品版本、风格模型 schema 和固定风格 schema 分别管理。
 
-Lumera 是基于 Metal 的照片与视频成片引擎。它以相机模型描述目标外观，根据输入观测和拍摄条件计算参数，并执行颜色、色调曲线、细节、柔化、暗角、光晕、数码噪点和胶片颗粒处理。输入校正、目标模型、用户编辑和执行资源独立管理；模型可由配对样本拟合，也可手动制作。
+Lumera 是基于 Metal 的照片与视频成片引擎。它以风格模型描述目标外观，根据输入观测和拍摄条件计算参数，并执行颜色、色调曲线、细节、柔化、暗角、光晕、数码噪点和胶片颗粒处理。输入校正、目标模型、用户编辑和执行资源独立管理；模型可由配对样本拟合，也可手动制作。
 
 ## 环境要求
 
@@ -14,7 +14,7 @@ Lumera 是基于 Metal 的照片与视频成片引擎。它以相机模型描述
 
 | 产品 | 职责 |
 | --- | --- |
-| `ImagingCore` | 纯风格/相机模型、输入声明、编译求值、编辑与时间状态 |
+| `ImagingCore` | 固定风格与风格模型、输入声明、编译求值、编辑与时间状态 |
 | `ImageRendering` | 输入准备、完整输入统计、资源预算与共享 Metal 效果执行 |
 | `ImagingRuntime` | 可选照片/视频协调、背压与决策回放；只依赖 Core 和 Rendering |
 | `ImageAnalysis` | 桌面照片编解码、参考渲染、图像测量和风格生成分析 |
@@ -30,7 +30,7 @@ Lumera 是基于 Metal 的照片与视频成片引擎。它以相机模型描述
 https://github.com/SnowMango/Lumera.git
 ```
 
-SPM 版本依赖使用 `0.3.2`。本地检出使用路径依赖 `.package(path: "../Lumera")`。添加到应用目标时，选择 `ImagingCore` 和 `ImageRendering`；使用照片/视频协调器时再添加 `ImagingRuntime`。各产品分别导入，没有名为 `Lumera` 的模块。
+SPM 版本依赖使用 `0.4.0`。本地检出使用路径依赖 `.package(path: "../Lumera")`。添加到应用目标时，选择 `ImagingCore` 和 `ImageRendering`；使用照片/视频协调器时再添加 `ImagingRuntime`。各产品分别导入，没有名为 `Lumera` 的模块。
 
 如果宿主项目使用 `Package.swift`，在包的 `dependencies` 中声明仓库，并在目标的 `dependencies` 中添加产品：
 
@@ -39,17 +39,17 @@ SPM 版本依赖使用 `0.3.2`。本地检出使用路径依赖 `.package(path: 
 import PackageDescription
 
 let package = Package(
-    name: "MyCameraFeature",
+    name: "MyImagingFeature",
     platforms: [.iOS(.v17), .macOS(.v14)],
     products: [
-        .library(name: "MyCameraFeature", targets: ["MyCameraFeature"])
+        .library(name: "MyImagingFeature", targets: ["MyImagingFeature"])
     ],
     dependencies: [
-        .package(url: "https://github.com/SnowMango/Lumera.git", from: "0.3.2")
+        .package(url: "https://github.com/SnowMango/Lumera.git", from: "0.4.0")
     ],
     targets: [
         .target(
-            name: "MyCameraFeature",
+            name: "MyImagingFeature",
             dependencies: [
                 .product(name: "ImagingCore", package: "Lumera"),
                 .product(name: "ImageRendering", package: "Lumera")
@@ -59,22 +59,22 @@ let package = Package(
 )
 ```
 
-## 相机模型与自动成片
+## 风格模型与自动成片
 
-`CameraModel` schema 1 是相机模型入口；`Profile` schema 8 提供固定风格及其条件响应接口。相机模型描述一个明确的机型、模式及设置组合，包含基础外观、条件响应、编辑权限和时间策略。人工制作模型、结构有效模型和经独立实拍验证的模型是不同状态；演示预设没有具体机型资格。
+`StyleModel` schema 2 定义可复用的图像风格，包含基础外观、条件响应、编辑权限和时间策略。`ModelIdentity` 使用 `id`、`name` 和可选 `metadata` 描述模型，不要求设备型号、模式或固件信息。模型可以手工配置或由参考图像拟合；结构验证与效果验证分别执行。`Profile` schema 8 保留独立的固定风格及条件响应接口。
 
 | 层次 | 职责与边界 |
 | --- | --- |
 | 离线制作：`ImageAnalysis`、CLI | 固定采样项目和输入参考；矩阵、32 点单调曲线及可选残差 LUT 的前向拟合；条件/时间响应拟合；视觉修订、构建和分项验证 |
 | 纯决策：`ImagingCore` | 编译条件表、求值、缺测处理、自动参数时间适应、用户编辑与锁定；无图像解码或 GPU；决策算法不访问文件 |
 | 像素执行：`ImageRendering` | 输入准备与独立校正、完整输入统计、预算和资源准备、唯一效果流水线、两档浮点存储及拥有型输出 |
-| 可选协调：`ImagingRuntime` | `PhotoProcessor` 串接照片阶段；`CameraSession` 管理视频顺序、背压、取消、重置及回放记录；不包含新的图像算法 |
+| 可选协调：`ImagingRuntime` | `PhotoProcessor` 串接照片阶段；`FrameProcessingSession` 管理视频顺序、背压、取消、重置及回放记录；不包含新的图像算法 |
 
 宿主负责采集、曝光/白平衡控制、显示、视频编码、文件存储和界面。运行应用只需链接 Core、Rendering，并可选择 Runtime；不会链接离线拟合器。HDR 显示与编码由宿主完成。
 
 ### 条件响应、时间适应与编辑
 
-- `ResponseProgram` 支持常量、单轴节点和双轴网格。条件轴可引用源拍摄条件、目标相机条件或声明的图像特征；响应目标包括色调曲线、颜色矩阵、LUT 权重及效果参数。
+- `ResponseProgram` 支持常量、单轴节点和双轴网格。条件轴可引用源拍摄条件、目标条件或声明的图像特征；响应目标包括色调曲线、颜色矩阵、LUT 权重及效果参数。
 - 边界策略明确选择夹持或拒绝。缺测策略可拒绝、使用常量或在限定时间内保持值；同一目标不能由多个响应程序重复拥有。
 - `AdaptationReducer` 按模型策略处理自动参数的时间变化，状态与会话绑定。噪点和颗粒的随机种子策略独立于自动参数适应。
 - `EditResolver` 根据模型声明的编辑权限合成输入曝光/白平衡、视觉偏移、参数覆盖、锁定和强度。拍摄与照片编辑可共用模型；临时编辑不写回模型定义。
@@ -92,7 +92,7 @@ import ImagingCore
 import ImageRendering
 import ImagingRuntime
 
-let compiled = try CameraModelCompiler.compile(CameraModelCodec.decode(modelData))
+let compiled = try StyleModelCompiler.compile(StyleModelCodec.decode(modelData))
 let renderer = try LumeraRenderer() // 默认 RGBA16Float；可显式 .float32
 let prepared = try ModelPreparer(renderer: renderer).prepare(
     compiled, resources: styleResources, execution: execution)
@@ -157,20 +157,20 @@ let exportReport = try await photos.renderStreaming(snapshot,
 let inputPreparer = try prepared.prepareRealtimeInput(
     working: workingReference, calibration: inputCalibration,
     resources: calibrationResources)
-let session = try CameraSession(renderer: renderer, model: prepared,
+let session = try FrameProcessingSession(renderer: renderer, model: prepared,
                                 backpressure: .dropUnsubmitted)
-let frameSource = CameraFrameSource(source, using: inputPreparer,
+let frameSource = FrameSource(source, using: inputPreparer,
     descriptor: sourceDescriptor, recipe: inputRecipe)
 let outcome = try await session.enqueue(frameSource, stamp: originalStamp)
 ```
 
-`RealtimeInputPreparer` 复用模型绑定的输入配置和校准资源。`CameraSession.enqueue(CameraFrameSource, stamp:edits:)` 将输入准备纳入同一个有序工作流和预算；尚未开始处理就被丢弃的来源不会物化纹理。宿主保留采集序号和 PTS，丢帧不重新编号。`.wait` 有界等待，`.dropUnsubmitted` 只替换尚未提交的帧；过多同时等待的生产者明确报错，宿主应等待 admission 形成背压。
+`RealtimeInputPreparer` 复用模型绑定的输入配置和校准资源。`FrameProcessingSession.enqueue(FrameSource, stamp:edits:)` 将输入准备纳入同一个有序工作流和预算；尚未开始处理就被丢弃的来源不会物化纹理。宿主保留采集序号和 PTS，丢帧不重新编号。`.wait` 有界等待，`.dropUnsubmitted` 只替换尚未提交的帧；过多同时等待的生产者明确报错，宿主应等待 admission 形成背压。
 
 来源的借用期限持续到 `enqueue` 返回，期间像素及其元数据必须保持不可变。取消会传播到输入准备任务，但已提交的 GPU 工作仍须完成后才能归还来源。内置准备器计入已知源数据、SDK 纹理和临时资源；位图支持的 CIImage 等额外已知常驻容量通过 `additionalResidentBytes` 声明。自定义准备闭包必须遵守传入的执行预算，声明所有保留来源的容量，并在返回或抛错前等待自己提交的工作完成；SDK 无法测量闭包内部的隐藏分配。
 
 `trustedNormalizedRGBBounds` 仅适用于调用方能够证明范围的已解码输入，范围必须覆盖归一化到工作编码 sRGB 后的有限 RGB 值。该声明可省略半精度写入前的 Float32 范围扫描，实际存储范围仍会校验；不能把原始传感器码值范围作为该声明，也不能用于 RAW 显影。没有可信范围的输入保留写入前溢出检查。
 
-`CameraSession.enqueue(preparedInput, stamp:edits:)` 继续接收已准备好的完整输入，该兼容入口的上游准备不受会话背压覆盖。宿主采集队列、系统解码器及独立固定风格入口仍须各自管理内存，模型预算不是整个进程 RSS 上限。
+`FrameProcessingSession.enqueue(preparedInput, stamp:edits:)` 继续接收已准备好的完整输入，该兼容入口的上游准备不受会话背压覆盖。宿主采集队列、系统解码器及独立固定风格入口仍须各自管理内存，模型预算不是整个进程 RSS 上限。
 
 同帧模式等待本帧统计；声明的延迟模式使用同一个旧观测包，并按年龄、曝光/色温等事实变化整包校验。失效时进入模型声明的缺测策略，不能拼接旧特征和新元数据。当前完整统计和效果可共享命令缓冲区。延迟模式可能错过尚未发现的场景突变，宿主可通过 `reset(.reset(.sceneCut))` 明确通知。
 
@@ -178,7 +178,7 @@ let outcome = try await session.enqueue(frameSource, stamp: originalStamp)
 
 ### 制作、发布与证据
 
-`CalibrationProject` 按场景/序列分离 train、tune 和 acceptance，保存文件字节摘要、配对、对齐、排除区域、来源配方和实际条件。输入校准只对独立参考拟合；目标拟合固定曝光/WB，先生成矩阵与单调曲线，再由调参集决定是否需要残差 LUT。已有 LUT 始终前向参与，不求逆。合成数据的低误差只验证实现，不能授予真实机型资格。
+`CalibrationProject` 按场景/序列分离 train、tune 和 acceptance，保存文件字节摘要、配对、对齐、排除区域、来源配方和实际条件。输入校准只对独立参考拟合；目标拟合固定曝光/WB，先生成矩阵与单调曲线，再由调参集决定是否需要残差 LUT。已有 LUT 始终前向参与，不求逆。合成数据验证实现正确性；参考图像验证使用独立样本和明确阈值。
 
 `ModelBuilder` 是唯一发布构建器；包包含模型 JSON、资源内容、输入配方/校正和身份清单，不包含源照片。制作者通过显式基础外观或响应锚点修订复用 `EditResolver` 的视觉映射，记录幅度、理由和父包摘要；用户 session edits 不自动写回发布包。每次修改都产生新身份并重新验证。
 
@@ -187,11 +187,11 @@ let outcome = try await session.enqueue(frameSource, stamp: originalStamp)
 CLI 的 `--settings` JSON 显式提供模型、执行预算、资源文件映射和目标输入配方；拟合时还须选择 `provided`、`identityReference` 或 `fitReference` 输入参考模式。相对资源路径以 settings 文件目录为基准。
 
 ```sh
-ccdlab camera-model build --project project.json --settings settings.json --output candidate.json
-ccdlab camera-model fit --project project.json --settings settings.json --output fitted.json --fit-report fit-report.json
-ccdlab camera-model fit --project project.json --settings settings.json --condition-design conditions.json --output conditional.json --fit-report condition-report.json
-ccdlab camera-model validate --project project.json --settings settings.json --model fitted.json --output validation.json
-ccdlab camera-model replay --model fitted.json --records decisions.json --output replay.json
+ccdlab model build --project project.json --settings settings.json --output candidate.json
+ccdlab model fit --project project.json --settings settings.json --output fitted.json --fit-report fit-report.json
+ccdlab model fit --project project.json --settings settings.json --condition-design conditions.json --output conditional.json --fit-report condition-report.json
+ccdlab model validate --project project.json --settings settings.json --model fitted.json --output validation.json
+ccdlab model replay --model fitted.json --records decisions.json --output replay.json
 ```
 
 `--condition-design` 对应 `ConditionFitDesign`，显式列出候选条件轴、受控条件和源/目标条件配对；当前自动拟合最多两条 source/target 元数据条件轴，要求足够的独立样本和受控变量；特征驱动响应可手工定义，尚未纳入自动拟合。条件拟合不读取 acceptance 像素。时间拟合通过 `TemporalResponseFitter` API 接收带实际时间戳、采集延迟及不确定度的序列，CLI 回放本身不执行时间拟合。已有文件须显式 `--force`，输入文件不能作为输出覆盖。
@@ -206,37 +206,45 @@ Float16 是默认存储格式，着色器计算使用 Float32；调用方可显�
 
 ## 数据模型
 
-### 相机模型
+### 风格模型
 
 | 类型 | 职责 |
 | --- | --- |
-| `CameraModel` | 目标身份、基础外观、观测需求、条件响应、时间适应、编辑权限及适用范围 |
-| `CompiledCameraModel` | 经校验、编译的相机模型与响应程序 |
+| `StyleModel` | 目标身份、基础外观、观测需求、条件响应、时间适应、编辑权限及适用范围 |
+| `CompiledStyleModel` | 经校验、编译的风格模型与响应程序 |
 | `SourceDescriptor`、`InputRecipe` | 输入来源与实际解码/重建配方 |
 | `InputCalibration` | 与输入身份、配方和参考呈现绑定的独立校正 |
 | `FrameObservations` | 同一观测包中的拍摄条件、图像特征及来源信息 |
 | `EditRequest`、`ResolvedControls` | 用户编辑请求及完成自动适应与编辑合成后的参数 |
 | `ExecutionProfile` | 输出尺寸、精度、统计延迟和资源预算 |
-| `CameraModelPackage` | 离线构建的模型、资源、输入配方/校正及身份清单 |
+| `StyleModelPackage` | 离线构建的模型、资源、输入配方/校正及身份清单 |
 
-原生模型通过 `CameraModelCodec` 编解码。模型 schema、参数语义与响应语义当前均为 1；文件中的资源描述与实际资源内容分别校验。通过 Swift 初始化并编码可生成完整默认声明：
+原生模型通过 `StyleModelCodec` 编解码。模型 schema 为 2，参数语义与响应语义版本均为 1；文件中的资源描述与实际资源内容分别校验。通过 Swift 初始化并编码可生成完整默认声明：
 
 ```swift
 import ImagingCore
 
-let model = CameraModel(identity: TargetIdentity(
-    id: "example-camera-mode", camera: "Example Camera", mode: "Standard"))
-let data = try CameraModelCodec.encode(model)
-let compiled = try CameraModelCompiler.compile(CameraModelCodec.decode(data))
+let model = StyleModel(identity: ModelIdentity(
+    id: "example-style", name: "Soft Contrast"))
+let data = try StyleModelCodec.encode(model)
+let compiled = try StyleModelCompiler.compile(StyleModelCodec.decode(data))
 ```
 
-初始化器生成的是基础外观定义，不具备特定相机的实拍验证资格。`CameraModelCodec` 接受不超过 16 MiB 的 JSON；完整资源包由 `ModelBuilder` 构建。目标身份与输入设备身份独立，模型编辑不会改变输入校正。
+初始化器生成基础风格定义，不附带效果验证结果。`StyleModelCodec` 接受不超过 16 MiB 的 JSON；完整资源包由 `ModelBuilder` 构建。目标身份与输入设备身份独立，模型编辑不会改变输入校正。
 
-`CameraModel` 的每个 JSON 数组最多 36 项，包括覆盖／锁定权限目标、响应程序、观测特征、资源清单及嵌套控制值。`ResponseProgram` 每轴允许 2–36 个节点；二维响应还要求 `values.count == x.count * y.count` 且 `values.count <= 36`，支持 6×6 网格。字段自身的更严格约束仍然有效；`ResponseCurve` 的 2–32 节点限制及动态色调曲线的固定 32 节点契约独立于数组结构预算。`validate()`、编译、编码和解码使用相同的模型结构预算，超限时抛出错误，不执行截断或采样。JSON 总大小上限为 16 MiB，容器嵌套深度上限为 64 层；解码拒绝重复键。
+`StyleModel` 的每个 JSON 数组最多 36 项，包括覆盖／锁定权限目标、响应程序、观测特征、资源清单及嵌套控制值。`ResponseProgram` 每轴允许 2–36 个节点；二维响应还要求 `values.count == x.count * y.count` 且 `values.count <= 36`，支持 6×6 网格。字段自身的更严格约束仍然有效；`ResponseCurve` 的 2–32 节点限制及动态色调曲线的固定 32 节点契约独立于数组结构预算。`validate()`、编译、编码和解码使用相同的模型结构预算，超限时抛出错误，不执行截断或采样。JSON 总大小上限为 16 MiB，容器嵌套深度上限为 64 层；解码拒绝重复键。
+
+### 文件格式与迁移
+
+模型、制作项目和模型资源包写入版本 2。读取层支持版本 1，先校验原始模型及资源摘要，再迁移为中性身份。旧身份的相机、模式、固件和设置保存在 `metadata` 中；它们不参与通用模型的必填约束。重新保存只生成新格式，原文件不在读取时修改。
+
+项目与模型包需要一起保存时，调用 `StyleModelPackage.migrated(project:)` 校验原始项目绑定并取得新格式的项目与模型包。返回包绑定新项目摘要；历史验证报告保留原包绑定，迁移后的包需重新验证。
+
+旧公共模型类型和 `camera-model`、`camera-project` 命令已移除，源码调用使用 `StyleModel` 系列接口与 `model`、`project` 命令。旧文件读取能力不构成旧源码接口兼容。历史报告和回放按其原始内容身份校验，不能通过替换摘要绑定到不同模型。
 
 ### 固定风格与兼容接口
 
-`Profile` 保留独立的编译、求值与渲染路径。需要显式桥接时可调用 `LegacyProfileAdapter.adapt`；桥接模型保留 `legacyProfile` 语义，不等价于通过原生响应程序制作的相机模型。宿主可限制仅接受原生模型。
+`Profile` 保留独立的编译、求值与渲染路径。需要显式桥接时可调用 `LegacyProfileAdapter.adapt`；桥接模型保留 `legacyProfile` 语义，不等价于通过原生响应程序制作的风格模型。宿主可限制仅接受原生模型。
 
 | 类型 | 用途 |
 | --- | --- |
@@ -249,7 +257,7 @@ let compiled = try CameraModelCompiler.compile(CameraModelCodec.decode(data))
 | `CaptureConditions` | ISO、曝光时间、曝光补偿、色温与色调等拍摄条件 |
 | `RenderRequest` | 输入声明、整体尺寸策略、效果处理比例与随机序列设置 |
 
-`Profile.standard` 提供基础配置。`StylePresets` 提供数码与胶片效果演示，不代表特定相机的标定结果。
+`Profile.standard` 提供基础配置。`StylePresets` 提供数码与胶片效果演示，不附带独立效果验证结果。
 
 配置 JSON 不包含 LUT 样本数据。`DeviceCorrection` 和 `RenderRequest` 也不属于风格配置。配置及资源的选择、存储和关联由调用方管理。
 
@@ -257,7 +265,7 @@ let compiled = try CameraModelCompiler.compile(CameraModelCodec.decode(data))
 
 ### Profile 配置文件格式
 
-Lumera 0.3.2 的固定风格接口使用 `Profile` JSON schema 8；此格式与 `CameraModel` schema 1 分别解码。根对象必填 `schemaVersion`、`id` 和 `name`。`parameters` 缺省时使用基础参数，`responses` 缺省时使用空数组。以下是最小的固定配置。
+Lumera 0.4.0 的固定风格接口使用 `Profile` JSON schema 8；此格式与 `StyleModel` schema 2 分别解码。根对象必填 `schemaVersion`、`id` 和 `name`。`parameters` 缺省时使用基础参数，`responses` 缺省时使用空数组。以下是最小的固定配置。
 
 ```json
 {
@@ -442,7 +450,7 @@ import ImageRendering
 
 final class StyleRenderer {
     private let encoder: TextureEffectEncoder
-    private let style: PreparedCameraStyle
+    private let style: PreparedResolvedStyle
 
     init(device: MTLDevice, profile: Profile, lut: LUTAsset? = nil) throws {
         encoder = try TextureEffectEncoder(device: device)
@@ -472,7 +480,7 @@ final class StyleRenderer {
 
 ## Profile 动态帧与条件响应
 
-本节适用于 `Profile` / `StyleEvaluator` 接口。相机模型的多轴响应、缺测策略及时间适应使用 `CameraModelCompiler`、`CameraModelEvaluator` 和 `AdaptationReducer`。
+本节适用于 `Profile` / `StyleEvaluator` 接口。风格模型的多轴响应、缺测策略及时间适应使用 `StyleModelCompiler`、`StyleModelEvaluator` 和 `AdaptationReducer`。
 
 初始化或切换固定风格时调用：
 
@@ -712,7 +720,7 @@ func makePhotoRequest(input: InputDescriptor) -> RenderRequest {
 
 桌面路径提取部分拍摄条件供计算使用，不提供完整源文件元数据的自动透传。需要保留其他元数据时，应由调用方独立管理。
 
-风格生成分析提供受约束的定位、颜色、细节、纹理、光晕建议和条件响应分析。算法验证与目标相机实拍验证是不同的验收层级；自动生成资格取决于对应验证结果，不能仅凭 GPU 路径一致性判定相机匹配度。
+风格生成分析提供受约束的定位、颜色、细节、纹理、光晕建议和条件响应分析。算法验证与参考图像效果验证分别执行；GPU 路径一致性不能替代图像匹配度测量。
 
 ## 错误、诊断与日志
 
@@ -741,4 +749,4 @@ swift test -c release
 swift test -c release --filter CurveFunctionTests
 ```
 
-GPU 测试需要可用的 Metal 设备。测试结果用于验证参数约束、渲染行为与路径一致性，不代替目标设备的性能测量或相机风格匹配评估。
+GPU 测试需要可用的 Metal 设备。测试结果用于验证参数约束、渲染行为与路径一致性，不代替目标设备的性能测量或风格匹配评估。

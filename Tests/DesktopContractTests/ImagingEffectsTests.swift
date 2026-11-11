@@ -4,7 +4,7 @@ import ImagingCore
 @testable import ImageRendering
 @testable import ImageAnalysis
 
-final class CameraEffectsTests:XCTestCase {
+final class ImagingEffectsTests:XCTestCase {
     private var neutral:Profile {Profile.standard}
     func testNewSchemaRoundTripAndValidation() throws {
         var p=neutral;p.parameters.tone.enabled=true;p.parameters.tone.curve = .init(knots:zip([0.0,0.25,0.5,0.75,1],[0,0.1,0.5,0.75,1]).map{.init(x:$0,y:$1)},interpolation:.smooth);p.parameters.softening.enabled=true;p.parameters.softening.amount=0.3

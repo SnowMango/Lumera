@@ -8,7 +8,7 @@ public enum StylePresets {
         switch name {
         case "standard":return p
         case "digital-demo":
-            p.id="digital-demo";p.name="数码质感示例";p.description="原创演示参数；未标定到具体相机。"
+            p.id="digital-demo";p.name="数码质感示例";p.description="原创演示参数；未附测量证据。"
             p.parameters.tone.enabled=true;p.parameters.tone.curve = .init(knots:zip([0.0,0.25,0.5,0.75,1],[0,0.22,0.5,0.79,1]).map{.init(x:$0,y:$1)},interpolation:.smooth)
             p.parameters.detail.enabled=true;p.parameters.detail.fineGain=0.88;p.parameters.detail.midGain=0.96;p.parameters.detail.sharpenAmount=0.2
             p.parameters.vignette.enabled=true;p.parameters.vignette.amountEV=0.3

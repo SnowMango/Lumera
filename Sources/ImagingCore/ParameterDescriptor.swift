@@ -66,5 +66,5 @@ public struct ParameterDescriptor {
         .init("noise.lumaSigma", "明暗颗粒大小 / px", "noise", \.noise.lumaSigma, 0...4, .referencePixels),
         .init("noise.chromaSigma", "彩色颗粒大小 / px", "noise", \.noise.chromaSigma, 0...6, .referencePixels),
         .init("noise.chromaCorrelation", "彩色噪点关联度", "noise", \.noise.chromaCorrelation, -0.95...0.95)
-    ] + cameraEffects + colorControls + shiftControls
+    ] + imagingEffects + colorControls + shiftControls
 }

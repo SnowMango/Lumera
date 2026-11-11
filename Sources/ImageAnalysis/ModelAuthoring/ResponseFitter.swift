@@ -16,10 +16,10 @@ public struct FittedConditionDomain: Codable, Equatable, Sendable {
 }
 
 /// 条件外观模型、可用资源与制作诊断。项目和测量摘要记录参与拟合的内容身份。
-public struct CameraFitResult: Sendable {
+public struct ModelFitResult: Sendable {
     /// 区分手动制作与由前向外观拟合推导的结果。两类结果均需独立实拍验收。
     public enum Derivation: String, Codable, Sendable { case manual, c3ForwardFits }
-    public let model: CameraModel
+    public let model: StyleModel
     public let resources: ModelResourceSet
     public let calibration: InputCalibration?
     public let baselineDigest: String
@@ -34,17 +34,17 @@ public struct CameraFitResult: Sendable {
     public let derivation: Derivation
 
     /// A manual/constant model can be packaged without inventing conditional measurements.
-    public init(model: CameraModel, resources: ModelResourceSet, calibration: InputCalibration? = nil,
+    public init(model: StyleModel, resources: ModelResourceSet, calibration: InputCalibration? = nil,
                 unresolved: [String] = []) throws {
         try model.validate(); try calibration?.validate()
         self.init(model:model,resources:resources,calibration:calibration,baselineDigest:try model.digest(),
                   projectDigest:nil,consumedSampleIDs:[],measurementDigests:[],conditionDomains:[],
-                  trainResidual:nil,tuneResidual:nil,unresolved:unresolved,algorithmVersion:"manual-camera-v1",derivation:.manual)
+                  trainResidual:nil,tuneResidual:nil,unresolved:unresolved,algorithmVersion:"manual-model-v2",derivation:.manual)
     }
 
     /// Preserve the original model's edit/adaptation declarations while installing a constant C3 appearance.
     /// This convenience path remains manual: an externally supplied C3 result is not conditional evidence.
-    public static func constant(base: AppearanceFitResult, baseline: CameraModel, resources: ModelResourceSet,
+    public static func constant(base: AppearanceFitResult, baseline: StyleModel, resources: ModelResourceSet,
                                 calibration: InputCalibration? = nil) throws -> Self {
         try baseline.validate(); try calibration?.validate()
         if let inputIdentity=base.inputIdentity,let calibration {
@@ -63,7 +63,7 @@ public struct CameraFitResult: Sendable {
                      unresolved:base.unresolved+["No conditional or temporal evidence was fitted"],algorithmVersion:"constant-c3-v1",derivation:.manual)
     }
 
-    init(model:CameraModel,resources:ModelResourceSet,calibration:InputCalibration?,baselineDigest:String,
+    init(model:StyleModel,resources:ModelResourceSet,calibration:InputCalibration?,baselineDigest:String,
          projectDigest:String?,consumedSampleIDs:[String],measurementDigests:[String],conditionDomains:[FittedConditionDomain],
          trainResidual:Double?,tuneResidual:Double?,unresolved:[String],algorithmVersion:String,derivation:Derivation) {
         self.model=model;self.resources=resources;self.calibration=calibration;self.baselineDigest=baselineDigest
@@ -138,7 +138,7 @@ public struct ConditionAppearanceMeasurement: Sendable {
     func value(_ axis:ObservationAxis)->Double? {
         switch axis { case .source(let axis): return sourceConditions[axis];case .target(let axis):return targetConditions[axis];case .feature:return nil }
     }
-    func context(_ model:CompiledCameraModel)->EvaluationContext {
+    func context(_ model:CompiledStyleModel)->EvaluationContext {
         let stamp=FrameStamp(streamID:id,generation:1,index:0,presentationTime:0,duration:1)
         var observations=FrameObservations(stamp:stamp,sourceID:"condition-fit",calibrationID:"frozen-input",featureDigest:model.featureDigest)
         observations.captureConditions=sourceConditions
@@ -146,17 +146,17 @@ public struct ConditionAppearanceMeasurement: Sendable {
     }
 }
 /// 在给定条件测量上评分已编译候选，返回该评分器定义的残差。
-public protocol CameraResponseScoring {
-    func residual(_ model:CompiledCameraModel,measurements:[ConditionAppearanceMeasurement],resources:ModelResourceSet) async throws -> Double
+public protocol ResponseScoring {
+    func residual(_ model:CompiledStyleModel,measurements:[ConditionAppearanceMeasurement],resources:ModelResourceSet) async throws -> Double
 }
 /// 对手动锚点计算控制值残差。生产数据集路径使用正向渲染的像素评分。
-public struct TypedControlConditionScorer: CameraResponseScoring {
+public struct TypedControlConditionScorer: ResponseScoring {
     public init() {}
-    public func residual(_ model:CompiledCameraModel,measurements:[ConditionAppearanceMeasurement],resources:ModelResourceSet) async throws -> Double {
+    public func residual(_ model:CompiledStyleModel,measurements:[ConditionAppearanceMeasurement],resources:ModelResourceSet) async throws -> Double {
         var maximum=0.0
         for measurement in measurements {
             guard !measurement.controls.isEmpty else { throw LabError.measurement("Control-domain scoring requires explicit target controls") }
-            let controls=try CameraModelEvaluator.evaluate(model,context:measurement.context(model))
+            let controls=try StyleModelEvaluator.evaluate(model,context:measurement.context(model))
             for target in measurement.controls {
                 let actual=try ControlAccess.value(target:target.target,parameters:controls.parameters,lutWeights:controls.lutWeights)
                 maximum=max(maximum,try ControlInterpolation.distance(actual,target.value))
@@ -166,12 +166,12 @@ public struct TypedControlConditionScorer: CameraResponseScoring {
     }
 }
 /// 从训练条件构造有界响应候选，并依据调优残差与改进门槛选择。
-public enum CameraResponseFitter {
+public enum ResponseFitter {
     /// 从调用方提供的锚点拟合，输出手动来源的制作结果。验收数据仅参与分组校验。
-    public static func fit(measurements:[ConditionAppearanceMeasurement],baseline:CameraModel,resources:ModelResourceSet,
-                           design:ConditionFitDesign,options:FitOptions,scorer:any CameraResponseScoring = TypedControlConditionScorer()) async throws -> CameraFitResult {
+    public static func fit(measurements:[ConditionAppearanceMeasurement],baseline:StyleModel,resources:ModelResourceSet,
+                           design:ConditionFitDesign,options:FitOptions,scorer:any ResponseScoring = TypedControlConditionScorer()) async throws -> ModelFitResult {
         try baseline.validate();try design.validate();try options.validate()
-        guard baseline.responses.isEmpty,baseline.legacyProfile == nil else { throw LabError.unsupported("Condition fitting requires a constant camera baseline") }
+        guard baseline.responses.isEmpty,baseline.legacyProfile == nil else { throw LabError.unsupported("Condition fitting requires a constant model baseline") }
         let selected=measurements.filter{$0.split != .acceptance}
         guard selected.count<=options.maxSamples,options.maxIterations<=1000,options.maxSamples<=100_000 else { throw LabError.invalid("Condition fit budget exceeded") }
         var ids=Set<String>(),groups=[String:CalibrationSplit](),unresolved=[String]()
@@ -220,13 +220,13 @@ public enum CameraResponseFitter {
             if owner == "tone.curve" { constant.appearance.parameters.tone.enabled=true }
         }
         var best=constant,domains=[FittedConditionDomain]()
-        var trainError=try await scorer.residual(CameraModelCompiler.compile(constant),measurements:train,resources:resources)
-        var tuneError=tune.isEmpty ? nil:try await scorer.residual(CameraModelCompiler.compile(constant),measurements:tune,resources:resources)
+        var trainError=try await scorer.residual(StyleModelCompiler.compile(constant),measurements:train,resources:resources)
+        var tuneError=tune.isEmpty ? nil:try await scorer.residual(StyleModelCompiler.compile(constant),measurements:tune,resources:resources)
         guard trainError.isFinite,tuneError?.isFinite ?? true else { throw LabError.measurement("Nonfinite condition residual") }
         if tune.isEmpty {
             unresolved.append("No independent tune conditions; retaining the least-complex constant response")
         } else {
-            func candidate(_ axes:[ObservationAxis]) throws -> (CameraModel,[FittedConditionDomain])? {
+            func candidate(_ axes:[ObservationAxis]) throws -> (StyleModel,[FittedConditionDomain])? {
                 guard train.allSatisfy({record in axes.allSatisfy{record.value($0) != nil}}) else {
                     unresolved.append("Missing axis observations; no domain claimed for \(axes)");return nil
                 }
@@ -300,8 +300,8 @@ public enum CameraResponseFitter {
                 candidates+=1
                 try Task.checkCancellation()
                 guard let (proposed,coverage)=try candidate(axes) else { continue }
-                let compiled:CompiledCameraModel
-                do { compiled=try CameraModelCompiler.compile(proposed) }
+                let compiled:CompiledStyleModel
+                do { compiled=try StyleModelCompiler.compile(proposed) }
                 catch { unresolved.append("Unsupported candidate resource/control combination: \(error)");continue }
                 let error:Double
                 do { error=try await scorer.residual(compiled,measurements:tune,resources:resources) }
@@ -314,7 +314,7 @@ public enum CameraResponseFitter {
                 }
             }
         }
-        unresolved.append("Condition cells describe development support only; independent camera/whole-scene qualification remains pending")
+        unresolved.append("Condition cells describe development support only; independent whole-scene qualification remains pending")
         return .init(model:best,resources:resources,calibration:nil,baselineDigest:try baseline.digest(),projectDigest:nil,
                      consumedSampleIDs:Array(Set(selected.flatMap(\.sampleIDs))).sorted(),measurementDigests:[],conditionDomains:domains,
                      trainResidual:trainError,tuneResidual:tuneError,unresolved:unresolved,algorithmVersion:"bounded-condition-core-v1",derivation:.manual)
@@ -323,14 +323,14 @@ public enum CameraResponseFitter {
 
 /// Caller-owned serial B7 adapter. Patch inputs are already in the calibrated working space;
 /// B2 transports them without a second input correction. This is not whole-scene qualification.
-public final class B7CameraResponseScorer: CameraResponseScoring, TemporalResponsePredicting {
+public final class B7ResponseScorer: ResponseScoring, TemporalResponsePredicting {
     private let renderer:LumeraRenderer
     private let working:WorkingImageContract
     private let execution:ExecutionProfile
     private let temporalResources:ModelResourceSet
     private let context:CIContext
     private var cachedKey:String?
-    private var cachedModel:PreparedCameraModel?
+    private var cachedModel:PreparedStyleModel?
     public init(renderer:LumeraRenderer,working:WorkingImageContract,execution:ExecutionProfile,resources:ModelResourceSet) throws {
         try working.validate();try execution.validate()
         guard working.dynamicRange == .sdr,execution.dynamicRange == .sdr else { throw LabError.unsupported("Condition patch validation currently requires encoded SDR") }
@@ -347,21 +347,21 @@ public final class B7CameraResponseScorer: CameraResponseScoring, TemporalRespon
             used+=bytes
         }
     }
-    public func residual(_ model:CompiledCameraModel,measurements:[ConditionAppearanceMeasurement],resources:ModelResourceSet) async throws -> Double {
+    public func residual(_ model:CompiledStyleModel,measurements:[ConditionAppearanceMeasurement],resources:ModelResourceSet) async throws -> Double {
         var maximum=0.0
         for measurement in measurements {
             guard !measurement.colors.isEmpty,measurement.colors.allSatisfy({$0.target.count==3 && $0.target.allSatisfy{$0.isFinite && (0...1).contains($0)}}) else { throw LabError.measurement("B7 condition scoring needs actual aligned input/target pixels") }
-            let controls=try CameraModelEvaluator.evaluate(model,context:measurement.context(model))
+            let controls=try StyleModelEvaluator.evaluate(model,context:measurement.context(model))
             let values=try await pixels(measurement.colors.map(\.input),controls:controls,model:model,resources:resources)
             let targets=measurement.colors.flatMap(\.target)
             for (actual,target) in zip(values,targets) { maximum=max(maximum,abs(actual-target)) }
         }
         return maximum
     }
-    public func predict(_ frame:ResponseSequence.Frame,controls:AutomaticControls,model:CompiledCameraModel) async throws -> [Double] {
+    public func predict(_ frame:ResponseSequence.Frame,controls:AutomaticControls,model:CompiledStyleModel) async throws -> [Double] {
         try await pixels(frame.inputColors,controls:controls,model:model,resources:temporalResources)
     }
-    private func pixels(_ colors:[[Double]],controls:AutomaticControls,model:CompiledCameraModel,resources:ModelResourceSet) async throws -> [Double] {
+    private func pixels(_ colors:[[Double]],controls:AutomaticControls,model:CompiledStyleModel,resources:ModelResourceSet) async throws -> [Double] {
         let p=controls.parameters
         guard !p.detail.isActive,!p.softening.isActive,!p.vignette.isActive,!p.glow.isActive,!p.halation.isActive,!p.noise.isActive,!p.grain.isActive,
               !colors.isEmpty,colors.count<=100_000,colors.allSatisfy({$0.count==3 && $0.allSatisfy{$0.isFinite && (0...1).contains($0)}}) else {
@@ -401,14 +401,14 @@ public final class B7CameraResponseScorer: CameraResponseScoring, TemporalRespon
     }
 }
 
-private struct C3ConditionPixelScorer: CameraResponseScoring {
+private struct C3ConditionPixelScorer: ResponseScoring {
     let datasets:[String:CalibrationDataset]
     let loader:AppearanceDatasetLoader
     let calibration:InputCalibration
     let inputResources:ModelResourceSet
     let maximumSamples:Int
-    let renderer:B7CameraResponseScorer
-    func residual(_ model:CompiledCameraModel,measurements:[ConditionAppearanceMeasurement],resources:ModelResourceSet) async throws -> Double {
+    let renderer:B7ResponseScorer
+    func residual(_ model:CompiledStyleModel,measurements:[ConditionAppearanceMeasurement],resources:ModelResourceSet) async throws -> Double {
         var maximum=0.0
         for measurement in measurements {
             guard let dataset=datasets[measurement.id] else { throw LabError.invalid("Missing frozen condition cell") }
@@ -424,7 +424,7 @@ private struct C3ConditionPixelScorer: CameraResponseScoring {
     }
 }
 
-extension CameraResponseFitter {
+extension ResponseFitter {
     static func validateBase(_ base:AppearanceFitResult?,dataset:CalibrationDataset,calibration:InputCalibration) throws {
         let selected=dataset.samples.filter{$0.split != .acceptance}
         if let base {
@@ -439,17 +439,17 @@ extension CameraResponseFitter {
     }
     /// 在冻结条件单元内正向拟合外观，再比较条件响应候选。输出记录参与拟合的样本与测量摘要。
     /// 调用方直接提供的锚点走手动拟合路径。
-    public static func fit(_ dataset:CalibrationDataset,baseline:CameraModel,calibration:InputCalibration,resources:ModelResourceSet,
+    public static func fit(_ dataset:CalibrationDataset,baseline:StyleModel,calibration:InputCalibration,resources:ModelResourceSet,
                            inputResources:ModelResourceSet?=nil,design:ConditionFitDesign,options:FitOptions,
                            appearanceOptions:AppearanceFitOptions = .init(),loader:AppearanceDatasetLoader,
-                           predictor:ReferenceAppearancePredictor,scorer:B7CameraResponseScorer,base:AppearanceFitResult?=nil) async throws -> CameraFitResult {
+                           predictor:ReferenceAppearancePredictor,scorer:B7ResponseScorer,base:AppearanceFitResult?=nil) async throws -> ModelFitResult {
         try options.validate();try appearanceOptions.validate();try design.validate();try calibration.validate()
         guard baseline.identity==dataset.project.target,calibration.source==dataset.project.source,
               calibration.working==dataset.project.working else { throw LabError.invalid("Conditional authoring project/baseline/calibration mismatch") }
         let selected=dataset.samples.filter{$0.split != .acceptance}
         try validateBase(base,dataset:dataset,calibration:calibration)
-        let initial=try base.map{try CameraFitResult.constant(base:$0,baseline:baseline,resources:resources,calibration:calibration)}
-            ?? CameraFitResult(model:baseline,resources:resources,calibration:calibration)
+        let initial=try base.map{try ModelFitResult.constant(base:$0,baseline:baseline,resources:resources,calibration:calibration)}
+            ?? ModelFitResult(model:baseline,resources:resources,calibration:calibration)
         guard !design.controlledConditions.isEmpty else {
             return .init(model:initial.model,resources:initial.resources,calibration:initial.calibration,
                          baselineDigest:initial.baselineDigest,projectDigest:initial.projectDigest,consumedSampleIDs:initial.consumedSampleIDs,

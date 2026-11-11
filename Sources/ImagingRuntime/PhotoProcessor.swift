@@ -20,7 +20,7 @@ public final class PhotoProcessor: @unchecked Sendable {
     /// calibration 为 nil 时使用明确未验证的恒等输入参考；此调用不继承视频适应历史。
     /// 真正更换输入或裁剪成新照片时应重新调用此方法，而非复用旧快照。
     public func process(_ source: SourceImage, descriptor: SourceDescriptor, recipe: InputRecipe,
-                        calibration: InputCalibration?, model: PreparedCameraModel, edits: EditRequest = .init(), stamp: FrameStamp,
+                        calibration: InputCalibration?, model: PreparedStyleModel, edits: EditRequest = .init(), stamp: FrameStamp,
                         targetConditions: CaptureConditions = .init(), rawOverrides: [RAWOverride] = [], seed: UInt32 = 42,
                         tiled: Bool = false) async throws -> PhotoResult {
         try await process(source, descriptor: descriptor, recipe: recipe, calibration: calibration, model: model, edits: edits, stamp: stamp,
@@ -29,7 +29,7 @@ public final class PhotoProcessor: @unchecked Sendable {
 
     /// Retains the original source and RAW configuration for precision changes and replay.
     public func process(_ source: SourceImage, descriptor: SourceDescriptor, recipe: InputRecipe,
-                        calibration: InputCalibration?, model: PreparedCameraModel, edits: EditRequest = .init(), stamp: FrameStamp,
+                        calibration: InputCalibration?, model: PreparedStyleModel, edits: EditRequest = .init(), stamp: FrameStamp,
                         targetConditions: CaptureConditions = .init(), rawOverrides: [RAWOverride] = [], seed: UInt32 = 42,
                         tiled: Bool = false, rawConfiguration: RAWDevelopmentConfiguration?) async throws -> PhotoResult {
         try Task.checkCancellation(); try stamp.validate()
@@ -45,7 +45,7 @@ public final class PhotoProcessor: @unchecked Sendable {
         let input = try await normalizer.normalize(normalized, calibration: calibration, resources: inputResources)
         try lease.validate()
         let observations = try await renderer.observe(input, stamp: stamp, requirements: model.compiled.definition.observations)
-        let automatic = try CameraModelEvaluator.evaluate(model.compiled, context: .init(evaluationStamp: stamp, observations: observations, targetConditions: targetConditions))
+        let automatic = try StyleModelEvaluator.evaluate(model.compiled, context: .init(evaluationStamp: stamp, observations: observations, targetConditions: targetConditions))
         let resolved = try EditResolver.resolve(edits, automatic: automatic, model: model.compiled)
         let plan = try RenderPlanner().plan(resolved, input: input, model: model, stamp: stamp, seed: seed, reservation: reservation)
         let frame = try await (tiled ? renderer.renderTiled(input, plan: plan) : renderer.render(input, plan: plan))
@@ -101,7 +101,7 @@ extension PhotoProcessor {
     }
 
     /// Apply a fresh model decision to the source. An earlier decision can supply compatible observations.
-    public func process(_ source: PhotoSource, cache: PhotoInputCache, model: PreparedCameraModel,
+    public func process(_ source: PhotoSource, cache: PhotoInputCache, model: PreparedStyleModel,
                         edits: EditRequest = .init(), stamp: FrameStamp, targetConditions: CaptureConditions = .init(),
                         seed: UInt32 = 42, tiled: Bool = false, retention: PhotoInputRetention = .retain,
                         reusing previous: PhotoSessionSnapshot? = nil) async throws -> PhotoSessionResult {
@@ -125,7 +125,7 @@ extension PhotoProcessor {
         } else {
             observations = try await model.renderer.observe(input, stamp: stamp, requirements: requirements, reservation: reservation)
         }
-        let automatic = try CameraModelEvaluator.evaluate(model.compiled,
+        let automatic = try StyleModelEvaluator.evaluate(model.compiled,
             context: .init(evaluationStamp: stamp, observations: observations, targetConditions: targetConditions))
         let resolved = try EditResolver.resolve(edits, automatic: automatic, model: model.compiled)
         let frame = try await render(input, model: model, resolved: resolved, stamp: stamp, seed: seed,
@@ -162,7 +162,7 @@ extension PhotoProcessor {
                                 reservation: reservation, region: region, tiled: tiled)
     }
 
-    private func acquire(_ source: PhotoSource, cache: PhotoInputCache, model: PreparedCameraModel,
+    private func acquire(_ source: PhotoSource, cache: PhotoInputCache, model: PreparedStyleModel,
                          retention: PhotoInputRetention) async throws -> PhotoInputLease {
         guard source.working == working, model.execution.dynamicRange == working.dynamicRange else {
             throw LabError.invalid("Photo source and model must use the processor's working range and reference")
@@ -180,7 +180,7 @@ extension PhotoProcessor {
         }
     }
 
-    private func render(_ input: PreparedInput, model: PreparedCameraModel, resolved: ResolvedControls, stamp: FrameStamp,
+    private func render(_ input: PreparedInput, model: PreparedStyleModel, resolved: ResolvedControls, stamp: FrameStamp,
                         seed: UInt32, reservation: FrameReservation, region: CGRect?, tiled: Bool) async throws -> RenderedFrame {
         let plan = try RenderPlanner().plan(resolved, input: input, model: model, stamp: stamp, seed: seed, reservation: reservation)
         defer { plan.cancel() }
@@ -193,7 +193,7 @@ extension PhotoProcessor {
 extension PhotoProcessor {
     /// Bounded original-source preparation, full-frame decision and awaited tile output.
     /// The returned value snapshot retains no prepared pixels. Decoder memory remains opaque.
-    public func processStreaming(_ source: PhotoSource, model: PreparedCameraModel,
+    public func processStreaming(_ source: PhotoSource, model: PreparedStyleModel,
                                  edits: EditRequest = .init(), stamp: FrameStamp,
                                  targetConditions: CaptureConditions = .init(), seed: UInt32 = 42,
                                  sink: (PhotoTile) async throws -> Void) async throws -> PhotoSessionSnapshot {

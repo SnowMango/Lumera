@@ -7,7 +7,7 @@ extension LumeraRenderer {
     /// Renders an integer ROI in the oriented, final output coordinate system.
     /// The returned image's origin is zero. Its grain, optics and vignette use full-frame coordinates.
     public func renderRegion(_ image: CIImage, region: CGRect, metadata: [String: Any]? = nil,
-                             orientation: CGImagePropertyOrientation? = nil, style: PreparedCameraStyle,
+                             orientation: CGImagePropertyOrientation? = nil, style: PreparedResolvedStyle,
                              options: RenderOptions = .init(), correction: PreparedDeviceCorrection? = nil) async throws -> CIImage {
         try await renderTiles(image, region: region, metadata: metadata, orientation: orientation, style: style,
                               options: options, correction: correction, budget: 128 * 1024 * 1024)
@@ -16,14 +16,14 @@ extension LumeraRenderer {
     /// Bounds transient Metal texture work per tile. The complete CPU-backed output, decoder,
     /// caller-owned source and prepared resources have independent lifetimes and budgets.
     public func renderTiled(_ image: CIImage, metadata: [String: Any]? = nil, orientation: CGImagePropertyOrientation? = nil,
-                            style: PreparedCameraStyle, options: RenderOptions = .init(),
+                            style: PreparedResolvedStyle, options: RenderOptions = .init(),
                             correction: PreparedDeviceCorrection? = nil, workingMemoryLimit: Int = 134217728) async throws -> CIImage {
         try await renderTiles(image, region: nil, metadata: metadata, orientation: orientation, style: style,
                               options: options, correction: correction, budget: workingMemoryLimit)
     }
 
     private func renderTiles(_ image: CIImage, region: CGRect?, metadata: [String: Any]?, orientation: CGImagePropertyOrientation?,
-                             style: PreparedCameraStyle, options: RenderOptions, correction: PreparedDeviceCorrection?, budget: Int) async throws -> CIImage {
+                             style: PreparedResolvedStyle, options: RenderOptions, correction: PreparedDeviceCorrection?, budget: Int) async throws -> CIImage {
         try Task.checkCancellation()
         let source = try normalizedSource(image, metadata: metadata, orientation: orientation, dynamicRange: options.dynamicRange)
         let outputSpace = Self.colorSpace(for: options.dynamicRange)
