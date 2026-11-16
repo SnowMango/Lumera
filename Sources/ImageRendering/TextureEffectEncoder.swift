@@ -9,6 +9,8 @@ public final class PreparedResolvedStyle: @unchecked Sendable {
     fileprivate let color: PreparedColorTransform
     fileprivate let lut: PreparedLUT?
     fileprivate let lutBlend: PreparedLUTBlend?
+    var processingTextures: [MTLTexture] { (lut.map { [$0.texture] } ?? []) + (lutBlend?.textures ?? []) }
+    var hasProcessingLUT: Bool { lut != nil || lutBlend != nil }
     var hasExactIdentityLUT: Bool { lut?.isExactIdentity == true }
     public var preparationStatistics: StylePreparationStatistics {
         let counts = executionPlan.counts
@@ -33,13 +35,13 @@ public final class PreparedResolvedStyle: @unchecked Sendable {
 public final class TextureEffectEncoder: @unchecked Sendable {
     private let device: MTLDevice
     let pipelines: [String: MTLComputePipelineState]
-    private let poolLock=NSLock()
+    private let poolLock=UnfairLock()
     private var available: [Arena]=[]
     private var cacheGeneration:UInt64=0
     private var pooledCommands = 0
     private var boundedScopes = 0
     private var lutParses=0,lutUploads=0
-    private let lutLock=NSLock()
+    private let lutLock=UnfairLock()
     private var preparedLUTs:[PreparedLUT]=[]
     public var staticResourceStatistics:StaticResourceStatistics {
         poolLock.lock();defer{poolLock.unlock()}
@@ -194,10 +196,33 @@ public final class TextureEffectEncoder: @unchecked Sendable {
                               sourceArea: CGRect(x: 0, y: 0, width: input.width, height: input.height))
     }
     private func hasEffects(_ p: StyleParameters, style: PreparedResolvedStyle, correction: PreparedDeviceCorrection?, request: RenderRequest) -> Bool {
-        correction != nil || p.color.isActive || style.lut != nil || style.lutBlend != nil || p.tone.isActive ||
-            p.detail.isActive || p.softening.isActive || p.vignette.isActive ||
-            (request.previewGlow && (p.glow.isActive || p.halation.isActive)) || p.noise.isActive || p.grain.isActive
+        let activity = style.executionPlan.activity(for: p)
+        return correction != nil || style.lut != nil || style.lutBlend != nil || activity.ordinary ||
+            (request.previewGlow && activity.opticalPreview)
     }
+    func workRequirements(for plan: FrameRenderPlan) throws -> FrameWorkRequirements {
+        let input = plan.input, request = plan.request
+        try validateInput(input.texture, style: plan.style, correction: plan.prefix, request: request)
+        let geometry = Self.fullGeometry(request)
+        return FrameWorkRequirements(
+            hasEffects: hasEffects(plan.controls.parameters, style: plan.style, correction: plan.prefix, request: request),
+            needsResize: geometry.sourceWidth != geometry.fullWidth || geometry.sourceHeight != geometry.fullHeight,
+            inputFormat: input.texture.pixelFormat, outputFormat: precision == .float32 ? .rgba32Float : .rgba16Float)
+    }
+
+    private func validateInput(_ input: MTLTexture, style: PreparedResolvedStyle,
+                               correction: PreparedDeviceCorrection?, request: RenderRequest) throws {
+        guard input.device.registryID == device.registryID, style.deviceID == device.registryID,
+              correction == nil || correction!.deviceID == device.registryID,
+              input.textureType == .type2D, input.width == request.input.width, input.height == request.input.height,
+              [.rgba8Unorm, .bgra8Unorm, .rgba16Float, .rgba32Float].contains(input.pixelFormat) else {
+            throw LabError.invalid("Texture dimensions, format or device differ from the frame request")
+        }
+        if request.dynamicRange == .edr && ![MTLPixelFormat.rgba16Float, .rgba32Float].contains(input.pixelFormat) {
+            throw LabError.invalid("EDR textures require RGBA16Float or RGBA32Float")
+        }
+    }
+
     private func assess(style: PreparedResolvedStyle, parameters: StyleParameters, color: PreparedColorTransform,
                         correction: PreparedDeviceCorrection?, request: RenderRequest, geometry: RenderGeometry) -> PrecisionAssessment {
         PrecisionSafety.assess(parameters: parameters, color: color, correction: correction, lut: style.lut,
@@ -209,19 +234,13 @@ public final class TextureEffectEncoder: @unchecked Sendable {
     }
     private func encodeFrame(_ input:MTLTexture,style:PreparedResolvedStyle,parameters p:StyleParameters,color:PreparedColorTransform,curves:PreparedResponseCurves,
                              temporal:TemporalPolicy,correction:PreparedDeviceCorrection?,request:RenderRequest,geometry:RenderGeometry? = nil,
-                             workingSet:TileWorkingSet? = nil,commandBuffer:MTLCommandBuffer,precisionChecked:Bool = false) throws -> MTLTexture {
+                             workingSet:TileWorkingSet? = nil,commandBuffer:MTLCommandBuffer,precisionChecked:Bool = false,
+                             suppliedArena: Arena? = nil, destination: MTLTexture? = nil) throws -> MTLTexture {
         try request.validate()
-        guard input.device.registryID==device.registryID, style.deviceID==device.registryID,
-              correction == nil || correction!.deviceID==device.registryID,
-              commandBuffer.device.registryID==device.registryID, commandBuffer.status == .notEnqueued,
-              commandBuffer.retainedReferences,
-              input.textureType == .type2D, input.width==request.input.width,input.height==request.input.height,
-              [.rgba8Unorm,.bgra8Unorm,.rgba16Float,.rgba32Float].contains(input.pixelFormat) else {
-            throw LabError.invalid("纹理尺寸、格式或设备与请求不符；请传入保留资源引用且尚未提交的 command buffer")
-        }
-        let extended = request.dynamicRange == .edr
-        if extended && ![MTLPixelFormat.rgba16Float, .rgba32Float].contains(input.pixelFormat) {
-            throw LabError.invalid("EDR 纹理需要 RGBA16Float 或 RGBA32Float；数值使用扩展编码 sRGB")
+        try validateInput(input, style: style, correction: correction, request: request)
+        guard commandBuffer.device.registryID == device.registryID, commandBuffer.status == .notEnqueued,
+              commandBuffer.retainedReferences else {
+            throw LabError.invalid("Frame encoding requires an unsubmitted retained command on the encoder device")
         }
         let frameGeometry = geometry ?? Self.fullGeometry(request)
         let needsResize = frameGeometry.sourceWidth != frameGeometry.fullWidth || frameGeometry.sourceHeight != frameGeometry.fullHeight
@@ -231,13 +250,15 @@ public final class TextureEffectEncoder: @unchecked Sendable {
                                                request: request, geometry: frameGeometry))
         }
         let format: MTLPixelFormat = precision == .float32 ? .rgba32Float : .rgba16Float
-        if !hasEffects && !needsResize && input.pixelFormat == format { return input }
+        let work = FrameWorkRequirements(hasEffects: hasEffects, needsResize: needsResize,
+                                         inputFormat: input.pixelFormat, outputFormat: format)
+        if !work.requiresPixelProcessing { return input }
         // 锁只保护空闲池和世代，取出的工作区在当前命令内独占。
         poolLock.lock()
-        let pooled = geometry == nil && workingSet == nil
+        let pooled = geometry == nil && workingSet == nil && suppliedArena == nil
         if pooled && boundedScopes > 0 { poolLock.unlock(); throw LabError.invalid("Unbudgeted renderer commands are excluded during bounded photo work") }
         if pooled { pooledCommands += 1 }
-        let arena = pooled ? (available.popLast() ?? Arena(device:device)) : Arena(device:device, workingSet:workingSet)
+        let arena = suppliedArena ?? (pooled ? (available.popLast() ?? Arena(device:device)) : Arena(device:device, workingSet:workingSet))
         let generation=cacheGeneration
         poolLock.unlock()
         let lifetime = pooled ? EncoderScope { [self] in
@@ -252,12 +273,41 @@ public final class TextureEffectEncoder: @unchecked Sendable {
         }
         if !p.noise.isActive {arena.clearNoise()}
         let backend=RealtimeEffectBackend(arena:arena,pipelines:pipelines,commandBuffer:commandBuffer,geometry:geometry,frameGeometry:frameGeometry)
+        if let destination {
+            backend.destination = destination
+            let activity = EffectActivity(p, previewGlow: request.previewGlow)
+            if p.grain.isActive {
+                let factor = style.executionPlan.grain(for: p.grain).subdivision(scale: EffectScale.factor(width: frameGeometry.fullWidth, height: frameGeometry.fullHeight))
+                backend.finalPass = factor > 1 ? (request.dynamicRange == .edr ? "grainReduceExtended" : "grainReduce") :
+                    (request.dynamicRange == .edr ? "filmGrainExtended" : "filmGrain")
+            } else {
+                backend.finalPass = activity.linearOptics ? (request.dynamicRange == .edr ? "finishExtended" : "finish") :
+                    (request.dynamicRange == .edr ? "finishEncodedExtended" : "finishEncoded")
+            }
+            if !hasEffects && !needsResize { backend.finalPass = "copyPixels" }
+        }
         if !hasEffects && !needsResize { return try backend.pass("copyPixels", input) }
         let frame = EffectFrame(executionPlan: style.executionPlan, parameters: p, color: color, curves: curves,
                                 lut: style.lut?.texture, lutBoundaryPolicy: style.lut?.boundaryPolicy ?? .automatic,
                                 correction: correction, temporal: temporal, request: request, geometry: frameGeometry, lutBlend: style.lutBlend)
         let pipeline=EffectPipeline(backend:backend,frame:frame)
         return try pipeline.encodeSuffix(pipeline.encodePrefix(pipeline.prepareInput(input)))
+    }
+
+    /// Uses only the supplied arena. Preparing it may allocate; executing it may not.
+    func encodePrepared(_ input: MTLTexture, output: MTLTexture, prepared: PreparedProcessingRequest,
+                        arena: Arena, command: MTLCommandBuffer) throws {
+        let style = prepared.style, p = prepared.parameters
+        let result = try encodeFrame(input, style: style, parameters: p, color: style.executionPlan.color(for: p.color),
+            curves: style.executionPlan.curves(for: p), temporal: style.style.temporalPolicy,
+            correction: prepared.correction, request: prepared.request, commandBuffer: command,
+            precisionChecked: true, suppliedArena: arena, destination: output)
+        if result !== output {
+            let backend = RealtimeEffectBackend(arena: arena, pipelines: pipelines, commandBuffer: command,
+                geometry: nil, frameGeometry: Self.fullGeometry(prepared.request))
+            backend.destination = output; backend.finalPass = "copyPixels"
+            _ = try backend.pass("copyPixels", result)
+        }
     }
 
     private func recycle(_ arena:Arena,generation:UInt64) {
@@ -306,7 +356,7 @@ public struct PreparedGaussianKernel {
 
 /// Runs cleanup exactly once, including when an unsubmitted command releases its handlers.
 final class EncoderScope: @unchecked Sendable {
-    private let lock = NSLock()
+    private let lock = UnfairLock()
     private var cleanup: (() -> Void)?
     init(_ cleanup: @escaping () -> Void) { self.cleanup = cleanup }
     func finish() {

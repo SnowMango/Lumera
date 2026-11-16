@@ -16,6 +16,8 @@ final class CachedInput {
         return unique.values.reduce(0){$0+$1.width*$1.height*16}
     }
 }
+// PrefixKey includes every optical toggle/parameter (including previewGlow), so a
+// cached prefix is reused only with the same encoded/linear suffix input domain.
 struct CachedPrefix {let key:PrefixKey;let image:TextureLease;let layer:TextureLease?}
 struct PrefixKey:Equatable {
     let color:ColorResponse,tone:ToneResponse,detail:Detail,softening:Softening,vignette:Vignette,glow:Glow,halation:Halation

@@ -40,6 +40,7 @@ struct EffectPipeline<Backend: EffectPipelineBackend> {
     private var request: RenderRequest { frame.request }
     private var frameGeometry: RenderGeometry { frame.geometry }
     private var extended: Bool { request.dynamicRange == .edr }
+    private var activity: EffectActivity { EffectActivity(p, previewGlow: request.previewGlow) }
     private var needsResize: Bool { frameGeometry.sourceWidth != frameGeometry.fullWidth || frameGeometry.sourceHeight != frameGeometry.fullHeight }
     private var scale: Double { EffectScale.factor(width:frameGeometry.fullWidth,height:frameGeometry.fullHeight) }
     private func pass(_ name:String,_ source:Backend.Surface,_ extras:[Backend.Surface]=[],_ parameters:[Float]=[0],size:(Int,Int)?=nil,weights:MTLBuffer?=nil,lut:MTLTexture?=nil) throws -> Backend.Surface {
@@ -66,7 +67,7 @@ struct EffectPipeline<Backend: EffectPipelineBackend> {
         }
         return current
     }
-    /// 编码域的色彩、LUT、色调和细节处理之后，在线性光中计算光学效果。
+    /// 仅有光学效果时进入线性光；否则前缀保持编码 RGB，供独立收尾阶段使用。
     func encodePrefix(_ input:Backend.Surface) throws -> Backend.Surface {
         var current=input
         if p.color.isActive {let next=try pass("colorResponse",current,[],color.uniforms);backend.release(current);current=next}
@@ -75,17 +76,17 @@ struct EffectPipeline<Backend: EffectPipelineBackend> {
             backend.release(current); current = next
         } else if let lut {let next=try pass(lutBoundaryPolicy.extrapolates(in: request.dynamicRange) ? "lutMapExtrapolated" : "lutMap",current,lut:lut);backend.release(current);current=next}
         if p.tone.isActive {let next=try pass(extended ? "toneResponseExtended" : "toneResponse",current,[],curves.tone);backend.release(current);current=next}
-        if p.detail.isActive {
+        if activity.detailBands {
             let fine=try blur(current,p.detail.fineSigma*scale),mid=try blur(current,p.detail.midSigma*scale)
             let next=try pass("detailCombine",current,[fine,mid],[Float(p.detail.fineGain),Float(p.detail.midGain)])
             backend.release(fine);backend.release(mid);backend.release(current);current=next
-            if p.detail.sharpenAmount>0 {
-                let blurred=try blur(current,p.detail.sharpenSigma*scale)
-                let next=try pass("sharpen",current,[blurred],[Float(p.detail.sharpenAmount),Float(p.detail.threshold),Float(p.detail.maxAdjustment)])
-                backend.release(blurred);backend.release(current);current=next
-            }
         }
-        do {
+        if activity.sharpening {
+            let blurred=try blur(current,p.detail.sharpenSigma*scale)
+            let next=try pass("sharpen",current,[blurred],[Float(p.detail.sharpenAmount),Float(p.detail.threshold),Float(p.detail.maxAdjustment)])
+            backend.release(blurred);backend.release(current);current=next
+        }
+        if activity.linearOptics {
             let linear=try pass("transfer",current,[],[-1]);backend.release(current);current=linear
         }
         if p.softening.isActive {
@@ -139,7 +140,10 @@ struct EffectPipeline<Backend: EffectPipelineBackend> {
                 backend.noise=EffectNoiseField(key:key,luma:luma,chroma:chroma)
             }
         }
-        let result=try pass(extended ? "finishExtended" : "finish",current,[luma,chroma],EffectUniforms.noise(p.noise,envelope:curves.noise))
+        // Keep output normalization and noise separate from color/LUT/detail passes.
+        let finish = activity.linearOptics ? (extended ? "finishExtended" : "finish") :
+            (extended ? "finishEncodedExtended" : "finishEncoded")
+        let result=try pass(finish,current,[luma,chroma],EffectUniforms.noise(p.noise,envelope:curves.noise))
         if p.grain.isActive {
             let prepared = executionPlan.grain(for:p.grain)
             let uniforms = EffectUniforms.grain(p.grain,scale:scale,seed:request.seed,

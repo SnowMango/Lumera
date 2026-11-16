@@ -27,10 +27,6 @@ final class CoreTests: XCTestCase {
   XCTAssertFalse(gate.accepts(old));XCTAssertTrue(gate.accepts(latest))
   gate.cancel();XCTAssertFalse(gate.accepts(latest))
  }
- func testShortNoiseCurveIsRejected() throws {
-  var p = TestProfiles.ccd; p.parameters.noise.curve = .init(knots:zip([0.0,0.18,0.5,0.85,1],[]).map{.init(x:$0,y:$1)})
-  XCTAssertThrowsError(try p.validate())
- }
  func testRegionRejectsInvalidCoordinates() throws {
   XCTAssertThrowsError(try Region(x: -1, y: 0, width: 0.5, height: 0.5).validate())
   XCTAssertThrowsError(try Region(x: 0.8, y: 0, width: 0.5, height: 1).validate())

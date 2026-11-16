@@ -7,7 +7,7 @@ import ImagingCore
 public final class MetalRenderer: @unchecked Sendable {
     let device:MTLDevice, queue:MTLCommandQueue
     let session:ReferenceRenderSession
-    let lock=NSLock()
+    let lock=UnfairLock()
     var pipelines:[String:MTLComputePipelineState]=[:]
     var patchMeasurement:GPUPatchMeasurement?
     var radialReducer:GPURadialReducer?

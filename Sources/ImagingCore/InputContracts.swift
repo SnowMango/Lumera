@@ -191,12 +191,12 @@ public struct RAWDevelopmentIdentity: Codable, Equatable, Sendable {
 
 /// Actual backend/version and effective settings are separate from author permissions.
 public struct EffectiveInputRecipe: Codable, Equatable, Sendable {
-    public var declared: InputRecipe
-    public var backendVersion: String
-    public var decoderVersion: String?
-    public var settings: [RAWSetting]
+    public var declared: InputRecipe { didSet { preparedDigest = nil } }
+    public var backendVersion: String { didSet { preparedDigest = nil } }
+    public var decoderVersion: String? { didSet { preparedDigest = nil } }
+    public var settings: [RAWSetting] { didSet { preparedDigest = nil } }
     /// Receipt for external RAW configuration. Arbitrary filter changes are represented by the caller's payload identity.
-    public var externalRAWConfiguration: RAWDevelopmentIdentity?
+    public var externalRAWConfiguration: RAWDevelopmentIdentity? { didSet { preparedDigest = nil } }
     public init(declared: InputRecipe, backendVersion: String, decoderVersion: String? = nil, settings: [RAWSetting] = []) {
         self.init(declared: declared, backendVersion: backendVersion, decoderVersion: decoderVersion, settings: settings, externalRAWConfiguration: nil)
     }
@@ -205,7 +205,24 @@ public struct EffectiveInputRecipe: Codable, Equatable, Sendable {
         self.declared = declared; self.backendVersion = backendVersion; self.decoderVersion = decoderVersion; self.settings = settings
         self.externalRAWConfiguration = externalRAWConfiguration
     }
+    // Value-owned cache: any mutation (including nested writeback) invalidates it.
+    // Persisted data never supplies a trusted digest, and equality ignores preparation.
+    private var preparedDigest: String? = nil
+    private enum CodingKeys: String, CodingKey {
+        case declared, backendVersion, decoderVersion, settings, externalRAWConfiguration
+    }
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.declared == rhs.declared && lhs.backendVersion == rhs.backendVersion &&
+        lhs.decoderVersion == rhs.decoderVersion && lhs.settings == rhs.settings &&
+        lhs.externalRAWConfiguration == rhs.externalRAWConfiguration
+    }
+    package func preparingDigest() throws -> Self {
+        var copy = self
+        copy.preparedDigest = try digest()
+        return copy
+    }
     public func digest() throws -> String {
+        if let preparedDigest { return preparedDigest }
         try declared.validate()
         guard !backendVersion.isEmpty, Set(settings.map(\.key)).count == settings.count,
               settings.allSatisfy({ $0.value.isFinite }) else { throw LabError.invalid("Invalid effective input recipe") }

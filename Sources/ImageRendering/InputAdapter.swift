@@ -9,6 +9,28 @@ import ImagingCore
 public final class InputAdapter: @unchecked Sendable {
     private let renderer: LumeraRenderer
     private let working: WorkingImageContract
+    private let identityLock = UnfairLock()
+    private var cachedIdentity: (key: Data, value: PreparedInputIdentity)?
+
+    private struct IdentityKey: Encodable {
+        let descriptor: SourceDescriptor
+        let recipe: EffectiveInputRecipe
+    }
+
+    private func inputIdentity(descriptor: SourceDescriptor, recipe: EffectiveInputRecipe) throws -> PreparedInputIdentity {
+        // Equatable collapses signed zero and canonically equivalent Unicode strings.
+        // Existing identities can distinguish their encodings, so compare bytes instead.
+        let key = try JSON.encode(IdentityKey(descriptor: descriptor, recipe: recipe))
+        identityLock.lock(); defer { identityLock.unlock() }
+        // One bounded entry per adapter. Compare the complete effective recipe, including
+        // actual RAW settings and backend version; the adapter's working contract is immutable.
+        if let cachedIdentity, cachedIdentity.key == key {
+            return cachedIdentity.value
+        }
+        let identity = try PreparedInputIdentity(descriptor: descriptor, recipe: recipe, working: working)
+        cachedIdentity = (key, identity)
+        return identity
+    }
     public init(renderer: LumeraRenderer, working: WorkingImageContract) throws {
         try working.validate()
         guard working.whitePoint == .d65, working.referenceWhite == 1 else { throw LabError.unsupported("Input adapter requires D65 and unit reference white") }
@@ -107,8 +129,9 @@ public final class InputAdapter: @unchecked Sendable {
         var properties = [CFString: Any]()
         for (key, value) in (sourceFacts ?? normalized.properties) { properties[key as CFString] = value }
         return ResolvedPhotoSource(renderer: renderer, image: normalized.image, bounds: normalized.bounds,
-            properties: bufferOutputProperties ?? normalized.properties, descriptor: descriptor, recipe: effective,
-            working: working, conditions: InputCaptureMetadataReader.read(properties: properties), development: source.inputDevelopment, knownResidentBytes: source.knownResidentBytes)
+            properties: bufferOutputProperties ?? normalized.properties,
+            identity: try inputIdentity(descriptor: descriptor, recipe: effective),
+            conditions: InputCaptureMetadataReader.read(properties: properties), development: source.inputDevelopment, knownResidentBytes: source.knownResidentBytes)
     }
     /// Validate input mode and RAW controls without opening or developing the source.
     package static func validateRAWRequest(_ source: SourceImage, descriptor: SourceDescriptor, recipe: InputRecipe,

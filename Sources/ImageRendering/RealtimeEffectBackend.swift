@@ -9,6 +9,8 @@ final class RealtimeEffectBackend: EffectPipelineBackend {
     let commandBuffer:MTLCommandBuffer
     let geometry:RenderGeometry?
     let frameGeometry:RenderGeometry
+    var destination: MTLTexture?
+    var finalPass: String?
     var grid:OpticalGrid?
     init(arena:Arena,pipelines:[String:MTLComputePipelineState],commandBuffer:MTLCommandBuffer,geometry:RenderGeometry?,frameGeometry:RenderGeometry) {
         self.arena=arena;self.pipelines=pipelines;self.commandBuffer=commandBuffer;self.geometry=geometry;self.frameGeometry=frameGeometry
@@ -21,7 +23,9 @@ final class RealtimeEffectBackend: EffectPipelineBackend {
         let value=frame.opticalGrid(resolution);grid=value;return value
     }
     func pass(_ name:String,_ source:MTLTexture,_ extras:[MTLTexture]=[],_ parameters:[Float]=[0],size:(Int,Int)?=nil,weights:MTLBuffer?=nil,lut:MTLTexture?=nil,lutTextures:[MTLTexture]=[]) throws -> MTLTexture {
-            let result=try arena.take(width:size?.0 ?? source.width,height:size?.1 ?? source.height)
+            let result: MTLTexture
+            if name == finalPass, let destination { result = destination }
+            else { result = try arena.take(width:size?.0 ?? source.width,height:size?.1 ?? source.height) }
             let regionOptical = geometry != nil && (name == "opticalReduce" || name.hasSuffix("CombineReduced"))
             let regional = regionOptical || (geometry != nil && ["vignette", "randomField", "resizeLinear"].contains(name))
             let functionName = regional ? name + "Region" : name
@@ -63,8 +67,16 @@ final class RealtimeEffectBackend: EffectPipelineBackend {
     final class Arena: @unchecked Sendable {
         let device:MTLDevice
         var textures:[MTLTexture]=[]
+        var allowsAllocation = true
+        private let ledger: ProcessingResourceLedger?
+        private var textureCharges: [ProcessingResourceCharge] = []
+        private var kernelCharges: [ProcessingResourceCharge] = []
         var busy=Set<ObjectIdentifier>()
         private var kernels:[UInt64:(PreparedGaussianKernel,MTLBuffer)]=[:]
+        var allocatedBytes: Int {
+            ledger == nil ? textures.reduce(0) { $0 + $1.allocatedSize } + kernels.values.reduce(0) { $0 + $1.1.allocatedSize } :
+                textureCharges.reduce(0) { $0 + $1.bytes } + kernelCharges.reduce(0) { $0 + $1.bytes }
+        }
         var kernelCount:Int {kernels.count}
         var kernelBytes:Int {kernels.values.reduce(0){$0+$1.1.length}}
         var noise:EffectNoiseField<MTLTexture>?
@@ -73,36 +85,44 @@ final class RealtimeEffectBackend: EffectPipelineBackend {
         var byteCount:Int {textures.reduce(0){$0+$1.width*$1.height*(format == .rgba32Float ? 16:8)}}
         func configure(width:Int,height:Int,limit:Int?,format:MTLPixelFormat) {
             let key=[width,height,limit ?? 0,Int(format.rawValue)]
-            if key != configuration {clearNoise();textures.removeAll();busy.removeAll();configuration=key}
+            if key != configuration {clearNoise();textures.removeAll();textureCharges.removeAll();busy.removeAll();configuration=key}
             self.format=format
         }
         let workingSet: TileWorkingSet?
-        init(device:MTLDevice, workingSet: TileWorkingSet? = nil){self.device=device; self.workingSet = workingSet}
+        init(device:MTLDevice, workingSet: TileWorkingSet? = nil, ledger: ProcessingResourceLedger? = nil){self.device=device; self.workingSet = workingSet; self.ledger = ledger}
         func take(width:Int,height:Int) throws -> MTLTexture {
             try TextureDimensions.validate(width:width,height:height,device:device)
             if let texture=textures.first(where:{$0.width==width && $0.height==height && !busy.contains(ObjectIdentifier($0))}) {
                 busy.insert(ObjectIdentifier(texture));return texture
             }
+            guard allowsAllocation else { throw FrameAdmissionIssue.notPrepared }
             let descriptor=MTLTextureDescriptor.texture2DDescriptor(pixelFormat:format,width:width,height:height,mipmapped:false)
             descriptor.storageMode = .shared;descriptor.usage=[.shaderRead,.shaderWrite]
-            let estimate = workingSet == nil ? 0 : device.heapTextureSizeAndAlign(descriptor: descriptor).size
+            let estimate = workingSet == nil && ledger == nil ? 0 : device.heapTextureSizeAndAlign(descriptor: descriptor).size
             try workingSet?.reserve(estimate)
+            let charge = try ledger?.reserve(estimate, adaptingPolicy: true)
             guard let texture=device.makeTexture(descriptor:descriptor) else {throw LabError.io("相机风格图像处理内存不足")}
             try workingSet?.reserve(max(0, texture.allocatedSize - estimate))
+            try charge?.reconcile(max(estimate, texture.allocatedSize))
+            if let charge { textureCharges.append(charge); ledger?.didAllocate() }
             textures.append(texture);busy.insert(ObjectIdentifier(texture));return texture
         }
         func kernel(sigma:Float,noise:Bool,integrated:Bool) throws -> (PreparedGaussianKernel,MTLBuffer) {
             let key=UInt64(sigma.bitPattern)*4+(integrated ? 2 : (noise ? 1 : 0))
             if let cached=kernels[key] {return cached}
+            guard allowsAllocation else { throw FrameAdmissionIssue.notPrepared }
             // Bound retained weights when the user continuously edits a style or dimensions change.
-            if kernels.count>=32 {kernels.removeAll(keepingCapacity:true)}
+            if kernels.count>=32 && ledger == nil {kernels.removeAll(keepingCapacity:true)}
             let value=try PreparedGaussianKernel(sigma:sigma,noise:noise,integrated:integrated)
             // 大半径权重可能超过 setBytes 的 4 KiB 上限，改用缓冲区绑定。
             let length = value.weights.count * MemoryLayout<Float>.stride
-            let estimate = workingSet == nil ? 0 : device.heapBufferSizeAndAlign(length: length, options: .storageModeShared).size
+            let estimate = workingSet == nil && ledger == nil ? 0 : device.heapBufferSizeAndAlign(length: length, options: .storageModeShared).size
             try workingSet?.reserve(estimate)
+            let charge = try ledger?.reserve(estimate, adaptingPolicy: true)
             guard let buffer=value.weights.withUnsafeBytes({device.makeBuffer(bytes:$0.baseAddress!,length:$0.count,options:.storageModeShared)}) else {throw LabError.io("无法分配模糊权重")}
             try workingSet?.reserve(max(0, buffer.allocatedSize - estimate))
+            try charge?.reconcile(max(estimate, buffer.allocatedSize))
+            if let charge { kernelCharges.append(charge); ledger?.didAllocate() }
             kernels[key]=(value,buffer);return (value,buffer)
         }
         func release(_ texture:MTLTexture){busy.remove(ObjectIdentifier(texture))}

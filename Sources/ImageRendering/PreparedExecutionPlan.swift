@@ -3,7 +3,10 @@ import ImagingCore
 
 /// 固定快照和动态帧共用的执行数据缓存。锁保护条目与计数，取出的不可变数据可跨条目替换使用。
 final class PreparedExecutionPlan: @unchecked Sendable {
-    private let lock = NSLock()
+    private let lock = UnfairLock()
+    private let baseParameters: StyleParameters
+    private let baseActivity: PreparedEffectActivity
+    private var lastActivity: (StyleParameters, PreparedEffectActivity)?
     private let baseColor: (ColorResponse, PreparedColorTransform)
     private var lastCurves: (StyleParameters, PreparedResponseCurves)?
     private var lastColor: (ColorResponse, PreparedColorTransform)?
@@ -14,6 +17,8 @@ final class PreparedExecutionPlan: @unchecked Sendable {
     private var grainPreparations = 0
 
     init(parameters: StyleParameters, color: PreparedColorTransform) {
+        baseParameters = parameters
+        baseActivity = PreparedEffectActivity(parameters)
         self.baseColor = (parameters.color, color)
         if parameters.halation.isActive {
             _ = halation(for: parameters.halation)
@@ -21,6 +26,15 @@ final class PreparedExecutionPlan: @unchecked Sendable {
         if parameters.grain.isActive {
             _ = grain(for: parameters.grain)
         }
+    }
+
+    func activity(for parameters: StyleParameters) -> PreparedEffectActivity {
+        if parameters == baseParameters { return baseActivity }
+        lock.lock(); defer { lock.unlock() }
+        if let cached = lastActivity, cached.0 == parameters { return cached.1 }
+        let activity = PreparedEffectActivity(parameters)
+        lastActivity = (parameters, activity)
+        return activity
     }
 
     func curves(for parameters: StyleParameters) -> PreparedResponseCurves {

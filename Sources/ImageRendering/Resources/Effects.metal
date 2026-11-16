@@ -122,17 +122,25 @@ float responseValue(float x,constant float* p) {
  float t2=t*t,t3=t2*t;
  return clamp((2*t3-3*t2+1)*p[a+1]+(t3-2*t2+t)*h*p[a+2]+(-2*t3+3*t2)*p[b+1]+(t3-t2)*h*p[b+2],min(p[a+1],p[b+1]),max(p[a+1],p[b+1]));
 }
-float3 finishColor(float3 linear,texture2d<float,access::read> luma,texture2d<float,access::read> chroma,constant float* p,uint2 id) {
- float3 c=encodeRGB(linear);
+float3 finishEncodedColor(float3 c,texture2d<float,access::read> luma,texture2d<float,access::read> chroma,constant float* p,uint2 id) {
  if(p[0]>0){float sigma=clamp(responseValue(luminance(c),p+4)*p[3],0.0f,0.1f);
  float dn=luma.read(id).r*sigma;float2 z=chroma.read(id).gb;float cb=z.x*sigma*p[1],cr=(p[2]*z.x+sqrt(1-p[2]*p[2])*z.y)*sigma*p[1];c+=float3(dn+1.5748*cr,dn-0.187324*cb-0.468124*cr,dn+1.8556*cb);
  }return c;
+}
+float3 finishColor(float3 linear,texture2d<float,access::read> luma,texture2d<float,access::read> chroma,constant float* p,uint2 id) {
+ return finishEncodedColor(encodeRGB(linear),luma,chroma,p,id);
 }
 kernel void finish(texture2d<float,access::read> src[[texture(0)]],texture2d<float,access::write> dst[[texture(1)]],texture2d<float,access::read> luma[[texture(2)]],texture2d<float,access::read> chroma[[texture(3)]],constant float* p[[buffer(0)]],uint2 id[[thread_position_in_grid]]){
  if(outside(id,dst))return;dst.write(float4(clamp(finishColor(src.read(id).rgb,luma,chroma,p,id),0.0,1.0),1),id);
 }
 kernel void finishExtended(texture2d<float,access::read> src[[texture(0)]],texture2d<float,access::write> dst[[texture(1)]],texture2d<float,access::read> luma[[texture(2)]],texture2d<float,access::read> chroma[[texture(3)]],constant float* p[[buffer(0)]],uint2 id[[thread_position_in_grid]]){
  if(outside(id,dst))return;dst.write(float4(finishColor(src.read(id).rgb,luma,chroma,p,id),1),id);
+}
+kernel void finishEncoded(texture2d<float,access::read> src[[texture(0)]],texture2d<float,access::write> dst[[texture(1)]],texture2d<float,access::read> luma[[texture(2)]],texture2d<float,access::read> chroma[[texture(3)]],constant float* p[[buffer(0)]],uint2 id[[thread_position_in_grid]]){
+ if(outside(id,dst))return;dst.write(float4(clamp(finishEncodedColor(src.read(id).rgb,luma,chroma,p,id),0.0,1.0),1),id);
+}
+kernel void finishEncodedExtended(texture2d<float,access::read> src[[texture(0)]],texture2d<float,access::write> dst[[texture(1)]],texture2d<float,access::read> luma[[texture(2)]],texture2d<float,access::read> chroma[[texture(3)]],constant float* p[[buffer(0)]],uint2 id[[thread_position_in_grid]]){
+ if(outside(id,dst))return;dst.write(float4(finishEncodedColor(src.read(id).rgb,luma,chroma,p,id),1),id);
 }
 
 // Display-only packing: values are already sRGB encoded by finish. No second transfer.
@@ -382,18 +390,74 @@ kernel void copyPixels(texture2d<float,access::read> src[[texture(0)]],texture2d
     dst.write(src.read(id),id);
 }
 // 逐像素检查各通道的有限性，非有限标志与 RGB 极值分别记录。
-kernel void inputRangeTiles(texture2d<float,access::read> src[[texture(0)]],device float4* result[[buffer(0)]],uint2 tile[[thread_position_in_grid]]) {
-    uint nx=(src.get_width()+15)/16, ny=(src.get_height()+15)/16;
+kernel void inputRangeTiles(texture2d<float,access::read> src[[texture(0)]],device float4* result[[buffer(0)]],constant uint2& size[[buffer(1)]],uint2 tile[[thread_position_in_grid]]) {
+    uint nx=(size.x+15)/16, ny=(size.y+15)/16;
     if(tile.x>=nx || tile.y>=ny) return;
     float lo=INFINITY, hi=-INFINITY; bool invalid=false;
-    for(uint y=tile.y*16;y<min((tile.y+1)*16,src.get_height());++y) {
-        for(uint x=tile.x*16;x<min((tile.x+1)*16,src.get_width());++x) {
+    for(uint y=tile.y*16;y<min((tile.y+1)*16,size.y);++y) {
+        for(uint x=tile.x*16;x<min((tile.x+1)*16,size.x);++x) {
             float4 v=src.read(uint2(x,y));
             invalid=invalid || !all(isfinite(v));
             lo=min(lo,min(v.r,min(v.g,v.b))); hi=max(hi,max(v.r,max(v.g,v.b)));
         }
     }
     result[tile.y*nx+tile.x]=float4(lo,hi,invalid ? 1.0f : 0.0f,0);
+}
+
+// Input-only validation and storage conversion. Inspect each Float32 pixel once,
+// then reduce the exact Half values that are written, without another output scan.
+// Failure flags prevent the caller from publishing any partially invalid texture.
+kernel void prepareHalfInputTiles(texture2d<float, access::read> src [[texture(0)]],
+ texture2d<half, access::write> dst [[texture(1)]], device float4* result [[buffer(0)]],
+ constant uint2& size [[buffer(1)]], constant float& halfLimit [[buffer(2)]],
+ constant uint2& outputOrigin [[buffer(3)]], uint2 group [[threadgroup_position_in_grid]],
+ uint2 local [[thread_position_in_threadgroup]], uint lane [[thread_index_in_threadgroup]]) {
+    threadgroup float4 values[256];
+    uint2 id = group * 16 + local;
+    float4 summary = float4(INFINITY, -INFINITY, 0, 0);
+    if (all(id < size)) {
+        float4 source = src.read(id);
+        bool finite = all(isfinite(source));
+        bool overflow = finite && any(abs(source.rgb) > halfLimit);
+        half4 stored = half4(0);
+        if (finite && !overflow) stored = half4(source);
+        bool invalid = !finite || !all(isfinite(float4(stored)));
+        if (invalid || overflow) stored = half4(0);
+        dst.write(stored, id + outputOrigin);
+        float3 rgb = float3(stored.rgb);
+        summary = float4(min(rgb.r, min(rgb.g, rgb.b)), max(rgb.r, max(rgb.g, rgb.b)),
+            invalid ? 1.0f : 0.0f, overflow ? 1.0f : 0.0f);
+    }
+    // Edge lanes still participate in every barrier; their extrema are identities.
+    values[lane] = summary;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = 128; stride > 0; stride >>= 1) {
+        if (lane < stride) {
+            float4 a = values[lane], b = values[lane + stride];
+            values[lane] = float4(min(a.x, b.x), max(a.y, b.y), max(a.z, b.z), max(a.w, b.w));
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (lane == 0) result[group.y * ((size.x + 15) / 16) + group.x] = values[0];
+}
+
+// Hierarchical exact range reduction. Invalid flags include alpha and survive
+// every level, even when min/max would otherwise mask a NaN sample.
+kernel void inputRangeReduce(const device float4* input [[buffer(0)]],
+ device float4* output [[buffer(1)]], constant uint& count [[buffer(2)]],
+ uint group [[threadgroup_position_in_grid]], uint lane [[thread_index_in_threadgroup]]) {
+    threadgroup float4 values[256];
+    uint index = group * 256 + lane;
+    values[lane] = index < count ? input[index] : float4(INFINITY, -INFINITY, 0, 0);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = 128; stride > 0; stride >>= 1) {
+        if (lane < stride) {
+            float4 a = values[lane], b = values[lane + stride];
+            values[lane] = float4(min(a.x, b.x), max(a.y, b.y), max(a.z, b.z), max(a.w, b.w));
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (lane == 0) output[group] = values[0];
 }
 
 // linear-srgb-summary-v1 在线性光中覆盖整帧，每个像素按与采样格的重叠面积贡献。

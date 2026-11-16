@@ -4,6 +4,7 @@ import ImagingCore
 
 /// 与原命令缓冲区绑定的小型统计结果。GPU 统计须在该命令成功完成后读取。
 public struct ObservationReadback {
+    private let resourceLease: ObservationWorkspaceLease?
     private let observation: FrameObservations
     private let features: [FeatureSpecification]
     private let buffer: MTLBuffer?
@@ -12,7 +13,8 @@ public struct ObservationReadback {
     public let sampleWidth: Int, sampleHeight: Int
     let reductionPartitionCount: Int
     public var readbackBytes: Int { buffer?.length ?? 0 }
-    init(observation: FrameObservations, features: [FeatureSpecification], buffer: MTLBuffer?, command: MTLCommandBuffer?, width: Int, height: Int, partitions: Int) {
+    init(observation: FrameObservations, features: [FeatureSpecification], buffer: MTLBuffer?, command: MTLCommandBuffer?, width: Int, height: Int, partitions: Int, resourceLease: ObservationWorkspaceLease? = nil) {
+        self.resourceLease = resourceLease
         self.observation = observation; self.features = features; self.buffer = buffer; self.command = command
         sampleWidth = width; sampleHeight = height; reductionPartitionCount = partitions
     }

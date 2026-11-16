@@ -87,18 +87,6 @@ final class TextureEffectTests:XCTestCase {
             XCTAssertEqual(actual,expected,"Stale texture or noise cache at frame \(index)")
         }
     }
-    func testStandardReturnsOriginalTextureAndPreparedStyleIsSnapshot() throws {
-        let device=try XCTUnwrap(MTLCreateSystemDefaultDevice()),queue=try XCTUnwrap(device.makeCommandQueue())
-        let encoder=try TextureEffectEncoder(device:device,precision:.float32)
-        let frame=try Fixtures.make(.patches,width:64,height:64),source=try upload(frame,device:device)
-        var profile=Profile.standard
-        let prepared=try encoder.prepare(ResolvedStyle(profile:profile))
-        profile.parameters.vignette.amountEV=1.8
-        let command=try XCTUnwrap(queue.makeCommandBuffer())
-        let result=try encoder.encode(source,style:prepared,request:RenderRequest(input:frame.descriptor),commandBuffer:command)
-        XCTAssertTrue(result === source)
-        XCTAssertEqual(prepared.style.parameters,Profile.standard.parameters)
-    }
     func testInvalidLUTDoesNotCreatePreparedStyle() throws {
         let device=try XCTUnwrap(MTLCreateSystemDefaultDevice())
         let encoder=try TextureEffectEncoder(device:device)

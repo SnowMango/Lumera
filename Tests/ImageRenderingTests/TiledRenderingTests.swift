@@ -66,6 +66,27 @@ final class TiledRenderingTests: XCTestCase {
         do { _ = try await task.value; XCTFail("cancelled render returned a result") } catch is CancellationError {}
     }
 
+    func testSharpenAndEncodedSuffixMatchAcrossTilesAndResize() async throws {
+        let image = source(width: 521, height: 193)
+        var p = Profile.standard
+        p.parameters.detail.enabled = true; p.parameters.detail.sharpenAmount = 0.5
+        p.parameters.color.exposureEV = 0.2
+        p.parameters.noise.enabled = true
+        p.parameters.noise.curve = .init(function: .init(family: .constant, start: 0.01, end: 0.01))
+        for precision in [RenderingPrecision.float16, .float32] {
+            let renderer = try LumeraRenderer(precision: precision), style = try renderer.prepare(p)
+            for limit: Int? in [nil, 401] {
+                let options = RenderOptions(maximumLongEdge: limit, seed: 109, frameIndex: 7)
+                let full = try await renderer.render(image, style: style, options: options)
+                let tiled = try await renderer.renderTiled(image, style: style, options: options, workingMemoryLimit: 2 * 1024 * 1024)
+                let a = values(full, full.extent, context: renderer.context)
+                let b = values(tiled, tiled.extent, context: renderer.context)
+                XCTAssertEqual(full.extent, tiled.extent)
+                XCTAssertLessThanOrEqual(zip(a, b).map { abs($0 - $1) }.max()!, precision == .float16 ? 0.002 : 0.0001)
+            }
+        }
+    }
+
     func testFloat32RetainsNonHalfRepresentableInputAcrossAdapters() async throws {
         let renderer = try LumeraRenderer(precision:.float32), style = try renderer.prepare(Profile.standard)
         let gray: Float = 0.7502

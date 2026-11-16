@@ -87,7 +87,7 @@ final class PhotoExecutionVariants: @unchecked Sendable {
         self.renderer = renderer
     }
 
-    private let variantLock = NSLock()
+    private let variantLock = UnfairLock()
     // 以完整执行规格缓存变体；不同精度的渲染器仍共用原模型预算账本。
     private var variants: [(execution: ExecutionProfile, renderer: LumeraRenderer, model: PreparedStyleModel)] = []
     /// Serialize cache misses so concurrent exports cannot upload duplicate variants.

@@ -52,6 +52,7 @@ enum PrecisionSafety {
                                      preparedGrain: PreparedGrain?) throws {
         let extended = request.dynamicRange == .edr
         let previewGlow = request.previewGlow
+        let activity = EffectActivity(p, previewGlow: previewGlow)
         let arithmeticMargin = 1.0001
         func stored(_ value: Double, _ stage: PrecisionAssessment.Stage) throws -> Double {
             guard value.isFinite, value >= 0, value <= halfStorageCeiling else {
@@ -119,7 +120,8 @@ enum PrecisionSafety {
 
         // Each separable pass writes half before the next pass reads it.
         var sigma = 0.0
-        if p.detail.isActive { sigma = max(sigma, p.detail.fineSigma, p.detail.midSigma, p.detail.sharpenSigma) }
+        if activity.detailBands { sigma = max(sigma, p.detail.fineSigma, p.detail.midSigma) }
+        if activity.sharpening { sigma = max(sigma, p.detail.sharpenSigma) }
         if p.softening.isActive { sigma = max(sigma, p.softening.sigma) }
         if previewGlow && p.glow.isActive { sigma = max(sigma, p.glow.nearSigma, p.glow.farSigma) }
         if previewGlow && p.halation.isActive { sigma = max(sigma, p.halation.radius * 4) }
@@ -133,38 +135,40 @@ enum PrecisionSafety {
             return try stored(horizontal * normalization * axisMargin, stage)
         }
 
-        if p.detail.isActive {
+        if activity.detailBands {
             let lowpass = try blurred(b, .detail)
             let fine = Double(Float(p.detail.fineGain)), mid = Double(Float(p.detail.midGain))
             let sourceTerm = b * (1 + abs(fine - 1))
             let blurTerm = lowpass * (abs(mid - fine) + abs(1 - mid))
             b = try stored((sourceTerm + blurTerm) * arithmeticMargin, .detail)
-            if p.detail.sharpenAmount > 0 {
-                _ = try blurred(b, .detail)
-                b = try stored((b + p.detail.maxAdjustment) * arithmeticMargin, .detail)
+        }
+        if activity.sharpening {
+            _ = try blurred(b, .detail)
+            b = try stored((b + p.detail.maxAdjustment) * arithmeticMargin, .detail)
+        }
+        if activity.linearOptics {
+            b = try stored(decode(b) * arithmeticMargin, .linearOpticalInput)
+            if p.softening.isActive {
+                let base = request.softeningScale == .full ? b : try stored(b * arithmeticMargin, .softening)
+                let lowpass = try blurred(base, .softening)
+                b = try stored(max(b, lowpass) * arithmeticMargin, .softening)
             }
+            if p.vignette.enabled && p.vignette.amountEV > 0 {
+                b = try stored(b * arithmeticMargin, .vignette)
+            }
+            if previewGlow && p.glow.isActive {
+                let highlights = try stored(b * arithmeticMargin, .glow)
+                let spread = try blurred(highlights, .glow)
+                b = try stored((b + p.glow.amount * (max(b, highlights) + spread)) * arithmeticMargin, .glow)
+            }
+            if previewGlow && p.halation.isActive {
+                let highlights = try stored(b * arithmeticMargin, .halation)
+                let spread = try blurred(highlights, .halation)
+                let tint = max(p.halation.red, p.halation.green, p.halation.blue)
+                b = try stored((b + p.halation.amount * tint * (max(b, highlights) + spread)) * arithmeticMargin, .halation)
+            }
+            b = encode(b) * arithmeticMargin
         }
-        b = try stored(decode(b) * arithmeticMargin, .linearOpticalInput)
-        if p.softening.isActive {
-            let base = request.softeningScale == .full ? b : try stored(b * arithmeticMargin, .softening)
-            let lowpass = try blurred(base, .softening)
-            b = try stored(max(b, lowpass) * arithmeticMargin, .softening)
-        }
-        if p.vignette.enabled && p.vignette.amountEV > 0 {
-            b = try stored(b * arithmeticMargin, .vignette)
-        }
-        if previewGlow && p.glow.isActive {
-            let highlights = try stored(b * arithmeticMargin, .glow)
-            let spread = try blurred(highlights, .glow)
-            b = try stored((b + p.glow.amount * (max(b, highlights) + spread)) * arithmeticMargin, .glow)
-        }
-        if previewGlow && p.halation.isActive {
-            let highlights = try stored(b * arithmeticMargin, .halation)
-            let spread = try blurred(highlights, .halation)
-            let tint = max(p.halation.red, p.halation.green, p.halation.blue)
-            b = try stored((b + p.halation.amount * tint * (max(b, highlights) + spread)) * arithmeticMargin, .halation)
-        }
-        b = encode(b) * arithmeticMargin
         if p.noise.isActive {
             // L1/L2 <= sqrt(N) on each axis. Include raw field and each half write.
             let n = 2 * ceil(3 * max(p.noise.lumaSigma, p.noise.chromaSigma) * scale) + 1

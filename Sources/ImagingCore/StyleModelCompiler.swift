@@ -9,6 +9,8 @@ public struct CompiledStyleModel: Sendable {
     public var modelDigest: String { identity }
     /// 已声明特征规格的内容摘要，用来校验观测包采用了同一组统计口径。
     public let featureDigest: String
+    /// Derived once from this immutable definition; replay still checks the supplied identity.
+    package let resourceDigest: String
     public let sourceDependencies: Set<ConditionAxis>
     public let targetDependencies: Set<ConditionAxis>
     public let featureDependencies: Set<String>
@@ -20,8 +22,12 @@ public struct CompiledStyleModel: Sendable {
 
     fileprivate init(_ model: StyleModel, lutResourceIDs: Set<String>) throws {
         self.lutResourceIDs = lutResourceIDs
-        definition = model; identity = try model.digest()
-        featureDigest = try model.observations.featureDigest()
+        var preparedDefinition = model
+        preparedDefinition.observations = try model.observations.preparingFeatureDigest()
+        preparedDefinition.adaptation = try model.adaptation.preparingDigest()
+        definition = preparedDefinition; identity = try model.digest()
+        featureDigest = try preparedDefinition.observations.featureDigest()
+        resourceDigest = Digest.data(try JSON.encode(model.appearance.resources))
         instructions = model.responses
         temporalPolicy = model.legacyProfile?.temporalPolicy ?? model.appearance.temporalPolicy
         var source = Set<ConditionAxis>(), target = Set<ConditionAxis>(), features = Set<String>()

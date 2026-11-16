@@ -9,6 +9,7 @@ public struct LUTAsset:Equatable,Sendable {
     public var boundaryPolicy: LUTBoundaryPolicy = .automatic
     public var name:String,cubeText:String,sha256:String
     private var rawCube:CubeLUT?
+    var residentSourceBytes: Int { cubeText.utf8.count + (rawCube?.rgba.count ?? 0) * MemoryLayout<Float>.stride }
     private var rawDigest:String?
     /// 规范化样本直接用于 GPU 上传，省去文本往返。
     init(name:String,cube:CubeLUT) {

@@ -22,23 +22,37 @@ public final class FrameFeatureExtractor {
         summary = try device.makeComputePipelineState(function: s)
         combine = try device.makeComputePipelineState(function: c)
     }
+    private func observation(_ input: PreparedInput, stamp: FrameStamp,
+                             requirements: ObservationRequirements) throws -> FrameObservations {
+        try stamp.validate(); try requirements.validate(); try input.working.validate()
+        guard input.texture.device.registryID == device.registryID else { throw LabError.invalid("Feature input device mismatch") }
+        guard requirements.features.count <= 64, requirements.features.allSatisfy({ $0.samplingLongEdge == 256 }) else {
+            throw LabError.unsupported("Feature summary v1 supports up to 64 features on the fixed 256 sampling grid")
+        }
+        var result = FrameObservations(stamp: stamp, sourceID: input.sourceID, calibrationID: input.calibrationID,
+                                       featureDigest: try requirements.featureDigest())
+        result.captureConditions = input.captureConditions
+        return result
+    }
+    func metadataObservation(_ input: PreparedInput, stamp: FrameStamp,
+                             requirements: ObservationRequirements) throws -> FrameObservations? {
+        guard requirements.features.isEmpty else { return nil }
+        return try observation(input, stamp: stamp, requirements: requirements)
+    }
+
     /// 编码面积采样和归约，由调用方提交。只需拍摄元数据时可直接解析结果。
     public func encode(_ input: PreparedInput, stamp: FrameStamp, requirements: ObservationRequirements, commandBuffer: MTLCommandBuffer) throws -> ObservationReadback {
         try encode(input, stamp: stamp, requirements: requirements, commandBuffer: commandBuffer, budgetLimit: nil)
     }
     func encode(_ input: PreparedInput, stamp: FrameStamp, requirements: ObservationRequirements,
                 commandBuffer: MTLCommandBuffer, budgetLimit: Int?, workingSet: TileWorkingSet? = nil, inputAlreadyBudgeted: Bool = false, regionalSamples: MTLBuffer? = nil, fullSize: SIMD2<Int>? = nil) throws -> ObservationReadback {
-        try stamp.validate(); try requirements.validate(); try input.working.validate()
-        guard input.texture.device.registryID == device.registryID, commandBuffer.device.registryID == device.registryID,
+        let observation = try observation(input, stamp: stamp, requirements: requirements)
+        guard commandBuffer.device.registryID == device.registryID,
               commandBuffer.status == .notEnqueued, commandBuffer.retainedReferences else { throw LabError.invalid("Feature command/device mismatch or unretained command") }
-        guard requirements.features.count <= 64, requirements.features.allSatisfy({ $0.samplingLongEdge == 256 }) else {
-            throw LabError.unsupported("Feature summary v1 supports up to 64 features on the fixed 256 sampling grid")
-        }
-        var observation = FrameObservations(stamp: stamp, sourceID: input.sourceID, calibrationID: input.calibrationID, featureDigest: try requirements.featureDigest())
-        observation.captureConditions = input.captureConditions
         if requirements.features.isEmpty {
             return ObservationReadback(observation: observation, features: [], buffer: nil, command: nil, width: 0, height: 0, partitions: 0)
         }
+        try input.encodePreparation(commandBuffer)
         let fullWidth = fullSize?.x ?? input.width, fullHeight = fullSize?.y ?? input.height
         let scale = min(1, 256 / Double(max(fullWidth, fullHeight)))
         let width = max(1, Int(floor(Double(fullWidth) * scale))), height = max(1, Int(floor(Double(fullHeight) * scale)))
@@ -54,10 +68,26 @@ public final class FrameFeatureExtractor {
         let allocation = sizes.reduce(0) { $0 + device.heapBufferSizeAndAlign(length: $1.0, options: $1.1).size }
         guard allocation <= available else { throw LabError.invalid("Feature statistics exceed available memory budget") }
         try workingSet?.reserve(allocation)
-        guard count * 16 + partialBytes + bytes <= available,
-              let samples = regionalSamples ?? device.makeBuffer(length: count * 16, options: .storageModePrivate),
-              let partials = device.makeBuffer(length: partialBytes, options: .storageModePrivate),
-              let output = device.makeBuffer(length: bytes, options: .storageModeShared) else { throw LabError.invalid("Feature statistics exceed available memory budget") }
+        var statisticsLease: ObservationWorkspaceLease?
+        let samples: MTLBuffer, partials: MTLBuffer, output: MTLBuffer
+        if let prepared = input.observationWorkspace {
+            guard regionalSamples == nil, prepared.width == width, prepared.height == height,
+                  prepared.featureCount == requirements.features.count else {
+                throw LabError.invalid("Statistics differ from the explicitly prepared workspace")
+            }
+            let lease = try prepared.acquire(retaining: input)
+            statisticsLease = lease
+            _ = ProcessingCommandOwner.attach(to: commandBuffer, retaining: [lease])
+            samples = prepared.samples; partials = prepared.partials; output = prepared.output
+        } else {
+            guard count * 16 + partialBytes + bytes <= available,
+                  let s = regionalSamples ?? device.makeBuffer(length: count * 16, options: .storageModePrivate),
+                  let p = device.makeBuffer(length: partialBytes, options: .storageModePrivate),
+                  let o = device.makeBuffer(length: bytes, options: .storageModeShared) else {
+                throw LabError.invalid("Feature statistics exceed available memory budget")
+            }
+            samples = s; partials = p; output = o
+        }
         guard samples.allocatedSize + partials.allocatedSize + output.allocatedSize <= available else { throw LabError.invalid("Feature statistics exceed available memory budget") }
         let actual = samples.allocatedSize + partials.allocatedSize + output.allocatedSize
         if actual > allocation { try workingSet?.reserve(actual - allocation) }
@@ -94,6 +124,6 @@ public final class FrameFeatureExtractor {
         encoder.setBytes(&partitionCount, length: 4, index: 3)
         encoder.dispatchThreads(.init(width: 262 + requirements.features.count, height: 1, depth: 1), threadsPerThreadgroup: .init(width: combine.threadExecutionWidth, height: 1, depth: 1))
         encoder.endEncoding()
-        return ObservationReadback(observation: observation, features: requirements.features, buffer: output, command: commandBuffer, width: width, height: height, partitions: partitions)
+        return ObservationReadback(observation: observation, features: requirements.features, buffer: output, command: commandBuffer, width: width, height: height, partitions: partitions, resourceLease: statisticsLease)
     }
 }

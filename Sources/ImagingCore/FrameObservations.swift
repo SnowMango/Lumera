@@ -67,7 +67,7 @@ public struct ObservationValidityPolicy: Codable, Equatable, Sendable {
 /// 列出自动响应所需的源采集条件和图像特征，并声明观测包何时可复用。
 public struct ObservationRequirements: Codable, Equatable, Sendable {
     public var sourceConditions: [ConditionAxis] = []
-    public var features: [FeatureSpecification] = []
+    public var features: [FeatureSpecification] = [] { didSet { preparedFeatureDigest = nil } }
     public var validity = ObservationValidityPolicy()
     public init() {}
     public func validate() throws {
@@ -76,7 +76,20 @@ public struct ObservationRequirements: Codable, Equatable, Sendable {
         }
         for feature in features { try feature.validate() }; try validity.validate()
     }
-    public func featureDigest() throws -> String { try validate(); return try StyleIdentity.digest(features) }
+    private var preparedFeatureDigest: String? = nil
+    private enum CodingKeys: String, CodingKey { case sourceConditions, features, validity }
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.sourceConditions == rhs.sourceConditions && lhs.features == rhs.features && lhs.validity == rhs.validity
+    }
+    func preparingFeatureDigest() throws -> Self {
+        var copy = self
+        copy.preparedFeatureDigest = try featureDigest()
+        return copy
+    }
+    public func featureDigest() throws -> String {
+        try validate()
+        return try preparedFeatureDigest ?? StyleIdentity.digest(features)
+    }
 }
 /// 以特征规格 ID 记录统计结果；缺测用 nil，可附上原因。
 public struct FeatureValue: Codable, Equatable, Sendable {

@@ -14,7 +14,7 @@ public enum FrameOutcome: Sendable {
 
 /// Cancellation is synchronized with the actual commit boundary, not an actor hop.
 final class SessionCancellation: @unchecked Sendable {
-    private let lock = NSLock()
+    private let lock = UnfairLock()
     private var cancelled = false
     private var submitted = false
     private var preparation: Task<PreparedInput, Error>?
@@ -31,7 +31,7 @@ final class SessionCancellation: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         if cancelled { throw CancellationError() }
     }
-    // 与取消共用锁的提交前检查；必须由驱动在实际 command buffer.commit 前同步调用。
+    // 与取消共用锁的接受前检查；驱动在 GPU commit 或无 GPU 结果完成前同步调用。
     func markSubmitted() throws {
         lock.lock(); defer { lock.unlock() }
         guard !cancelled else { throw CancellationError() }
@@ -46,23 +46,53 @@ struct SessionRenderResult: Sendable {
 }
 /// 一次已经提交的工作；等待完成不会因调用方取消而提前释放 GPU 使用中的资源。
 struct SessionSubmission: @unchecked Sendable {
+    var usesGPU: Bool = true
     let completion: () async throws -> SessionRenderResult
+    var callback: ((DispatchQueue, @escaping (Result<SessionRenderResult, Error>) -> Void) -> Void)? = nil
+    func onComplete(on queue: DispatchQueue, completion: @escaping (Result<SessionRenderResult, Error>) -> Void) {
+        if let callback { callback(queue, completion) }
+        else { Task {
+            let result: Result<SessionRenderResult, Error>
+            do { result = .success(try await self.completion()) } catch { result = .failure(error) }
+            queue.async { completion(result) }
+        } }
+    }
     func value() async throws -> SessionRenderResult { try await completion() }
 }
 /// 可注入的观察/提交边界；测试可控制调度，生产路径仍委托唯一的 LumeraRenderer。
 struct SessionRenderDriver: @unchecked Sendable {
     var observe: (PreparedInput, FrameStamp, ObservationRequirements, Int) async throws -> FrameObservations
     var submit: (PreparedInput, FrameRenderPlan, ObservationRequirements?, () throws -> Void) throws -> SessionSubmission
+    var observeCallback: ((PreparedInput, FrameStamp, ObservationRequirements, Int, DispatchQueue,
+        @escaping (Result<FrameObservations, Error>) -> Void) -> Void)? = nil
+    func beginObservation(_ input: PreparedInput, _ stamp: FrameStamp, _ requirements: ObservationRequirements,
+                          _ bytes: Int, on queue: DispatchQueue, completion: @escaping (Result<FrameObservations, Error>) -> Void) {
+        if let observeCallback { observeCallback(input, stamp, requirements, bytes, queue, completion) }
+        else { Task {
+            let result: Result<FrameObservations, Error>
+            do { result = .success(try await observe(input, stamp, requirements, bytes)) } catch { result = .failure(error) }
+            queue.async { completion(result) }
+        } }
+    }
     /// observe 可以单独提交统计；submit 可将本帧统计与效果放入同一命令缓冲。
-    static func live(_ renderer: LumeraRenderer) -> Self {
+    static func live(_ renderer: LumeraRenderer, resources: ModelProcessingResources? = nil) -> Self {
         .init(observe: { input, stamp, requirements, bytes in
             try await renderer.observe(input, stamp: stamp, requirements: requirements, maxResidentBytes: bytes)
         }, submit: { input, plan, observations, beforeCommit in
-            let submitted = try renderer.submit(input, plan: plan, observations: observations, beforeCommit: beforeCommit)
-            return .init(completion: {
+            let submitted: ModelFrameSubmission
+            if let resources { submitted = try resources.submit(input, plan: plan, observations: observations, beforeCommit: beforeCommit) }
+            else { submitted = try renderer.submit(input, plan: plan, observations: observations, beforeCommit: beforeCommit) }
+            return .init(usesGPU: submitted.usesGPU, completion: {
                 let result = try await submitted.value()
                 return .init(frame: result.frame, observations: result.observations)
+            }, callback: { queue, completion in
+                submitted.onComplete(on: queue) { result in
+                    completion(result.map { .init(frame: $0.frame, observations: $0.observations) })
+                }
             })
+        }, observeCallback: { input, stamp, requirements, bytes, queue, completion in
+            renderer.observe(input, stamp: stamp, requirements: requirements, maxResidentBytes: bytes,
+                             on: queue, completion: completion)
         })
     }
 }

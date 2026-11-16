@@ -10,14 +10,20 @@ public struct FrameEncoder {
     public func encode(_ input: PreparedInput, plan: FrameRenderPlan, commandBuffer: MTLCommandBuffer) throws -> EncodedFrame {
         try encode(input, plan: plan, commandBuffer: commandBuffer, alreadyClaimed: false)
     }
-    func encode(_ input: PreparedInput, plan: FrameRenderPlan, commandBuffer: MTLCommandBuffer, alreadyClaimed: Bool) throws -> EncodedFrame {
-        guard plan.inputID == input.inputID, plan.model.renderer === renderer else { throw LabError.invalid("Frame plan belongs to another input or renderer") }
-        guard commandBuffer.status == .notEnqueued, commandBuffer.retainedReferences,
-              commandBuffer.device.registryID == renderer.device.registryID else { throw LabError.invalid("Frame encoding requires an unsubmitted retained command on the model device") }
+    func validate(_ input: PreparedInput, plan: FrameRenderPlan) throws {
+        guard plan.inputID == input.inputID, plan.model.renderer === renderer else {
+            throw LabError.invalid("Frame plan belongs to another input or renderer")
+        }
         try plan.request.validate(); try plan.controls.parameters.validate(resolved: true)
         try renderer.encoder.checkModelSafety(style: plan.style, parameters: plan.controls.parameters, prefix: plan.prefix, request: plan.request)
+    }
+    func encode(_ input: PreparedInput, plan: FrameRenderPlan, commandBuffer: MTLCommandBuffer, alreadyClaimed: Bool, alreadyValidated: Bool = false) throws -> EncodedFrame {
+        if !alreadyValidated { try validate(input, plan: plan) }
+        guard commandBuffer.status == .notEnqueued, commandBuffer.retainedReferences,
+              commandBuffer.device.registryID == renderer.device.registryID else { throw LabError.invalid("Frame encoding requires an unsubmitted retained command on the model device") }
         if !alreadyClaimed { try plan.claim() }
         commandBuffer.addCompletedHandler { [plan] _ in plan.lease.completeGPU() }
+        try input.encodePreparation(commandBuffer)
         let texture = try renderer.encoder.encodeModel(input.texture, style: plan.style, parameters: plan.controls.parameters,
             prefix: plan.prefix, request: plan.request, workingSet: plan.workingSet, commandBuffer: commandBuffer)
         return EncodedFrame(texture: texture, input: input, plan: plan, command: commandBuffer, renderer: renderer)
@@ -30,7 +36,7 @@ public final class EncodedFrame: @unchecked Sendable {
     let plan: FrameRenderPlan
     let command: MTLCommandBuffer
     let renderer: LumeraRenderer
-    private let lock = NSLock()
+    private let lock = UnfairLock()
     private var copied = false
     init(texture: MTLTexture, input: PreparedInput, plan: FrameRenderPlan, command: MTLCommandBuffer, renderer: LumeraRenderer) {
         self.texture = texture; self.input = input; self.plan = plan; self.command = command; self.renderer = renderer

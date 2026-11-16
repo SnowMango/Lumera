@@ -90,7 +90,7 @@ final class DynamicColorResponseTests: XCTestCase {
         let pixels = try await render(renderer, input: input, model: prepared, edits: edits)
         for (pixel, expected) in zip(pixels, [0.4,0.5,0.6]) { XCTAssertEqual(Double(pixel), expected, accuracy: 0.003) }
     }
-    func testDeclaredBoundsAndUnsafeHalfExtrapolationReject() async throws {
+    func testDeclaredBoundsRejectAndSafeHalfExtrapolationRenders() async throws {
         let renderer = try LumeraRenderer(), input = try await input(renderer, .float16)
         let assets = ["a": cube(0.5), "b": cube(0.75)]
         var m = model(assets); m.appearance.lutWeights = [.init(resourceID: "a", weight: 0.5), .init(resourceID: "b", weight: 0.5)]
@@ -99,7 +99,11 @@ final class DynamicColorResponseTests: XCTestCase {
         m = model(assets); m.appearance.lutWeights = [.init(resourceID: "a", weight: 0.5), .init(resourceID: "b", weight: 0.5)]
         for i in m.appearance.resources.indices { m.appearance.resources[i].outOfRange = .linearExtrapolation }
         let prepared = try ModelPreparer(renderer: renderer).prepare(StyleModelCompiler.compile(m), resources: .init(luts: assets), execution: execution(.float16))
-        do { _ = try await render(renderer, input: input, model: prepared); XCTFail("Unsafe half LUT extrapolation must reject") } catch { }
+        let pixels = try await render(renderer, input: input, model: prepared)
+        let expected: [Float] = [0.25, 0.3125, 0.375]
+        for (actual, expected) in zip(pixels, expected) {
+            XCTAssertEqual(actual, expected, accuracy: 0.003)
+        }
     }
     func testNonneutralMixtureAndUnprovenExtendedNeutralReject() throws {
         let renderer = try LumeraRenderer()

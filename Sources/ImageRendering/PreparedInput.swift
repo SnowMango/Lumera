@@ -30,8 +30,13 @@ public enum SourceImage: @unchecked Sendable {
     }
 }
 
+/// How a finite channel interval was established; declarations are not measurements.
+public enum InputRangeEvidence: Sendable { case measured, declared, derived }
+
 /// 已统一方向和颜色、由渲染模块创建并持有像素的校正前图像。
 public final class NormalizedInput: @unchecked Sendable {
+    let identity: PreparedInputIdentity
+    package var effectiveRecipeDigest: String { identity.recipeDigest }
     let texture: MTLTexture
     let properties: [String: Any]
     public let descriptor: SourceDescriptor
@@ -40,7 +45,8 @@ public final class NormalizedInput: @unchecked Sendable {
     public let effectiveRecipe: EffectiveInputRecipe
     public let working: WorkingImageContract
     public let execution: ExecutionProfile
-    /// 实测存储纹理的编码 sRGB 通道范围，EDR 可超出 0…1。
+    /// 编码 sRGB 通道的保守范围；依据见 valueBoundsEvidence，EDR 可超出 0…1。
+    public let valueBoundsEvidence: InputRangeEvidence
     public let valueBounds: NumericBounds
     public let captureConditions: CaptureConditions
     /// 绑定声明来源、有效配方与工作契约的内容身份。
@@ -50,19 +56,40 @@ public final class NormalizedInput: @unchecked Sendable {
     public var width: Int { texture.width }
     public var height: Int { texture.height }
     public var image: CIImage { makeInputImage(texture, properties: properties, range: execution.dynamicRange) }
-    init(texture: MTLTexture, properties: [String: Any], descriptor: SourceDescriptor, recipe: EffectiveInputRecipe,
-         working: WorkingImageContract, execution: ExecutionProfile, bounds: NumericBounds, conditions: CaptureConditions,
-         inputDevelopment: SourceImage.InputDevelopment) throws {
-        self.texture = texture; self.properties = properties; self.descriptor = descriptor; self.effectiveRecipe = recipe
+    init(texture: MTLTexture, properties: [String: Any], identity: PreparedInputIdentity,
+         execution: ExecutionProfile, bounds: NumericBounds, conditions: CaptureConditions,
+         inputDevelopment: SourceImage.InputDevelopment, boundsEvidence: InputRangeEvidence = .measured) {
+        valueBoundsEvidence = boundsEvidence
+        self.identity = identity
+        self.texture = texture; self.properties = properties; self.descriptor = identity.descriptor; self.effectiveRecipe = identity.recipe
         self.inputDevelopment = inputDevelopment
-        self.working = working; self.execution = execution; self.valueBounds = bounds; self.captureConditions = conditions
-        sourceID = try descriptor.contentIdentity(effectiveRecipeDigest: recipe.digest(), working: working)
+        self.working = identity.working; self.execution = execution; self.valueBounds = bounds; self.captureConditions = conditions
+        sourceID = identity.sourceID
         inputID = UUID().uuidString
     }
 }
 
 /// 输入校正阶段生成的不可变图像与校正身份，可直接用于观测和帧渲染。
 public final class PreparedInput: @unchecked Sendable {
+    var observationWorkspace: PreparedObservationWorkspace?
+    var pendingEncoding: PendingInputEncoding?
+    var processingRetention: AnyObject?
+    func encodePreparation(_ command: MTLCommandBuffer) throws { try pendingEncoding?.encodeOnce(command) }
+    private let transferLock = UnfairLock()
+    private var transferAvailable = false
+    /// Only the unpublished SDK source-preparation path may grant this capability.
+    func allowStorageTransfer() {
+        transferLock.lock(); defer { transferLock.unlock() }
+        // Calibrated storage may retain additional owners; conservatively keep the copy path.
+        transferAvailable = texture === source.texture
+    }
+    func takeStorageTransfer() -> Bool {
+        transferLock.lock(); defer { transferLock.unlock() }
+        let available = transferAvailable
+        transferAvailable = false
+        return available
+    }
+
     let texture: MTLTexture
     let properties: [String: Any]
     public let source: NormalizedInput
@@ -73,7 +100,8 @@ public final class PreparedInput: @unchecked Sendable {
     /// 所选输入校正（含资格声明）或未验证恒等参考的内容身份。
     public let calibrationID: String
     public let working: WorkingImageContract
-    /// 实测存储纹理的编码 sRGB 通道范围，EDR 可超出 0…1。
+    /// 编码 sRGB 通道的保守范围；依据见 valueBoundsEvidence，EDR 可超出 0…1。
+    public let valueBoundsEvidence: InputRangeEvidence
     public let valueBounds: NumericBounds
     public let captureConditions: CaptureConditions
     /// 其拍摄条件均被当前输入满足的校正资格。
@@ -88,11 +116,12 @@ public final class PreparedInput: @unchecked Sendable {
     package func photoFacts(stamp: FrameStamp) throws -> FrameInputFacts {
         let recipe = source.effectiveRecipe
         return FrameInputFacts(stamp: stamp, inputID: inputID, sourceID: sourceID, calibrationID: calibrationID,
-                               effectiveRecipeDigest: try recipe.digest(), captureConditions: captureConditions, effectiveRecipe: recipe)
+                               effectiveRecipeDigest: source.effectiveRecipeDigest, captureConditions: captureConditions, effectiveRecipe: recipe)
     }
 
     init(texture: MTLTexture, source: NormalizedInput, calibrationID: String, working: WorkingImageContract,
-         bounds: NumericBounds, qualifications: [CalibrationQualification]) {
+         bounds: NumericBounds, qualifications: [CalibrationQualification], boundsEvidence: InputRangeEvidence? = nil) {
+        valueBoundsEvidence = boundsEvidence ?? source.valueBoundsEvidence
         self.texture = texture; self.source = source; self.properties = source.properties; self.sourceID = source.sourceID
         self.calibrationID = calibrationID; self.working = working; self.valueBounds = bounds
         self.captureConditions = source.captureConditions; self.qualifications = qualifications

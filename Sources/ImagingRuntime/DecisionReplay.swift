@@ -37,7 +37,7 @@ public enum DecisionReplay {
     /// 校验模型、资源及当前输入事实后，执行自动求值 → 时间适应 → 用户编辑。
     /// 显式提供的 fallback 必须与可重建历史一致；失败不会改变传入状态。
     public static func step(_ record: DecisionRecord, model: CompiledStyleModel, state: DecisionEngineState? = nil) throws -> DecisionStepResult {
-        let resourceDigest = Digest.data(try JSON.encode(model.definition.appearance.resources))
+        let resourceDigest = model.resourceDigest
         guard record.version == 1, record.modelDigest == model.identity,
               record.resourceDigest == resourceDigest, let current = record.currentInput else {
             throw LabError.unsupported("Replay requires matching version, identities and current input facts")

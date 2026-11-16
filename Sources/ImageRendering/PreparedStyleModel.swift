@@ -14,7 +14,20 @@ public final class PreparedStyleModel: @unchecked Sendable {
     let lutStyles: [String: PreparedResolvedStyle]
     let budget: ModelFrameBudget
     private let resourceLease: ModelResourceLease?
-    private let inputLock = NSLock()
+    private let inputLock = UnfairLock()
+    private var processingCharges: [ObjectIdentifier: [ProcessingResourceCharge]] = [:]
+    func registerProcessingResources(_ manager: ProcessingResources) throws {
+        try inputLock.withLock {
+            let key = ObjectIdentifier(manager.ledger)
+            guard processingCharges[key] == nil else { return }
+            var charges = try ([base] + Array(lutStyles.values)).flatMap { style in
+                try style.processingTextures.map { try manager.ledger.borrow($0, adaptingPolicy: true) }
+            }
+            let sourceBytes = resources.luts.values.reduce(0) { $0 + $1.residentSourceBytes }
+            charges.append(try manager.ledger.reserve(sourceBytes, adaptingPolicy: true))
+            processingCharges[key] = charges
+        }
+    }
     private var inputNormalizers: [String: InputNormalizer] = [:]
     /// 在预留帧之前准备输入校正。校正上传、执行变体和仍在持有的照片结果共用此模型的预算。
     public func prepareInputNormalizer(calibration: InputCalibration?, resources: ModelResourceSet) throws -> InputNormalizer {
@@ -235,8 +248,8 @@ public final class ModelPreparer {
                 }
             } } }
         }
-        let prepared = try PreparedStyleModel(compiled: model, execution: execution, resources: resources,
-            resourceDigest: Digest.data(JSON.encode(model.definition.appearance.resources)), renderer: renderer,
+        let prepared = PreparedStyleModel(compiled: model, execution: execution, resources: resources,
+            resourceDigest: model.resourceDigest, renderer: renderer,
             base: base, lutStyles: lutStyles, budget: budget, resourceLease: resourceLease)
         resourceLease?.finishPreparation()
         return prepared
@@ -250,7 +263,7 @@ public final class FrameReservation: @unchecked Sendable {
     let model: PreparedStyleModel
     let lease: FrameBudgetLease
     let residentInput: PhotoInputResidency?
-    private let lock = NSLock()
+    private let lock = UnfairLock()
     private var issued = false
     init(model: PreparedStyleModel, residentInput: PhotoInputResidency? = nil, sourceBytes: Int = 0) throws {
         self.model = model; self.residentInput = residentInput; lease = try model.budget.acquire(retainedInputBytes: 0)
@@ -301,7 +314,7 @@ final class ModelFrameBudget: @unchecked Sendable {
     /// 执行变体共用同一本账和同一把锁，按各自配置计算最低帧内存。
     private final class Ledger: @unchecked Sendable {
         let totalBytes: Int, slots: Int
-        let lock = NSLock()
+        let lock = UnfairLock()
         var active = 0, reserved = 0
         init(totalBytes: Int, slots: Int) { self.totalBytes = totalBytes; self.slots = slots }
     }
@@ -365,7 +378,7 @@ final class ModelResourceLease: @unchecked Sendable {
 final class FrameBudgetLease: @unchecked Sendable {
     private let owner: ModelFrameBudget
     let allowance: Int
-    private let lock = NSLock()
+    private let lock = UnfairLock()
     private var retained: Int
     private var retainedInput: Int
     private var completed = false

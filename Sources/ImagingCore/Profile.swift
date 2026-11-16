@@ -70,7 +70,18 @@ public enum Digest {
     /// Hash immutable pixel storage without allocating a full-size Data copy.
     public static func buffer(_ bytes:UnsafeRawBufferPointer) -> String {
         var hash=SHA256();hash.update(bufferPointer:bytes)
-        return hash.finalize().map{String(format:"%02x",$0)}.joined()
+        return hex(hash.finalize())
     }
-    public static func data(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
+    public static func data(_ data: Data) -> String { hex(SHA256.hash(data: data)) }
+
+    private static let hexDigits = Array("0123456789abcdef".utf8)
+    private static func hex(_ digest: SHA256.Digest) -> String {
+        var bytes = [UInt8]()
+        bytes.reserveCapacity(64)
+        for byte in digest {
+            bytes.append(hexDigits[Int(byte >> 4)])
+            bytes.append(hexDigits[Int(byte & 0x0f)])
+        }
+        return String(decoding: bytes, as: UTF8.self)
+    }
 }

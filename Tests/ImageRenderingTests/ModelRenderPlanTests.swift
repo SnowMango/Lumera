@@ -126,6 +126,9 @@ final class ModelRenderPlanTests: XCTestCase {
         let compiled = try StyleModelCompiler.compile(model())
         let prepared = try ModelPreparer(renderer: renderer).prepare(compiled, resources: .init(), execution: execution())
         var values = controls(compiled, input: input); values.inputExposureEV = 10; values.parameters.color.exposureEV = 10
+        // A real optical stage is required: encoded-only output no longer stores
+        // the large decoded value that this pre-encoding rejection fixture targets.
+        values.parameters.vignette.enabled = true; values.parameters.vignette.amountEV = 1
         let plan = try RenderPlanner().plan(values, input: input, model: prepared)
         let command = try XCTUnwrap(renderer.queue.makeCommandBuffer())
         XCTAssertThrowsError(try FrameEncoder(renderer: renderer).encode(input, plan: plan, commandBuffer: command))

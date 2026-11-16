@@ -1,6 +1,7 @@
 import Foundation
 import Metal
 import CoreImage
+import CoreVideo
 import ImagingCore
 
 /// A shared Metal renderer with native texture, CIImage, CVPixelBuffer and RAW entry points.
@@ -15,6 +16,20 @@ public final class LumeraRenderer: @unchecked Sendable {
     let context: CIContext
     let encoder: TextureEffectEncoder
     let frameFeatures: FrameFeatureExtractor
+    private let convenienceCacheLock = UnfairLock()
+    private var convenienceTextureCache: CVMetalTextureCache?
+    func singleFrameTextureCache() throws -> CVMetalTextureCache {
+        try convenienceCacheLock.withLock {
+            if let convenienceTextureCache { return convenienceTextureCache }
+            var cache: CVMetalTextureCache?
+            guard CVMetalTextureCacheCreate(nil, nil, device, nil, &cache) == kCVReturnSuccess, let cache else {
+                throw LabError.io("Cannot create single-frame texture mapping cache")
+            }
+            convenienceTextureCache = cache; return cache
+        }
+    }
+    let processingQueue = DispatchQueue(label: "Lumera.processing.encode", qos: .userInitiated)
+    let processingDeliveryQueue: DispatchQueue
     let rangeReducer: InputRangeReducer
     static let sRGB = CGColorSpace(name: CGColorSpace.sRGB)!
     static let extendedSRGB = CGColorSpace(name: CGColorSpace.extendedSRGB)!
@@ -27,10 +42,12 @@ public final class LumeraRenderer: @unchecked Sendable {
 
     /// Creates a renderer on the supplied device, or the system default device.
     /// Throws if Metal, a command queue or the rendering kernels cannot be created.
-    public init(device: MTLDevice? = MTLCreateSystemDefaultDevice(), precision: RenderingPrecision = .float16) throws {
+    public init(device: MTLDevice? = MTLCreateSystemDefaultDevice(), precision: RenderingPrecision = .float16,
+                completionQueue: DispatchQueue = DispatchQueue(label: "Lumera.processing.delivery")) throws {
         guard let device, let queue = device.makeCommandQueue() else {
             throw LabError.unsupported("无法创建 Metal 图像渲染环境")
         }
+        self.processingDeliveryQueue = DispatchQueue(label: "Lumera.processing.delivery.serial", target: completionQueue)
         self.imageInputFormat = precision == .float32 ? .rgba32Float : .rgba16Float
         self.device = device
         self.queue = queue

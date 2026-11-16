@@ -38,7 +38,7 @@ public final class PhotoSessionSnapshot: Sendable {
     func matches(_ input: PreparedInput) throws -> Bool {
         guard input.sourceID == inputFacts.sourceID, input.calibrationID == inputFacts.calibrationID,
               input.width == inputWidth, input.height == inputHeight else { return false }
-        return try input.source.effectiveRecipe.digest() == inputFacts.effectiveRecipeDigest
+        return input.source.effectiveRecipeDigest == inputFacts.effectiveRecipeDigest
     }
 }
 

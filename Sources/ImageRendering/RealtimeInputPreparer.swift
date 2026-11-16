@@ -1,4 +1,5 @@
 import ImagingCore
+import Metal
 
 /// Reusable, model-bound configuration for source preparation after frame admission.
 public final class RealtimeInputPreparer: Sendable {
@@ -17,6 +18,14 @@ public final class RealtimeInputPreparer: Sendable {
         normalizer = try model.prepareInputNormalizer(calibration: calibration, resources: self.resources)
     }
 
+    /// Prepare a declared-range source configuration against an explicit shared manager.
+    /// Call prepare() on the result when configuration changes, then makeInput() per frame.
+    public func explicitInput(descriptor: SourceDescriptor, recipe: InputRecipe,
+                              normalizedRGBBounds: NumericBounds, resources manager: ProcessingResources) throws -> PreparedRealtimeInput {
+        try PreparedRealtimeInput(renderer: model.renderer, adapter: adapter, normalizer: normalizer,
+            descriptor: descriptor, recipe: recipe, execution: model.execution, bounds: normalizedRGBBounds, observations: model.compiled.definition.observations,
+            calibration: calibration, modelResources: resources, resources: manager)
+    }
     package func prepare(_ source: SourceImage, descriptor: SourceDescriptor, recipe: InputRecipe,
                          execution: ExecutionProfile, rawOverrides: [RAWOverride],
                          rawConfiguration: RAWDevelopmentConfiguration?, trustedNormalizedRGBBounds: NumericBounds?) async throws -> PreparedInput {
@@ -24,7 +33,11 @@ public final class RealtimeInputPreparer: Sendable {
         let scope = try model.renderer.encoder.beginBoundedPhotoWork(); defer { scope.finish() }
         let normalized = try await adapter.prepare(source, descriptor: descriptor, recipe: recipe, execution: execution,
             rawOverrides: rawOverrides, rawConfiguration: rawConfiguration, trustedNormalizedRGBBounds: trustedNormalizedRGBBounds)
-        return try await normalizer.normalize(normalized, calibration: calibration, resources: resources, bounded: true)
+        let input = try await normalizer.normalize(normalized, calibration: calibration, resources: resources, bounded: true)
+        // Neither the normalized nor prepared input has escaped this SDK-only path. The
+        // adapter allocates fresh output storage, independent of the borrowed camera buffer.
+        input.allowStorageTransfer()
+        return input
     }
 }
 

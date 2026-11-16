@@ -29,7 +29,7 @@ private actor SessionTestGate {
 }
 
 private final class SessionTestOnce: @unchecked Sendable {
-    private let lock = NSLock()
+    private let lock = UnfairLock()
     private var first = true
     func take() -> Bool { lock.lock(); defer { lock.unlock() }; let value = first; first = false; return value }
 }
@@ -444,5 +444,80 @@ extension FrameProcessingSessionTests {
         await completion.release()
         guard case .dropped(let dropped, .cancelled) = try await result.value else { return XCTFail("Cancelled render published") }
         XCTAssertEqual(dropped, stamp(1))
+    }
+}
+
+extension FrameProcessingSessionTests {
+    private func neutralSource() throws -> (LumeraRenderer, PreparedStyleModel, FrameSource) {
+        let renderer = try LumeraRenderer()
+        var definition = StyleModel(identity: .init(id: "neutral-session", name: "Neutral session"))
+        definition.edits.overrideTargets = ["color.exposureEV"]
+        let execution = ExecutionProfile(width: 4, height: 4,
+            budget: .init(maxInFlightFrames: 1, maxResidentBytes: 32 * 1024 * 1024))
+        let model = try ModelPreparer(renderer: renderer).prepare(StyleModelCompiler.compile(definition), resources: .init(), execution: execution)
+        let preparer = try model.prepareRealtimeInput(working: .init(referenceRenditionID: "fixture"))
+        var descriptor = SourceDescriptor(id: "input", path: .processedPhoto); descriptor.recipeID = "ci"
+        let image = CIImage(color: CIColor(red: 0.5, green: 0.5, blue: 0.5)).cropped(to: .init(x: 0, y: 0, width: 4, height: 4))
+        let source = FrameSource(.image(image), using: preparer, descriptor: descriptor,
+            recipe: .init(id: "ci", backend: "coreImage", version: "1", decodedRendition: .baseImage))
+        return (renderer, model, source)
+    }
+    func testImmediateResultKeepsDecisionRecordAndControlsAcrossEffectSwitches() async throws {
+        let (renderer, model, source) = try neutralSource()
+        let live = SessionRenderDriver.live(renderer)
+        // All frames use the same source API, including frames with active input edits.
+        let session = try FrameProcessingSession(model: model, driver: .init(observe: live.observe, submit: { input, plan, requirements, beforeCommit in
+            let result = try live.submit(input, plan, requirements, beforeCommit)
+            XCTAssertEqual(result.usesGPU, plan.controls.inputExposureEV != 0)
+            return result
+        }))
+        for (i, exposure) in [0.0, -1, 0].enumerated() {
+            var edits = EditRequest(); edits.inputExposureEV = exposure
+            let outcome = try await session.enqueue(source, stamp: stamp(UInt64(i)), edits: edits)
+            guard case .rendered(let frame) = outcome else { return XCTFail("Missing frame") }
+            XCTAssertEqual(frame.resolvedControls.inputExposureEV, exposure)
+            XCTAssertEqual(frame.stamp, stamp(UInt64(i)))
+        }
+        let records = await session.takeRecords()
+        XCTAssertEqual(records.count, 3)
+        let decisions = try DecisionReplay.evaluate(records, model: model.compiled)
+        XCTAssertEqual(decisions.map(\.controls.inputExposureEV), [0, -1, 0])
+    }
+    func testImmediateBeforeAcceptCancellationDoesNotAdvanceHistory() async throws {
+        let (renderer, model, source) = try neutralSource()
+        let live = SessionRenderDriver.live(renderer), once = SessionTestOnce()
+        let session = try FrameProcessingSession(model: model, driver: .init(observe: live.observe, submit: { input, plan, requirements, beforeCommit in
+            try live.submit(input, plan, requirements, {
+                if once.take() { throw CancellationError() }
+                try beforeCommit()
+            })
+        }))
+        guard case .dropped(_, .cancelled) = try await session.enqueue(source, stamp: stamp(1)) else { return XCTFail("Expected cancellation") }
+        let empty = await session.takeRecords(); XCTAssertTrue(empty.isEmpty)
+        assertRendered(try await session.enqueue(source, stamp: stamp(2)), stamp: stamp(2))
+        let records = await session.takeRecords(); XCTAssertEqual(records.count, 1)
+    }
+    func testImmediateAfterAcceptCancellationAndResetKeepBoundarySemantics() async throws {
+        for reset in [false, true] {
+            let (renderer, model, source) = try neutralSource()
+            let live = SessionRenderDriver.live(renderer), gate = SessionTestGate()
+            let session = try FrameProcessingSession(model: model, driver: .init(observe: live.observe, submit: { input, plan, requirements, beforeCommit in
+                let result = try live.submit(input, plan, requirements, beforeCommit)
+                XCTAssertFalse(result.usesGPU)
+                return .init(usesGPU: result.usesGPU, completion: {
+                    await gate.enter()
+                    return try await result.value()
+                })
+            }))
+            let task = Task { try await session.enqueue(source, stamp: self.stamp(1)) }
+            await gate.waitForArrival()
+            if reset { try await session.reset(.reset(.sourceChanged)) } else { task.cancel() }
+            await gate.release()
+            guard case .dropped(_, let reason) = try await task.value else { return XCTFail("Accepted but cancelled frame published") }
+            XCTAssertEqual(reason, reset ? .reset : .cancelled)
+            let records = await session.takeRecords(); XCTAssertEqual(records.count, 1)
+            let nextStamp = stamp(2, generation: reset ? 1 : 0)
+            assertRendered(try await session.enqueue(source, stamp: nextStamp), stamp: nextStamp)
+        }
     }
 }

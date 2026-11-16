@@ -14,7 +14,7 @@ public final class FrameRenderPlan: @unchecked Sendable {
     let lease: FrameBudgetLease
     let workingSet: TileWorkingSet
     let residentInput: PhotoInputResidency?
-    private let lock = NSLock()
+    private let lock = UnfairLock()
     private var used = false
     var hasBeenClaimed: Bool { lock.lock(); defer { lock.unlock() }; return used }
     init(controls: ResolvedControls, input: PreparedInput, model: PreparedStyleModel, style: PreparedResolvedStyle,

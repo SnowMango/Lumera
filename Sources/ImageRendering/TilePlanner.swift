@@ -31,10 +31,11 @@ struct TilePlanner {
             return Int(ceil(support * sigma * scale)) + (d == 1 ? 1 : 3 * d)
         }
         var extent = 0
-        if style.detail.isActive {
+        let activity = EffectActivity(style, previewGlow: options.previewGlow)
+        if activity.detailBands {
             extent += Int(ceil(3 * max(style.detail.fineSigma, style.detail.midSigma) * scale))
-            if style.detail.sharpenAmount > 0 { extent += Int(ceil(3 * style.detail.sharpenSigma * scale)) }
         }
+        if activity.sharpening { extent += Int(ceil(3 * style.detail.sharpenSigma * scale)) }
         if style.softening.isActive { extent += optical(style.softening.sigma, options.softeningScale) }
         if options.previewGlow && style.glow.isActive { extent += optical(style.glow.farSigma, options.glowScale) }
         if options.previewGlow && style.halation.isActive {

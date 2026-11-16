@@ -6,7 +6,7 @@ import ImagingCore
 public final class InputNormalizer: @unchecked Sendable {
     private let renderer: LumeraRenderer
     // 锁保护预热绑定和资源缓存。每帧使用取出的快照，GPU 编码和异步等待在锁外进行。
-    private let lock = NSLock()
+    private let lock = UnfairLock()
     private struct Cached {
         let calibration: InputCalibration
         let resources: ModelResourceSet
@@ -54,13 +54,13 @@ public final class InputNormalizer: @unchecked Sendable {
         guard let calibration else {
             // 未经实测校正的输入使用单独的参考身份。
             try Self.validateBounds(source.valueBounds, working: source.working)
-            let identity = try InputCalibration.unqualifiedReferenceIdentity(working: source.working)
+            let identity = source.identity.unqualifiedReferenceID
             return PreparedInput(texture: source.texture, source: source, calibrationID: identity, working: source.working,
                                  bounds: source.valueBounds, qualifications: [])
         }
         try calibration.validate()
         guard calibration.source == source.descriptor, calibration.working == source.working,
-              calibration.recipeDigest == (try source.effectiveRecipe.digest()) else {
+              calibration.recipeDigest == source.effectiveRecipeDigest else {
             throw LabError.invalid("Input source, effective recipe or reference does not match calibration")
         }
         let bytes = source.width * source.height * source.execution.precision.bytesPerPixel
@@ -96,14 +96,24 @@ public final class InputNormalizer: @unchecked Sendable {
                                  qualification.conditionRanges.allSatisfy { range in
                                      source.captureConditions[range.axis].map(range.bounds.contains) ?? false
                                  }
-                             })
+                             }, boundsEvidence: .measured)
     }
-    private static func validateBounds(_ actual: NumericBounds, working: WorkingImageContract) throws {
+    static func validateBounds(_ actual: NumericBounds, working: WorkingImageContract) throws {
         if case .finite(let declared) = working.valueBounds {
             guard actual.lower >= declared.lower, actual.upper <= declared.upper else {
                 throw LabError.invalid("Prepared input exceeds declared working range")
             }
         }
+    }
+    func explicitPreparation(calibration: InputCalibration?, resources: ModelResourceSet) throws
+        -> (style: PreparedResolvedStyle, correction: PreparedDeviceCorrection?, identity: String?) {
+        let resources = try boundResources(calibration: calibration, resources: resources)
+        if let calibration {
+            try calibration.validate()
+            let cached = try preparation(calibration, resources: resources)
+            return (cached.tone, cached.correction, cached.identity)
+        }
+        return (try renderer.prepare(ResolvedStyle(parameters: .init())), nil, nil)
     }
     /// 供运行时准备和离线打包共用，检查内存中校正资源的摘要、域、样本范围与边界策略。
     public static func validateResources(_ calibration: InputCalibration, resources: ModelResourceSet) throws {

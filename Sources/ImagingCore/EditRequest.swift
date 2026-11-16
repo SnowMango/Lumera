@@ -113,7 +113,19 @@ public struct AdaptationRule: Codable, Equatable, Sendable {
 }
 /// 每个目标只允许一条时间规则；未配置的控制不参与时间平滑。
 public struct AdaptationPolicy: Codable, Equatable, Sendable {
-    public var rules: [AdaptationRule] = []
+    public var rules: [AdaptationRule] = [] { didSet { preparedDigest = nil } }
+    private var preparedDigest: String? = nil
+    private enum CodingKeys: String, CodingKey { case rules }
+    public static func == (lhs: Self, rhs: Self) -> Bool { lhs.rules == rhs.rules }
+    func preparingDigest() throws -> Self {
+        var copy = self
+        copy.preparedDigest = try digest()
+        return copy
+    }
+    func digest() throws -> String {
+        try validate()
+        return try preparedDigest ?? StyleIdentity.digest(self)
+    }
     public init() {}
     public func validate() throws {
         try ParameterSpecification.validateOwners(rules.map(\.target))

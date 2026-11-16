@@ -27,18 +27,19 @@ public final class RenderedFrame: @unchecked Sendable {
     private let legacyPlan: FrameRenderPlan?
     init(texture: MTLTexture, input: PreparedInput, plan: FrameRenderPlan) {
         self.texture = texture; region = nil; modelID = plan.model.compiled.identity; inputID = input.inputID
-        execution = plan.model.execution; legacyPlan = plan.residentInput == nil ? plan : nil; resolvedControls = plan.controls
+        execution = plan.model.execution; legacyPlan = plan.residentInput == nil && input.pendingEncoding == nil ? plan : nil; resolvedControls = plan.controls
         stamp = plan.stamp; resourceDigest = plan.model.resourceDigest
         let range: RenderDynamicRange = execution.dynamicRange == .edr ? .edr : .sdr
         var options: [CIImageOption: Any] = [.colorSpace: LumeraRenderer.colorSpace(for: range)]
         if #available(iOS 18, macOS 15, *), range == .edr { options[.contentHeadroom] = 0 }
         image = CIImage(mtlTexture: texture, options: options)!.settingProperties(LumeraImageMetadata.output(input.properties,
             width: texture.width, height: texture.height, depth: execution.precision == .float16 ? 16 : 32, dynamicRange: range))
+        objc_setAssociatedObject(image, &outputTextureAssociation, texture, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
         retainOutputLease(on: image, lease: plan.lease)
     }
     init(image: CIImage, input: PreparedInput, plan: FrameRenderPlan, region: CGRect) {
         texture = nil; self.region = region; stamp = plan.stamp; resourceDigest = plan.model.resourceDigest
-        modelID = plan.model.compiled.identity; inputID = input.inputID; execution = plan.model.execution; legacyPlan = plan.residentInput == nil ? plan : nil; resolvedControls = plan.controls
+        modelID = plan.model.compiled.identity; inputID = input.inputID; execution = plan.model.execution; legacyPlan = plan.residentInput == nil && input.pendingEncoding == nil ? plan : nil; resolvedControls = plan.controls
         self.image = image.settingProperties(LumeraImageMetadata.output(input.properties, width: Int(region.width), height: Int(region.height),
             depth: execution.precision == .float16 ? 16 : 32, dynamicRange: execution.dynamicRange == .edr ? .edr : .sdr))
         retainOutputLease(on: self.image, lease: plan.lease)
@@ -46,6 +47,7 @@ public final class RenderedFrame: @unchecked Sendable {
 
 }
 
+private var outputTextureAssociation: UInt8 = 0
 private var outputLeaseAssociation: UInt8 = 0
 /// 图像或纹理可独立于包装对象存活，因此输出对象也持有预算租约。
 func retainOutputLease(on object: AnyObject, lease: FrameBudgetLease) {

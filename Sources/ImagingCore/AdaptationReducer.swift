@@ -26,7 +26,7 @@ public enum AdaptationReducer {
     /// 显式重置丢弃历史，包括缺测计时和锁定。
     public static func reduce(_ controls: AutomaticControls, state: AdaptationState?, stamp: FrameStamp, event: AdaptationEvent?, policy: AdaptationPolicy) throws -> AdaptationResult {
         try stamp.validate(); try policy.validate(); try validate(controls, at: stamp)
-        let digest = try StyleIdentity.digest(policy)
+        let digest = try policy.digest()
         let reset: Bool
         if case .reset = event { reset = true } else { reset = false }
         let previous = reset ? nil : state

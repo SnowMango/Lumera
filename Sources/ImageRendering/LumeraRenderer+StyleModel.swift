@@ -21,6 +21,9 @@ extension LumeraRenderer {
     private func observe(_ input: PreparedInput, stamp: FrameStamp, requirements: ObservationRequirements,
                          maxResidentBytes: Int?, inputAlreadyBudgeted: Bool) async throws -> FrameObservations {
         try Task.checkCancellation()
+        if let observation = try frameFeatures.metadataObservation(input, stamp: stamp, requirements: requirements) {
+            return observation
+        }
         guard let command = queue.makeCommandBuffer() else { throw LabError.io("Cannot create observation command") }
         let ticket = try frameFeatures.encode(input, stamp: stamp, requirements: requirements, commandBuffer: command, budgetLimit: maxResidentBytes, inputAlreadyBudgeted: inputAlreadyBudgeted)
         if ticket.readbackBytes > 0 {
@@ -29,6 +32,26 @@ extension LumeraRenderer {
             catch { throw ModelGPUFailure(message: error.localizedDescription) }
         }
         return try ticket.resolve()
+    }
+    /// Callback observation path. Metadata-only observations do not submit GPU work.
+    public func observe(_ input: PreparedInput, stamp: FrameStamp, requirements: ObservationRequirements,
+                        maxResidentBytes: Int? = nil, on delivery: DispatchQueue,
+                        completion: @escaping (Result<FrameObservations, Error>) -> Void) {
+        do {
+            if let observation = try frameFeatures.metadataObservation(input, stamp: stamp, requirements: requirements) {
+                delivery.async { completion(.success(observation)) }; return
+            }
+            guard let command = queue.makeCommandBuffer() else { throw LabError.io("Cannot create observation command") }
+            let ticket = try frameFeatures.encode(input, stamp: stamp, requirements: requirements,
+                commandBuffer: command, budgetLimit: maxResidentBytes)
+            command.addCompletedHandler { done in
+                let result: Result<FrameObservations, Error>
+                if done.status == .completed && done.error == nil { result = Result { try ticket.resolve() } }
+                else { result = .failure(ModelGPUFailure(message: done.error?.localizedDescription ?? "Observation GPU failed")) }
+                delivery.async { completion(result); withExtendedLifetime(input) {} }
+            }
+            command.commit()
+        } catch { delivery.async { completion(.failure(error)) } }
     }
     /// 负责提交并异步取得已完成的独立输出。
     public func render(_ input: PreparedInput, plan: FrameRenderPlan) async throws -> RenderedFrame {

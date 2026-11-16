@@ -111,7 +111,7 @@ struct PhotoInputKey: Hashable, Sendable {
 final class PhotoInputLease: @unchecked Sendable {
     let origin: PhotoInputResidency
     private let charge: PhotoCacheStorage.Charge
-    private let lock = NSLock()
+    private let lock = UnfairLock()
     private var borrowed: [ObjectIdentifier: Borrow] = [:]
     private struct Borrow {
         weak var residency: PhotoInputResidency?
@@ -135,7 +135,7 @@ final class PhotoInputLease: @unchecked Sendable {
 
 private final class PhotoCacheStorage: @unchecked Sendable {
     private let limit: Int
-    private let lock = NSLock()
+    private let lock = UnfairLock()
     private var used = 0
     var bytes: Int {
         lock.lock(); defer { lock.unlock() }

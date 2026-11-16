@@ -225,10 +225,17 @@ final class PrecisionSelectionTests: XCTestCase {
         let style = try h.encoder.prepare(ResolvedStyle(profile: .standard), lut: corner)
         var request = RenderRequest(input: .init(width: 2, height: 2))
         request.dynamicRange = .edr
-        // The continued trilinear function is r*g*b. 6³ fits the LUT output's
-        // half texture but overflows the subsequent encoded-to-linear write.
+        // The continued trilinear function is r*g*b. 6³ fits encoded half storage.
+        // It only requires a decoded half write when a linear optical effect is active.
         request.inputValueBounds = .init(lower: 6, upper: 6)
-        guard case .unsupported(.linearOpticalInput, _) = try h.encoder.assessPrecision(style: style, request: request) else {
+        XCTAssertEqual(try h.encoder.assessPrecision(style: style, request: request), .safe)
+        let encoded = try h.encode(h.texture(width: 2, height: 2, value: 6), style, request)
+        XCTAssertEqual(RenderHarness.read(encoded)[0], 216, accuracy: 0.25)
+        h.encoder.releaseCaches()
+        var profile = Profile.standard
+        profile.parameters.vignette.enabled = true; profile.parameters.vignette.amountEV = 1
+        let optical = try h.encoder.prepare(ResolvedStyle(profile: profile), lut: corner)
+        guard case .unsupported(.linearOpticalInput, _) = try h.encoder.assessPrecision(style: optical, request: request) else {
             return XCTFail("Expected rejection at linear optical input")
         }
         request.inputValueBounds = .init(lower: 50, upper: 50)

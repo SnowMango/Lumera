@@ -34,18 +34,17 @@ public final class ResolvedPhotoSource: PhotoRegionSource, @unchecked Sendable {
     public var height: Int { Int(bounds.height) }
     public let memory: PhotoSourceMemory
     private let renderer: LumeraRenderer
-    private let image: CIImage
-    private let properties: [String: Any]
-    private let descriptor: SourceDescriptor
-    private let recipe: EffectiveInputRecipe
-    private let working: WorkingImageContract
-    private let conditions: CaptureConditions
+    let image: CIImage
+    let properties: [String: Any]
+    let identity: PreparedInputIdentity
+    private var working: WorkingImageContract { identity.working }
+    let conditions: CaptureConditions
     private let development: SourceImage.InputDevelopment
-    init(renderer: LumeraRenderer, image: CIImage, bounds: CGRect, properties: [String: Any], descriptor: SourceDescriptor,
-         recipe: EffectiveInputRecipe, working: WorkingImageContract, conditions: CaptureConditions, development: SourceImage.InputDevelopment, knownResidentBytes: Int) {
+    init(renderer: LumeraRenderer, image: CIImage, bounds: CGRect, properties: [String: Any], identity: PreparedInputIdentity,
+         conditions: CaptureConditions, development: SourceImage.InputDevelopment, knownResidentBytes: Int) {
         self.memory = PhotoSourceMemory(knownResidentBytes: knownResidentBytes, hasOpaqueDecoderMemory: true)
         self.renderer = renderer; self.image = image; self.bounds = bounds; self.properties = properties
-        self.descriptor = descriptor; self.recipe = recipe; self.working = working; self.conditions = conditions; self.development = development
+        self.identity = identity; self.conditions = conditions; self.development = development
     }
     public func prepare(region: CGRect, execution: ExecutionProfile) async throws -> NormalizedInput {
         try await prepare(region: region, execution: execution, trustedNormalizedRGBBounds: nil)
@@ -63,15 +62,16 @@ public final class ResolvedPhotoSource: PhotoRegionSource, @unchecked Sendable {
         try TextureDimensions.validate(width: width, height: height, device: renderer.device)
         let textureDescriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: renderer.imageInputFormat, width: width, height: height, mipmapped: false)
         textureDescriptor.storageMode = .private; textureDescriptor.usage = [.shaderRead, .shaderWrite]
+        if execution.precision == .float16, trustedNormalizedRGBBounds == nil {
+            let prepared = try await renderer.prepareHalfInput(image, bounds: region,
+                colorSpace: LumeraRenderer.colorSpace(for: range), budget: execution.budget.maxResidentBytes)
+            return NormalizedInput(texture: prepared.texture, properties: properties, identity: identity,
+                execution: execution, bounds: prepared.bounds, conditions: conditions, inputDevelopment: development)
+        }
         let workspace = TileWorkingSet(limit: execution.budget.maxResidentBytes)
         let textureBytes = renderer.device.heapTextureSizeAndAlign(descriptor: textureDescriptor).size
         try workspace.reserve(textureBytes)
-        // The unknown Half path must inspect Float32 output before writing narrower storage.
-        // Float32 already stores at preflight precision; the actual reduction is sufficient.
-        if execution.precision == .float16, trustedNormalizedRGBBounds == nil {
-            _ = try await renderer.measureInputRange(image, bounds: region, colorSpace: LumeraRenderer.colorSpace(for: range),
-                budget: min(64 * 1024 * 1024, execution.budget.maxResidentBytes), requireHalf: true)
-        }
+        // Float32 and explicitly trusted Half inputs need only the actual stored range.
         try Task.checkCancellation()
         guard let texture = renderer.device.makeTexture(descriptor: textureDescriptor), let command = renderer.queue.makeCommandBuffer() else { throw LabError.io("Cannot allocate normalized input") }
         try workspace.reserve(max(0, texture.allocatedSize - textureBytes))
@@ -88,8 +88,8 @@ public final class ResolvedPhotoSource: PhotoRegionSource, @unchecked Sendable {
                 throw LabError.invalid("Stored input is outside its trusted normalized RGB range")
             }
         }
-        return try NormalizedInput(texture: texture, properties: properties, descriptor: descriptor, recipe: recipe,
-            working: working, execution: execution, bounds: bounds, conditions: conditions, inputDevelopment: development)
+        return NormalizedInput(texture: texture, properties: properties, identity: identity,
+            execution: execution, bounds: bounds, conditions: conditions, inputDevelopment: development)
     }
 }
 
