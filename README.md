@@ -1,6 +1,6 @@
 # Lumera
 
-版本：**0.4.0**。产品版本、风格模型 schema 和固定风格 schema 分别管理。
+版本：**0.5.0**。产品版本、风格模型 schema 和固定风格 schema 分别管理。更新内容见 [更新记录](CHANGELOG.md)。
 
 Lumera 是基于 Metal 的照片与视频成片引擎。它以风格模型描述目标外观，根据输入观测和拍摄条件计算参数，并执行颜色、色调曲线、细节、柔化、暗角、光晕、数码噪点和胶片颗粒处理。输入校正、目标模型、用户编辑和执行资源独立管理；模型可由配对样本拟合，也可手动制作。
 
@@ -30,7 +30,7 @@ Lumera 是基于 Metal 的照片与视频成片引擎。它以风格模型描述
 https://github.com/SnowMango/Lumera.git
 ```
 
-SPM 版本依赖使用 `0.4.0`。本地检出使用路径依赖 `.package(path: "../Lumera")`。添加到应用目标时，选择 `ImagingCore` 和 `ImageRendering`；使用照片/视频协调器时再添加 `ImagingRuntime`。各产品分别导入，没有名为 `Lumera` 的模块。
+SPM 版本依赖使用 `0.5.0`。本地检出使用路径依赖 `.package(path: "../Lumera")`。添加到应用目标时，选择 `ImagingCore` 和 `ImageRendering`；使用照片/视频协调器时再添加 `ImagingRuntime`。各产品分别导入，没有名为 `Lumera` 的模块。
 
 如果宿主项目使用 `Package.swift`，在包的 `dependencies` 中声明仓库，并在目标的 `dependencies` 中添加产品：
 
@@ -45,7 +45,7 @@ let package = Package(
         .library(name: "MyImagingFeature", targets: ["MyImagingFeature"])
     ],
     dependencies: [
-        .package(url: "https://github.com/SnowMango/Lumera.git", from: "0.4.0")
+        .package(url: "https://github.com/SnowMango/Lumera.git", from: "0.5.0")
     ],
     targets: [
         .target(
@@ -91,9 +91,13 @@ let package = Package(
 import ImagingCore
 import ImageRendering
 import ImagingRuntime
+import Metal
 
 let compiled = try StyleModelCompiler.compile(StyleModelCodec.decode(modelData))
-let renderer = try LumeraRenderer() // 默认 RGBA16Float；可显式 .float32
+guard let device = MTLCreateSystemDefaultDevice() else {
+    throw LabError.unsupported("Metal unavailable")
+}
+let renderer = try LumeraRenderer(device: device) // 默认 RGBA16Float；可显式 .float32
 let prepared = try ModelPreparer(renderer: renderer).prepare(
     compiled, resources: styleResources, execution: execution)
 let photos = try PhotoProcessor(renderer: renderer, working: workingReference,
@@ -151,7 +155,39 @@ let exportReport = try await photos.renderStreaming(snapshot,
 
 有界流式处理使用受预算约束的区域校准与临时工作区，并与同一渲染器上的传统池化编码互斥。存在尚未结束的池化任务时，有界处理明确拒绝开始；需要同时使用这两类路径时，应使用独立渲染器。
 
-实时输入可将轻量来源提交给会话，在获得预算和处理名额后再准备像素：
+实时输入支持显式准备资源并以回调提交。以下示例复用调用方的 `CIContext`，不需要每帧创建 Swift Task：
+
+```swift
+let sharedResources = ProcessingResources(device: device)
+let inputPreparer = try prepared.prepareRealtimeInput(
+    working: workingReference, calibration: inputCalibration,
+    resources: calibrationResources)
+let configuredInput = try inputPreparer.explicitInput(
+    descriptor: sourceDescriptor, recipe: inputRecipe,
+    normalizedRGBBounds: NumericBounds(lower: 0, upper: 1),
+    resources: sharedResources.makeStreamResources())
+switch configuredInput.prepare() {
+case .ready: break
+case .wouldBlock(let issue): throw issue
+case .failure(let error): throw error
+}
+let session = try FrameProcessingSession(
+    renderer: renderer, model: prepared, backpressure: .dropUnsubmitted,
+    resources: ModelProcessingResources(resources: sharedResources.makeStreamResources()))
+
+// 每帧：source 为已解码的 CIImage 或 CVPixelBuffer 来源。
+let frameSource = FrameSource(source, using: configuredInput, context: context)
+// 需要取消时，保留返回的 SessionFrameTask 并调用 cancel()。
+_ = try session.enqueue(frameSource, stamp: originalStamp) { result in
+    consume(result) // 宿主处理输出或错误；回调前不要修改源像素。
+}
+```
+
+`normalizedRGBBounds` 声明归一到编码 sRGB 后的有限 RGB 范围；示例的 `0…1` 仅用于符合该契约的 SDR 来源。显式路径不进行范围扫描，模型要求的特征观测仍执行。输入配置或尺寸变化时重新准备；该入口处理已解码像素，RAW 显影继续使用对应适配接口。EDR 输入校正还需要可证明的校正后范围，当前显式配置入口不接受该组合。
+
+同步 `enqueue` 抛错表示未接纳，不再调用完成回调；成功返回句柄后通过回调交付结果。来源的借用期持续到完成回调，已提交 GPU 工作完成前不会释放或复用其存储。保留 `RenderedFrame` 或其输出图像会继续保留输出；调用者不应无限积压结果。
+
+兼容的异步来源入口可将轻量来源提交给会话，在获得预算和处理名额后再准备像素：
 
 ```swift
 let inputPreparer = try prepared.prepareRealtimeInput(
@@ -166,7 +202,7 @@ let outcome = try await session.enqueue(frameSource, stamp: originalStamp)
 
 `RealtimeInputPreparer` 复用模型绑定的输入配置和校准资源。`FrameProcessingSession.enqueue(FrameSource, stamp:edits:)` 将输入准备纳入同一个有序工作流和预算；尚未开始处理就被丢弃的来源不会物化纹理。宿主保留采集序号和 PTS，丢帧不重新编号。`.wait` 有界等待，`.dropUnsubmitted` 只替换尚未提交的帧；过多同时等待的生产者明确报错，宿主应等待 admission 形成背压。
 
-来源的借用期限持续到 `enqueue` 返回，期间像素及其元数据必须保持不可变。取消会传播到输入准备任务，但已提交的 GPU 工作仍须完成后才能归还来源。内置准备器计入已知源数据、SDK 纹理和临时资源；位图支持的 CIImage 等额外已知常驻容量通过 `additionalResidentBytes` 声明。自定义准备闭包必须遵守传入的执行预算，声明所有保留来源的容量，并在返回或抛错前等待自己提交的工作完成；SDK 无法测量闭包内部的隐藏分配。
+上述异步入口的来源借用期限持续到 `await enqueue` 返回，期间像素及其元数据必须保持不可变。取消会传播到输入准备任务，但已提交的 GPU 工作仍须完成后才能归还来源。内置准备器计入已知源数据、SDK 纹理和临时资源；位图支持的 CIImage 等额外已知常驻容量通过 `additionalResidentBytes` 声明。自定义准备闭包必须遵守传入的执行预算，声明所有保留来源的容量，并在返回或抛错前等待自己提交的工作完成；SDK 无法测量闭包内部的隐藏分配。
 
 `trustedNormalizedRGBBounds` 仅适用于调用方能够证明范围的已解码输入，范围必须覆盖归一化到工作编码 sRGB 后的有限 RGB 值。该声明可省略半精度写入前的 Float32 范围扫描，实际存储范围仍会校验；不能把原始传感器码值范围作为该声明，也不能用于 RAW 显影。没有可信范围的输入保留写入前溢出检查。
 
@@ -265,7 +301,7 @@ let compiled = try StyleModelCompiler.compile(StyleModelCodec.decode(data))
 
 ### Profile 配置文件格式
 
-Lumera 0.4.0 的固定风格接口使用 `Profile` JSON schema 8；此格式与 `StyleModel` schema 2 分别解码。根对象必填 `schemaVersion`、`id` 和 `name`。`parameters` 缺省时使用基础参数，`responses` 缺省时使用空数组。以下是最小的固定配置。
+Lumera 0.5.0 的固定风格接口使用 `Profile` JSON schema 8；此格式与 `StyleModel` schema 2 分别解码。根对象必填 `schemaVersion`、`id` 和 `name`。`parameters` 缺省时使用基础参数，`responses` 缺省时使用空数组。以下是最小的固定配置。
 
 ```json
 {
@@ -312,7 +348,9 @@ EDR 纹理必须使用 `.rgba16Float` 或 `.rgba32Float`，数值为扩展编码
 
 裸纹理的尺寸和分配受 Metal 设备能力与可用内存约束。大图的 `CIImage` 入口见下文「局部与分块输出」。
 
-### 统一图像 API
+### 单帧便利 API
+
+CIImage 和 CVPixelBuffer 的 `render` 异步入口自动准备本帧工作区与独立输出，适合一次性图像处理；不会创建整套连续帧缓存池。需要控制和复用资源时，单帧或连续帧均可使用下方显式接口。
 
 ```swift
 import CoreImage
@@ -367,6 +405,103 @@ EDR 请求中，`.automatic` LUT 边界策略使用外推；原生模型资源�
 输出内容 headroom 在风格处理后未知，不复制输入的亮度统计或 HDR mastering 元数据。显示端负责转换到需要的线性显示空间、启用 EDR 和适配屏幕；视频编码端负责转成目标 PQ/HLG/YCbCr 格式及生成相应元数据。本接口返回像素数据，不是 HDR 文件/视频编码器。
 
 `ImageAnalysis.MetalRenderer` 及离线标定流程使用 SDR 契约，显式 EDR 请求会报错；应用的 EDR 处理使用 `LumeraRenderer` / `TextureEffectEncoder`。旧的序列化选项和请求没有 `dynamicRange` 字段时按 `.sdr` 解码。
+
+### 显式资源 API（单帧与连续帧）
+
+`processImage`、`processBuffer`、`processTexture` 同步返回接纳结果，在 GPU 完成后交付回调；`encode` 写入调用方提供的命令缓冲。资源准备和帧处理分开，不通过 `isVideo` 区分场景。
+
+| 入口 | 调用方提供 | 完成结果 |
+| --- | --- | --- |
+| `processImage` | CIImage、CIImageOutput、CIContext、workspace、request | 提供的 output.image |
+| `processBuffer` | 输入及输出 CVPixelBuffer、CVMetalTextureCache、workspace、request | 提供的输出 CVPixelBuffer |
+| `processTexture` | 输入及输出 MTLTexture、workspace、request | 提供的输出 MTLTexture |
+| `encode` | 输入及输出 MTLTexture、workspace、request、commandBuffer | 提交管理句柄 FrameEncodingLease |
+
+#### CIImage：显式输出与复用上下文
+
+```swift
+// 配置阶段：device 为创建 renderer 和 context 时使用的同一设备。
+// renderer、style、context 和 resources 均由宿主持有并复用。
+let resources = ProcessingResources(device: device)
+let request = try PreparedProcessingRequest(
+    renderer: renderer, style: style,
+    input: InputDescriptor(width: width, height: height))
+switch resources.prepare(request) {
+case .ready: break
+case .wouldBlock(let issue): throw issue
+case .failure(let error): throw error
+}
+
+// 每帧：获取句柄不会扩张像素存储池。
+switch resources.acquireFrame(for: request) {
+case .unavailable(let issue): handleBackpressure(issue)
+case .ready(let frame):
+    let output = try frame.makeImageOutput(colorSpace: colorSpace)
+    let submission = renderer.processImage(
+        inputImage, output: output, context: context,
+        workspace: frame.workspace, request: request
+    ) { result in consume(result) }
+    if case .notAccepted(let issue) = submission { handleBackpressure(issue) }
+}
+```
+
+示例的 `consume` 和 `handleBackpressure` 由宿主实现。SDR 的 `colorSpace` 为 sRGB，EDR 为 extended sRGB。`makeImageOutput` 显式创建轻量图像包装，不分配新像素。也可用 `CIImageOutput(texture:colorSpace:properties:)` 包装宿主自己的目标纹理和已更新的输出属性。每个包装只允许写入一次；不要将同一个 CIImage 反复作为可变目标。
+
+#### CVPixelBuffer／MTLTexture：使用调用方的目标存储
+
+宿主准备有界的 PixelBuffer 池和 `CVMetalTextureCache`，通过 `CVMetalTextureCacheCreateTextureFromImage` 映射代表性输入／输出，取得以下 `inputTexture` 和 `outputTexture`。映射包装在准备期间保持存活；后续帧必须符合相同的设备、尺寸和格式契约。
+
+```swift
+// 配置阶段：不需要 CI 输入暂存，也不创建引擎输出池。
+let request = try PreparedProcessingRequest(
+    renderer: renderer, style: style,
+    input: InputDescriptor(width: width, height: height),
+    outputPixelFormat: .bgra8Unorm, requiresImageStaging: false)
+let owner = try resources.prepareWorkspace(
+    input: inputTexture, output: outputTexture, request: request)
+
+// 每帧：inputBuffer、outputBuffer、textureCache 由宿主提供。
+let submission = renderer.processBuffer(
+    inputBuffer, output: outputBuffer, textureCache: textureCache,
+    workspace: try owner.acquire(), request: request
+) { result in consume(result) }
+if case .notAccepted(let issue) = submission { handleBackpressure(issue) }
+```
+
+直接 PixelBuffer 入口接受 BGRA8、RGBAHalf、RGBAFloat，输入必须是不透明、已归一方向的编码 sRGB RGB 缓冲；输出格式及 EDR 精度须与请求一致。YCbCr、宽色域或方向转换应显式适配，不会暗中调用单帧 CI 渲染。输入输出不能别名，映射会保留至 GPU 完成；宿主还须等待显示器／编码器消费结束后再复用输出。
+
+已有纹理时，在同样的配置与工作区上调用：
+
+```swift
+let submission = renderer.processTexture(
+    inputTexture, output: outputTexture,
+    workspace: try owner.acquire(), request: request
+) { result in consume(result) }
+if case .notAccepted(let issue) = submission { handleBackpressure(issue) }
+```
+
+要合并宿主后续 GPU 工作，可使用同步编码入口：
+
+```swift
+let lease = try renderer.encode(
+    input: inputTexture, output: outputTexture,
+    workspace: try owner.acquire(), request: request, commandBuffer: commandBuffer)
+// 继续向 commandBuffer 编码显示或其他处理，再提交一次。
+try lease.commit()
+```
+
+`encode` 不提交、不等待；调用方在命令完成后读取结果。编码失败后丢弃整个未提交命令；主动放弃时调用 `lease.abandon()` 并释放命令。句柄放弃或销毁不代表 GPU 引用的存储可以提前复用。上述三段是替代调用方式，不应并发使用同一个独占工作区。
+
+#### 预算、接纳和生命周期
+
+- `prepare`／`prepareWorkspace` 可以分配存储，应在配置阶段执行；尺寸或资源需求变化时重新准备。`process*`／`encode` 不创建全尺寸像素存储、CIContext、CVMetalTextureCache 或输出池；轻量包装和命令对象仍可能创建。
+- 默认宿主共享上限为 256 MiB，闲置偏好为 32 MiB，在途 1 帧、待提交 1 帧。配置偏好会归一化，准备阶段可在宿主上限内调整容量以容纳工作集；预算不足时反馈背压，不无限增长或静默缩图。
+- `makeStreamResources()` 创建共享同一账本的独立流。`prepareWorkspace` 返回的 owner 一次只租出一个 workspace；并发使用有限数量的 owner，共用同一预算，配置替换时关闭旧 owner。
+- 每帧获取新的 workspace 句柄，底层存储复用。`.accepted` 对应一次完成回调；`.notAccepted` 不调用回调。取消已提交工作不提前释放 GPU 资源。
+- 保留资源池输出的纹理／CIImage 会保留其租约，后续帧不能覆盖；宿主提供的目标仍须由宿主控制复用时机。旧代次及仍被消费者持有的存储继续计入预算。
+- `clearAllIdleResources()` 清理共享管理器的闲置池；`close()` 停止对应管理器或 owner 的新接纳，在途存储仍安全保留。模型资产由其拥有者释放。
+- 账本覆盖引擎登记的纹理、缓冲、模型资产和借用的已知外部存储；宿主整个 CV 池、Core Image 不透明图及驱动内部缓存不属于进程级预算保证。
+- 显式入口依赖请求中的输入契约，不逐帧扫描范围。算法范围检查及模型所需观测继续保留。使用 `request.frame(index:seed:)` 更新随机序列；配置资源需求变化时准备新的请求。
 
 ### 局部与分块输出（CIImage）
 
@@ -429,7 +564,9 @@ RAW／ProRAW 兼容性取决于系统解码器；不使用内嵌预览作为失�
 
 ### 图像与拍摄元数据
 
-CIImage／CVPixelBuffer 入口自动维护已知元数据。保留支持的 EXIF 拍摄字段（ISO、快门、光圈、拍摄时间、白平衡模式、镜头等）、TIFF 相机/版权信息和 GPS；根据实际输出重写尺寸、方向和颜色。MakerNote、DNG 显影指令、旧缩略图、辅助图像、几何/标定附件及未知私有字段不透传。GPS 会保留，分享前如需去除定位信息应显式移除。
+CIImage／CVPixelBuffer 单帧便利入口自动维护已知元数据。保留支持的 EXIF 拍摄字段（ISO、快门、光圈、拍摄时间、白平衡模式、镜头等）、TIFF 相机/版权信息和 GPS；根据实际输出重写尺寸、方向和颜色。MakerNote、DNG 显影指令、旧缩略图、辅助图像、几何/标定附件及未知私有字段不透传。GPS 会保留，分享前如需去除定位信息应显式移除。
+
+显式 `processImage` 使用调用方创建的 `CIImageOutput` 属性，不自动将输入 metadata 合并到输出；调用者负责在包装目标时提供与输出一致的属性。显式 `processBuffer` 会清理旧输出附件并写入受支持的输入拍摄字段及实际输出信息。
 
 `metadata:` 是可选的 ImageIO 属性字典补充：同名拍摄字段以显式参数为准，未冲突的嵌套字段保留。它不决定输入方向，旧尺寸/颜色也不会覆盖输出事实。默认从图像属性或输入附件读取方向；如果像素已经旋正，传 `orientation: .up`，避免重复旋转。内部 RAW 路径自动处理这一点。
 
@@ -672,7 +809,7 @@ CIColorCube 与 CIColorCubeWithColorSpace 的 cube 数组布局对应 `.rgbaFloa
 
 ```swift
 func makePreviewRequest(input: InputDescriptor) -> RenderRequest {
-    var request = RenderRequest(input: input, maximumLongEdge: 1280)
+    var request = RenderRequest(input: input) // 保持源尺寸；效果比例独立设置。
     request.glowScale = .eighth
     request.halationScale = .quarter
     request.softeningScale = .half
@@ -694,7 +831,7 @@ func makePhotoRequest(input: InputDescriptor) -> RenderRequest {
 
 ## GPU 资源生命周期
 
-裸纹理编码入口与拥有型图像输出采用不同的生命周期契约。以下 command buffer 约束适用于 `TextureEffectEncoder`；`RenderedFrame` 持有其输出存储，可在对象存活期间使用。
+裸纹理编码入口与拥有型图像输出采用不同的生命周期契约。以下约束描述传统 `TextureEffectEncoder` 池化入口；显式 `LumeraRenderer.encode(input:output:workspace:request:commandBuffer:)` 使用调用方的目标及前述共享预算。`RenderedFrame` 持有其输出存储，可在对象存活期间使用。
 
 - 输入纹理、准备后的风格、校正资源和 command buffer 必须属于同一 Metal 设备。
 - command buffer 必须尚未 enqueue/commit，且 `retainedReferences = true`。
