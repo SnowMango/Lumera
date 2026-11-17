@@ -1,6 +1,6 @@
 # Lumera
 
-版本：**0.5.0**。产品版本、风格模型 schema 和固定风格 schema 分别管理。更新内容见 [更新记录](CHANGELOG.md)。
+版本：**0.5.1**。产品版本、风格模型 schema 和固定风格 schema 分别管理。更新内容见 [更新记录](CHANGELOG.md)。
 
 Lumera 是基于 Metal 的照片与视频成片引擎。它以风格模型描述目标外观，根据输入观测和拍摄条件计算参数，并执行颜色、色调曲线、细节、柔化、暗角、光晕、数码噪点和胶片颗粒处理。输入校正、目标模型、用户编辑和执行资源独立管理；模型可由配对样本拟合，也可手动制作。
 
@@ -30,7 +30,7 @@ Lumera 是基于 Metal 的照片与视频成片引擎。它以风格模型描述
 https://github.com/SnowMango/Lumera.git
 ```
 
-SPM 版本依赖使用 `0.5.0`。本地检出使用路径依赖 `.package(path: "../Lumera")`。添加到应用目标时，选择 `ImagingCore` 和 `ImageRendering`；使用照片/视频协调器时再添加 `ImagingRuntime`。各产品分别导入，没有名为 `Lumera` 的模块。
+SPM 版本依赖使用 `0.5.1`。本地检出使用路径依赖 `.package(path: "../Lumera")`。添加到应用目标时，选择 `ImagingCore` 和 `ImageRendering`；使用照片/视频协调器时再添加 `ImagingRuntime`。各产品分别导入，没有名为 `Lumera` 的模块。
 
 如果宿主项目使用 `Package.swift`，在包的 `dependencies` 中声明仓库，并在目标的 `dependencies` 中添加产品：
 
@@ -45,7 +45,7 @@ let package = Package(
         .library(name: "MyImagingFeature", targets: ["MyImagingFeature"])
     ],
     dependencies: [
-        .package(url: "https://github.com/SnowMango/Lumera.git", from: "0.5.0")
+        .package(url: "https://github.com/SnowMango/Lumera.git", from: "0.5.1")
     ],
     targets: [
         .target(
@@ -187,18 +187,30 @@ _ = try session.enqueue(frameSource, stamp: originalStamp) { result in
 
 同步 `enqueue` 抛错表示未接纳，不再调用完成回调；成功返回句柄后通过回调交付结果。来源的借用期持续到完成回调，已提交 GPU 工作完成前不会释放或复用其存储。保留 `RenderedFrame` 或其输出图像会继续保留输出；调用者不应无限积压结果。
 
-兼容的异步来源入口可将轻量来源提交给会话，在获得预算和处理名额后再准备像素：
+兼容的异步来源入口可将轻量来源提交给会话，在获得预算和处理名额后再准备像素。需要实测范围的 Float16 输入可传入持续持有的资源池，复用跨帧转换纹理：
 
 ```swift
+// 会话建立时创建，所有帧复用同一个输入资源池。
+let processingResources = ProcessingResources(device: device,
+    policy: .init(maxIdleBytes: 128 * 1024 * 1024))
+let inputResources = processingResources.makeStreamResources()
 let inputPreparer = try prepared.prepareRealtimeInput(
     working: workingReference, calibration: inputCalibration,
     resources: calibrationResources)
 let session = try FrameProcessingSession(renderer: renderer, model: prepared,
-                                backpressure: .dropUnsubmitted)
+    backpressure: .dropUnsubmitted,
+    resources: ModelProcessingResources(resources: processingResources.makeStreamResources()))
+
+// 每帧仅创建轻量来源描述，纹理在实际输入准备阶段获取。
 let frameSource = FrameSource(source, using: inputPreparer,
-    descriptor: sourceDescriptor, recipe: inputRecipe)
+    descriptor: sourceDescriptor, recipe: inputRecipe,
+    inputResources: inputResources)
 let outcome = try await session.enqueue(frameSource, stamp: originalStamp)
 ```
+
+`inputResources` 控制 Float16 实测范围路径的转换纹理复用。输入渲染阶段获取 Float32 工作纹理，转换编码阶段获取 Float16 输出纹理；每次只申请当前阶段所需资源。资源池按尺寸和格式匹配空闲存储，缓存未命中时在预算内创建。输入池与会话资源通过 `makeStreamResources()` 共用账本；示例将共享空闲保留额度设为 128 MiB，驻留上限保持默认 256 MiB。额度应覆盖目标尺寸、格式及并发需求，空闲额度不足可能导致跨帧重新分配。
+
+GPU 和下游消费者持有纹理期间，底层存储不会复用。归还的输入纹理计入空闲容量，受清理、关闭及预算收缩规则管理；纹理视图共用底层像素存储，内存计量按底层存储去重。`inputResources` 为 `nil` 时使用任务内资源，不保留跨帧转换缓存。此参数不使范围归约缓冲区、Core Image 内部资源或其他输入路径自动进入纹理池。
 
 `RealtimeInputPreparer` 复用模型绑定的输入配置和校准资源。`FrameProcessingSession.enqueue(FrameSource, stamp:edits:)` 将输入准备纳入同一个有序工作流和预算；尚未开始处理就被丢弃的来源不会物化纹理。宿主保留采集序号和 PTS，丢帧不重新编号。`.wait` 有界等待，`.dropUnsubmitted` 只替换尚未提交的帧；过多同时等待的生产者明确报错，宿主应等待 admission 形成背压。
 
@@ -301,7 +313,7 @@ let compiled = try StyleModelCompiler.compile(StyleModelCodec.decode(data))
 
 ### Profile 配置文件格式
 
-Lumera 0.5.0 的固定风格接口使用 `Profile` JSON schema 8；此格式与 `StyleModel` schema 2 分别解码。根对象必填 `schemaVersion`、`id` 和 `name`。`parameters` 缺省时使用基础参数，`responses` 缺省时使用空数组。以下是最小的固定配置。
+Lumera 0.5.1 的固定风格接口使用 `Profile` JSON schema 8；此格式与 `StyleModel` schema 2 分别解码。根对象必填 `schemaVersion`、`id` 和 `name`。`parameters` 缺省时使用基础参数，`responses` 缺省时使用空数组。以下是最小的固定配置。
 
 ```json
 {
