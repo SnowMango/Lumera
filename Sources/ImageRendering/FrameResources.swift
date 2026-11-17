@@ -6,6 +6,12 @@ import ImagingCore
 
 private var processingOutputLeaseKey: UInt8 = 0
 
+func processingTextureBacking(_ texture: MTLTexture) -> MTLTexture {
+    var root = texture
+    while let parent = root.parent { root = parent }
+    return root
+}
+
 /// Owns base storage, never the escaping texture view to which this lease is attached.
 private final class ProcessingOutputLease {
     let storage: ProcessingTextureStorage
@@ -16,18 +22,23 @@ private final class ProcessingOutputLease {
     deinit { recycle(storage) }
 }
 
+func leasedProcessingTexture(_ storage: ProcessingTextureStorage,
+                             recycle: @escaping (ProcessingTextureStorage) -> Void) throws -> MTLTexture {
+    guard let view = storage.texture.makeTextureView(pixelFormat: storage.texture.pixelFormat) else {
+        throw LabError.io("Cannot create leased output texture view")
+    }
+    objc_setAssociatedObject(view, &processingOutputLeaseKey,
+                             ProcessingOutputLease(storage, recycle: recycle), .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+    return view
+}
+
 public final class FrameResources: @unchecked Sendable {
     public let workspace: ProcessingWorkspace
     public let outputTexture: MTLTexture
     init(workspace: ProcessingWorkspace, output: ProcessingTextureStorage,
          recycle: @escaping (ProcessingTextureStorage) -> Void) throws {
         self.workspace = workspace
-        guard let view = output.texture.makeTextureView(pixelFormat: output.texture.pixelFormat) else {
-            throw LabError.io("Cannot create leased output texture view")
-        }
-        outputTexture = view
-        objc_setAssociatedObject(view, &processingOutputLeaseKey,
-                                 ProcessingOutputLease(output, recycle: recycle), .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        outputTexture = try leasedProcessingTexture(output, recycle: recycle)
     }
     /// Explicit lightweight image creation; no new pixel allocation or render.
     public func makeImageOutput(colorSpace: CGColorSpace) throws -> CIImageOutput {

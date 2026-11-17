@@ -6,11 +6,12 @@ final class ProcessingTextureStorage: @unchecked Sendable {
     let texture: MTLTexture
     let charge: ProcessingResourceCharge
     init(device: MTLDevice, width: Int, height: Int, format: MTLPixelFormat,
-         ledger: ProcessingResourceLedger) throws {
+         ledger: ProcessingResourceLedger, adaptingPolicy: Bool = true,
+         usage: MTLTextureUsage = [.shaderRead, .shaderWrite, .pixelFormatView]) throws {
         let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: format, width: width, height: height, mipmapped: false)
-        d.storageMode = .private; d.usage = [.shaderRead, .shaderWrite, .pixelFormatView]
+        d.storageMode = .private; d.usage = usage
         let estimate = device.heapTextureSizeAndAlign(descriptor: d).size
-        charge = try ledger.reserve(estimate, adaptingPolicy: true)
+        charge = try ledger.reserve(estimate, adaptingPolicy: adaptingPolicy)
         guard let texture = device.makeTexture(descriptor: d) else { throw LabError.io("Cannot allocate prepared frame storage") }
         try charge.reconcile(max(estimate, texture.allocatedSize))
         self.texture = texture; ledger.didAllocate(); ledger.register(texture, charge: charge)

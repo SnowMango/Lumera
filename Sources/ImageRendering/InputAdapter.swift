@@ -63,7 +63,7 @@ public final class InputAdapter: @unchecked Sendable {
 
     func prepare(_ source: SourceImage, descriptor: SourceDescriptor, recipe: InputRecipe,
                  execution: ExecutionProfile, rawOverrides: [RAWOverride], rawConfiguration: RAWDevelopmentConfiguration?,
-                 trustedNormalizedRGBBounds: NumericBounds?) async throws -> NormalizedInput {
+                 trustedNormalizedRGBBounds: NumericBounds?, resources: ProcessingResources? = nil) async throws -> NormalizedInput {
         try Task.checkCancellation()
         if let bounds = trustedNormalizedRGBBounds {
             try bounds.validate()
@@ -74,7 +74,7 @@ public final class InputAdapter: @unchecked Sendable {
         }
         let resolved = try resolve(source, descriptor: descriptor, recipe: recipe, execution: execution,
                                    rawOverrides: rawOverrides, rawConfiguration: rawConfiguration)
-        return try await resolved.prepare(region: resolved.bounds, execution: execution, trustedNormalizedRGBBounds: trustedNormalizedRGBBounds)
+        return try await resolved.prepare(region: resolved.bounds, execution: execution, trustedNormalizedRGBBounds: trustedNormalizedRGBBounds, resources: resources)
     }
 
     /// Resolve decoding, orientation and color lazily, before allocating any full-frame texture.

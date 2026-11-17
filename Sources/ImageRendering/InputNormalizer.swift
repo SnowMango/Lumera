@@ -75,7 +75,7 @@ public final class InputNormalizer: @unchecked Sendable {
         request.inputValueBounds = source.valueBounds
         guard let command = renderer.queue.makeCommandBuffer() else { throw LabError.io("Cannot create input correction command") }
         let workspace = bounded ? TileWorkingSet(limit: source.execution.budget.maxResidentBytes) : nil
-        try workspace?.reserve(source.texture.allocatedSize)
+        try workspace?.reserve(processingTextureBacking(source.texture).allocatedSize)
         let output: MTLTexture
         if let workspace {
             output = try renderer.encoder.encodeBounded(source.texture, style: prepared.tone, correction: prepared.correction,

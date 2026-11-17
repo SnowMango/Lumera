@@ -50,7 +50,7 @@ public final class ResolvedPhotoSource: PhotoRegionSource, @unchecked Sendable {
         try await prepare(region: region, execution: execution, trustedNormalizedRGBBounds: nil)
     }
 
-    func prepare(region: CGRect, execution: ExecutionProfile, trustedNormalizedRGBBounds: NumericBounds?) async throws -> NormalizedInput {
+    func prepare(region: CGRect, execution: ExecutionProfile, trustedNormalizedRGBBounds: NumericBounds?, resources: ProcessingResources? = nil) async throws -> NormalizedInput {
         try Task.checkCancellation(); try execution.validate()
         guard !region.isEmpty, region == region.integral, bounds.contains(region),
               execution.dynamicRange == working.dynamicRange,
@@ -64,7 +64,7 @@ public final class ResolvedPhotoSource: PhotoRegionSource, @unchecked Sendable {
         textureDescriptor.storageMode = .private; textureDescriptor.usage = [.shaderRead, .shaderWrite]
         if execution.precision == .float16, trustedNormalizedRGBBounds == nil {
             let prepared = try await renderer.prepareHalfInput(image, bounds: region,
-                colorSpace: LumeraRenderer.colorSpace(for: range), budget: execution.budget.maxResidentBytes)
+                colorSpace: LumeraRenderer.colorSpace(for: range), budget: execution.budget.maxResidentBytes, resources: resources)
             return NormalizedInput(texture: prepared.texture, properties: properties, identity: identity,
                 execution: execution, bounds: prepared.bounds, conditions: conditions, inputDevelopment: development)
         }

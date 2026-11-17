@@ -12,7 +12,8 @@ public enum FrameAcquisition {
     case unavailable(FrameAdmissionIssue)
 }
 
-/// Explicit preparation may allocate. Acquiring and processing frames never grow this pool.
+/// Explicit frame preparation may allocate; acquiring prepared frames never grows their pool.
+/// Measured input conversion requests individual textures on demand, within the same budget.
 /// Share this instance between streams to share their hard resource budget.
 public final class ProcessingResources: @unchecked Sendable {
     private let lock = UnfairLock()
@@ -30,6 +31,7 @@ public final class ProcessingResources: @unchecked Sendable {
     deinit { ledger.changeIdle(by: -reportedIdle) }
     private var workspaces: [ProcessingWorkspaceStorage] = []
     private var outputs: [ProcessingTextureStorage] = []
+    private var inputTextures: [ProcessingTextureStorage] = []
     private lazy var scheduler = ProcessingScheduler { [ledger] in ledger.policy }
     private var prepared: PreparedProcessingRequest?
     public init(device: MTLDevice, limits: ProcessingResourceLimits = .init(), policy: ProcessingPolicy = .init()) {
@@ -110,23 +112,63 @@ public final class ProcessingResources: @unchecked Sendable {
             } catch { return .unavailable(.incompatibleResources) }
         }
     }
+    /// One texture for the stage that needs it, never an output/workspace pair.
+    /// The view's lifetime (including retained GPU references) owns the lease.
+    func acquireInputTexture(width: Int, height: Int, format: MTLPixelFormat) throws -> MTLTexture {
+        try TextureDimensions.validate(width: width, height: height, device: device)
+        let (storage, epoch) = try lock.withLock { () throws -> (ProcessingTextureStorage, UInt64) in
+            guard !closed else { throw FrameAdmissionIssue.closed }
+            let storage: ProcessingTextureStorage
+            if let index = inputTextures.firstIndex(where: {
+                $0.texture.width == width && $0.texture.height == height && $0.texture.pixelFormat == format
+            }) {
+                storage = inputTextures.remove(at: index)
+            } else {
+                func allocate() throws -> ProcessingTextureStorage {
+                    try ProcessingTextureStorage(device: device, width: width, height: height,
+                        format: format, ledger: ledger, adaptingPolicy: false, usage: [.shaderRead, .shaderWrite])
+                }
+                func reclaimAndAllocate() throws -> ProcessingTextureStorage {
+                    while true {
+                        do { return try allocate() }
+                        catch FrameAdmissionIssue.budgetExhausted where !inputTextures.isEmpty {
+                            inputTextures.removeLast(); syncIdle()
+                        }
+                    }
+                }
+                storage = try reclaimAndAllocate()
+            }
+            syncIdle()
+            return (storage, generation)
+        }
+        return try leasedProcessingTexture(storage) { [weak self] value in
+            self?.lock.withLock {
+                guard let self, !self.closed, self.generation == epoch else { return }
+                self.inputTextures.append(value); self.syncIdle(); self.trimIdle()
+            }
+        }
+    }
     public func clearAllIdleResources() { ledger.clearOwners() }
     public func clearIdleResources() {
-        lock.withLock { generation &+= 1; workspaces.removeAll(); outputs.removeAll(); prepared = nil; syncIdle() }
+        lock.withLock { generation &+= 1; workspaces.removeAll(); outputs.removeAll(); inputTextures.removeAll(); prepared = nil; syncIdle() }
     }
     public func close() {
-        lock.withLock { closed = true; generation &+= 1; workspaces.removeAll(); outputs.removeAll(); prepared = nil; syncIdle() }
+        lock.withLock { closed = true; generation &+= 1; workspaces.removeAll(); outputs.removeAll(); inputTextures.removeAll(); prepared = nil; syncIdle() }
     }
     public func snapshot() -> ProcessingResourceSnapshot {
         lock.withLock { .init(residentBytes: ledger.residentBytes, idleBytes: ledger.idleBytes,
             activeFrames: leasedWorkspaces, allocationCount: ledger.allocationCount, effectivePolicy: ledger.policy) }
     }
-    private var idleBytes: Int { workspaces.reduce(0) { $0 + $1.bytes } + outputs.reduce(0) { $0 + $1.charge.bytes } }
+    private var idleBytes: Int {
+        workspaces.reduce(0) { $0 + $1.bytes } + outputs.reduce(0) { $0 + $1.charge.bytes }
+            + inputTextures.reduce(0) { $0 + $1.charge.bytes }
+    }
     private func trimIdle() {
         let policy = ledger.policy
         while ledger.idleBytes > policy.maxIdleBytes || ledger.residentBytes > policy.maxResidentBytes {
             if !workspaces.isEmpty { workspaces.removeLast() }
             else if !outputs.isEmpty { outputs.removeLast() }
+            else if !inputTextures.isEmpty { inputTextures.removeLast() }
             else { break }
             syncIdle()
         }

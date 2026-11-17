@@ -5,6 +5,43 @@ import ImagingCore
 @testable import ImageRendering
 
 final class HalfInputPreparationTests: XCTestCase {
+    func testPooledInputAdmissionCountsBackingPixelsOnce() async throws {
+        let renderer = try LumeraRenderer()
+        let resources = ProcessingResources(device: renderer.device)
+        let adapter = try InputAdapter(renderer: renderer, working: .init(referenceRenditionID: "pool-test"))
+        var descriptor = SourceDescriptor(id: "pool-test", path: .processedPhoto); descriptor.recipeID = "ci"
+        let recipe = InputRecipe(id: "ci", backend: "coreImage", version: "1", decodedRendition: .baseImage)
+        let execution = ExecutionProfile(width: 16, height: 16,
+            budget: .init(maxInFlightFrames: 1, maxResidentBytes: 64 * 1024))
+        let image = CIImage(color: CIColor(red: 0.3, green: 0.3, blue: 0.3))
+            .cropped(to: CGRect(x: 0, y: 0, width: 16, height: 16))
+        let normalized = try await adapter.prepare(.image(image), descriptor: descriptor, recipe: recipe,
+            execution: execution, rawOverrides: [], rawConfiguration: nil, trustedNormalizedRGBBounds: nil,
+            resources: resources)
+        let prepared = try await InputNormalizer(renderer: renderer).normalize(normalized, calibration: nil, resources: .init())
+        let backing = try XCTUnwrap(normalized.texture.parent)
+        XCTAssertEqual(prepared.residentStorageBytes, backing.allocatedSize)
+        XCTAssertLessThanOrEqual(prepared.residentStorageBytes, execution.budget.maxResidentBytes)
+    }
+
+    func testCallerPoolReusesStagingWhileRetainingPreviousOutput() async throws {
+        let renderer = try LumeraRenderer()
+        let owner = ProcessingResources(device: renderer.device)
+        let bounds = CGRect(x: 0, y: 0, width: 16, height: 16)
+        let space = CGColorSpace(name: CGColorSpace.extendedSRGB)!
+        let bright = CIImage(color: CIColor(red: 1.5, green: 0.5, blue: 0.25, alpha: 1,
+                                          colorSpace: space)!).cropped(to: bounds)
+        let first = try await renderer.prepareHalfInput(bright, bounds: bounds, colorSpace: space,
+            budget: 8 * 1024 * 1024, resources: owner)
+        let before = try await pixels(first.texture, renderer: renderer)
+        XCTAssertEqual(owner.snapshot().allocationCount, 2)
+        let second = try await renderer.prepareHalfInput(CIImage(color: .black).cropped(to: bounds),
+            bounds: bounds, colorSpace: space, budget: 8 * 1024 * 1024, resources: owner)
+        XCTAssertEqual(owner.snapshot().allocationCount, 3, "Reuse staging; acquire only a new leased destination")
+        XCTAssertFalse(first.texture.parent === second.texture.parent)
+        let preserved = try await pixels(first.texture, renderer: renderer)
+        XCTAssertEqual(preserved, before)
+    }
 
     private func texture(_ device: MTLDevice, _ format: MTLPixelFormat, _ w: Int, _ h: Int) throws -> MTLTexture {
         let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: format, width: w, height: h, mipmapped: false)

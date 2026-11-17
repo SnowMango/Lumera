@@ -63,15 +63,18 @@ public struct FrameSource: Sendable {
     /// bitmap-backed CIImage) separately. Opaque Core Image and RAW decoder memory is external.
     /// If supplied, the trusted bound must cover finite RGB after normalization into encoded
     /// sRGB, not the camera's raw channel or code-value range. Do not supply it for RAW.
+    /// Supply inputResources to reuse measured Half conversion textures. Each conversion
+    /// stage acquires only its own texture; the caller controls the pool's idle/resident limits.
     public init(_ source: SourceImage, using preparer: RealtimeInputPreparer, descriptor: SourceDescriptor,
                 recipe: InputRecipe, additionalResidentBytes: Int = 0, rawOverrides: [RAWOverride] = [],
-                rawConfiguration: RAWDevelopmentConfiguration? = nil, trustedNormalizedRGBBounds: NumericBounds? = nil) {
+                rawConfiguration: RAWDevelopmentConfiguration? = nil, trustedNormalizedRGBBounds: NumericBounds? = nil,
+                inputResources: ProcessingResources? = nil) {
         let (bytes, overflow) = source.knownResidentBytes.addingReportingOverflow(additionalResidentBytes)
         knownResidentBytes = overflow || additionalResidentBytes < 0 ? -1 : bytes
         model = preparer.model
         prepare = { execution in
             try await preparer.prepare(source, descriptor: descriptor, recipe: recipe, execution: execution,
-                rawOverrides: rawOverrides, rawConfiguration: rawConfiguration, trustedNormalizedRGBBounds: trustedNormalizedRGBBounds)
+                rawOverrides: rawOverrides, rawConfiguration: rawConfiguration, trustedNormalizedRGBBounds: trustedNormalizedRGBBounds, inputResources: inputResources)
         }
     }
 }

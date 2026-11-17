@@ -109,7 +109,10 @@ public final class PreparedInput: @unchecked Sendable {
     public var width: Int { texture.width }
     public var height: Int { texture.height }
     /// 所持有的输入与校正输出实际分配量，共用纹理只计一次。
-    public var residentStorageBytes: Int { texture.allocatedSize + (texture === source.texture ? 0 : source.texture.allocatedSize) }
+    public var residentStorageBytes: Int {
+        let output = processingTextureBacking(texture), original = processingTextureBacking(source.texture)
+        return output.allocatedSize + (output === original ? 0 : original.allocatedSize)
+    }
     public var execution: ExecutionProfile { source.execution }
     public var image: CIImage { makeInputImage(texture, properties: properties, range: execution.dynamicRange) }
     /// Copy decision and replay facts without retaining the prepared textures.
