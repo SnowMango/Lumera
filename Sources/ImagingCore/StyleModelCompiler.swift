@@ -62,12 +62,15 @@ public enum ControlAccess {
             return .scalar(parameters[keyPath: descriptor.keyPath])
         }
     }
-    /// 先验证目标形状及范围，再写入对应存储。默认使用声明范围；解析后的标量控制可选择有效范围。
+    /// 显式处理单个外部目标的形状和范围，默认使用声明范围。
+    /// 不提供跨目标原子更新或关联组检查；批量外部编辑可选择 `ParameterInput.update`。
+    /// 内部计算结果使用 `writeComputed`，避免重复进入输入诊断。
     public static func apply(_ value: ControlValue, target: String, parameters: inout StyleParameters, lutWeights: inout [ResourceWeight], effective: Bool = false) throws {
         try ParameterSpecification.lookup(target).validate(value, effective: effective)
         try writeComputed(value, target: target, parameters: &parameters, lutWeights: &lutWeights)
     }
     /// Internal result storage; no declaration-range diagnostics or unrelated field scans.
+    /// Keep input policy outside this path; handle arithmetic constraints where values are computed.
     static func writeComputed(_ value: ControlValue, target: String, parameters: inout StyleParameters,
                               lutWeights: inout [ResourceWeight]) throws {
         switch (target, value) {

@@ -15,6 +15,8 @@ public enum FrameAcquisition {
 /// Explicit frame preparation may allocate; acquiring prepared frames never grows their pool.
 /// Measured input conversion requests individual textures on demand, within the same budget.
 /// Share this instance between streams to share their hard resource budget.
+/// Retain owners across frames; creating or clearing them per frame defeats reuse.
+/// Idle textures and range buffers consume the same budget as leased storage.
 public final class ProcessingResources: @unchecked Sendable {
     private let lock = UnfairLock()
     let ledger: ProcessingResourceLedger
@@ -44,6 +46,7 @@ public final class ProcessingResources: @unchecked Sendable {
         ledger.registerOwner(self)
     }
     /// A separate stream/descriptor cache drawing from the same host budget.
+    /// Create once per stream and retain it; this is not a per-frame acquisition API.
     public func makeStreamResources() -> ProcessingResources { .init(device: device, ledger: ledger) }
     public var policyWarnings: [String] { ledger.policyWarnings }
     @discardableResult

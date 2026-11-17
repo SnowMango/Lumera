@@ -133,6 +133,7 @@ struct InputRangeReadback {
     private let state: RangeReadbackState
     let count: Int
     /// Available only before resolution; resolved tickets retain values, not GPU storage.
+    /// Do not retain this raw reference for consumption after resolving the ticket.
     var buffer: MTLBuffer? { state.buffer }
     init(buffer: MTLBuffer, count: Int, command: MTLCommandBuffer, requiresHalfSafety: Bool = false,
          lease: ProcessingBufferLease? = nil) {
@@ -140,6 +141,8 @@ struct InputRangeReadback {
         state = RangeReadbackState(buffer: buffer, command: command, count: count,
                                    requiresHalfSafety: requiresHalfSafety, lease: lease)
     }
+    /// Resolve after GPU completion. A premature call throws without releasing ownership.
+    /// Terminal success/error is shared by ticket copies; repeated calls use the cached result.
     func resolve() throws -> NumericBounds { try state.resolve() }
 }
 

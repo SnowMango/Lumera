@@ -2,7 +2,10 @@ import Foundation
 
 /// Serialization only. File/resource access belongs to the caller.
 public enum StyleModelCodec {
-    /// Decode and explicitly request complete configuration diagnostics.
+    /// 解码并显式执行完整配置诊断，适用于需要范围诊断的导入操作。
+    /// 普通 `decode` 仍可直接用于后续处理；本方法不是执行前置条件。
+    /// 不缓存校验状态，也不保证返回后直接修改的值仍符合输入时的规则。
+    /// 不应逐帧解码同一配置，或在本方法后重复调用相同的完整诊断。
     public static func decodeChecked(_ data: Data) throws -> StyleModel {
         let value = try decode(data)
         try StyleModelCompiler.validate(value)

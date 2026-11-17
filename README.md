@@ -1,6 +1,6 @@
 # Lumera
 
-版本：**0.5.1**。产品版本、风格模型 schema 和固定风格 schema 分别管理。更新内容见 [更新记录](CHANGELOG.md)。
+版本：**0.5.2**。产品版本、风格模型 schema 和固定风格 schema 分别管理。更新内容见 [更新记录](CHANGELOG.md)。
 
 Lumera 是基于 Metal 的照片与视频成片引擎。它以风格模型描述目标外观，根据输入观测和拍摄条件计算参数，并执行颜色、色调曲线、细节、柔化、暗角、光晕、数码噪点和胶片颗粒处理。输入校正、目标模型、用户编辑和执行资源独立管理；模型可由配对样本拟合，也可手动制作。
 
@@ -30,7 +30,7 @@ Lumera 是基于 Metal 的照片与视频成片引擎。它以风格模型描述
 https://github.com/SnowMango/Lumera.git
 ```
 
-SPM 版本依赖使用 `0.5.1`。本地检出使用路径依赖 `.package(path: "../Lumera")`。添加到应用目标时，选择 `ImagingCore` 和 `ImageRendering`；使用照片/视频协调器时再添加 `ImagingRuntime`。各产品分别导入，没有名为 `Lumera` 的模块。
+SPM 版本依赖使用 `0.5.2`。本地检出使用路径依赖 `.package(path: "../Lumera")`。添加到应用目标时，选择 `ImagingCore` 和 `ImageRendering`；使用照片/视频协调器时再添加 `ImagingRuntime`。各产品分别导入，没有名为 `Lumera` 的模块。
 
 如果宿主项目使用 `Package.swift`，在包的 `dependencies` 中声明仓库，并在目标的 `dependencies` 中添加产品：
 
@@ -45,7 +45,7 @@ let package = Package(
         .library(name: "MyImagingFeature", targets: ["MyImagingFeature"])
     ],
     dependencies: [
-        .package(url: "https://github.com/SnowMango/Lumera.git", from: "0.5.1")
+        .package(url: "https://github.com/SnowMango/Lumera.git", from: "0.5.2")
     ],
     targets: [
         .target(
@@ -190,9 +190,10 @@ _ = try session.enqueue(frameSource, stamp: originalStamp) { result in
 兼容的异步来源入口可将轻量来源提交给会话，在获得预算和处理名额后再准备像素。需要实测范围的 Float16 输入可传入持续持有的资源池，复用跨帧转换纹理：
 
 ```swift
-// 会话建立时创建，所有帧复用同一个输入资源池。
+// 会话建立时创建，并由会话所有者持续持有；不要放入逐帧回调。
 let processingResources = ProcessingResources(device: device,
     policy: .init(maxIdleBytes: 128 * 1024 * 1024))
+// 同一流只创建一次，后续每帧复用；子资源所有者与父资源共用预算。
 let inputResources = processingResources.makeStreamResources()
 let inputPreparer = try prepared.prepareRealtimeInput(
     working: workingReference, calibration: inputCalibration,
@@ -201,7 +202,8 @@ let session = try FrameProcessingSession(renderer: renderer, model: prepared,
     backpressure: .dropUnsubmitted,
     resources: ModelProcessingResources(resources: processingResources.makeStreamResources()))
 
-// 每帧仅创建轻量来源描述，纹理在实际输入准备阶段获取。
+// 以下部分在每帧执行：沿用上面的输入准备器、资源池和会话。
+// 来源描述绑定当前帧，纹理及范围 Buffer 在实际需要时获取。
 let frameSource = FrameSource(source, using: inputPreparer,
     descriptor: sourceDescriptor, recipe: inputRecipe,
     inputResources: inputResources)
@@ -214,8 +216,7 @@ let outcome = try await session.enqueue(frameSource, stamp: originalStamp)
 
 相同输入配置的身份缓存命中直接比较字段，不执行 JSON 编码；缓存失配仍使用原有摘要算法。`PreparedStyleModel` 保留一份当前静态渲染配置，复用所选 LUT、输入颜色前缀和资源形状。参数、权重、输入编辑、格式或几何变化时重新准备；当前像素范围、时间戳、随机种子和每帧资源租约独立绑定。在途帧继续持有自身配置，配置缓存不保存历史帧。
 
-
-GPU 和下游消费者持有纹理期间，底层存储不会复用。归还的输入纹理计入空闲容量，受清理、关闭及预算收缩规则管理；纹理视图共用底层像素存储，内存计量按底层存储去重。`inputResources` 为 `nil` 时使用任务内资源，不保留跨帧转换缓存。此参数不使范围归约缓冲区、Core Image 内部资源或其他输入路径自动进入纹理池。
+GPU 和下游消费者持有纹理期间，底层存储不会复用。归还的输入纹理计入空闲容量，受清理、关闭及预算收缩规则管理；纹理视图共用底层像素存储，内存计量按底层存储去重。`inputResources` 为 `nil` 时使用任务内资源，不保留跨帧转换缓存。范围归约 Buffer 使用同一资源所有者管理的独立缓冲区缓存；Core Image 内部资源与其他独立输入路径不自动纳入该缓存。
 
 `RealtimeInputPreparer` 复用模型绑定的输入配置和校准资源。`FrameProcessingSession.enqueue(FrameSource, stamp:edits:)` 将输入准备纳入同一个有序工作流和预算；尚未开始处理就被丢弃的来源不会物化纹理。宿主保留采集序号和 PTS，丢帧不重新编号。`.wait` 有界等待，`.dropUnsubmitted` 只替换尚未提交的帧；过多同时等待的生产者明确报错，宿主应等待 admission 形成背压。
 
@@ -294,27 +295,57 @@ let compiled = try StyleModelCompiler.compile(StyleModelCodec.decode(data))
 是否执行这些诊断由调用方决定。编译、摘要计算、编解码、参数求值、编辑合成及渲染流程不隐式调用整套参数诊断，也不保存“已校验”状态。不调用诊断即可直接准备和执行。
 
 ```swift
-// 仅在调用方需要完整诊断时执行。
-try StyleModelCompiler.validate(model)
+import ImagingCore
+
+// 在导入事件中选择一次：需要完整诊断时使用 decodeChecked。
+let model = try StyleModelCodec.decodeChecked(modelData)
+// 只需结构解码时，使用 StyleModelCodec.decode(modelData)。
+// decodeChecked 已完成诊断，无需紧接着再次调用 validate。
 ```
+
+已在内存中的模型可按需调用 `StyleModelCompiler.validate(model)`。这些入口不应嵌入逐帧规划或编码循环；重复执行不会建立缓存，也不会产生后续流程使用的校验凭据。
 
 各功能在实际消费数据时处理自身的运算和存储条件，例如矩阵系数数量、插值形状和 GPU 参数存储容量。关闭的效果不会因其未使用参数超出诊断范围而阻断渲染。输入绑定、GPU 命令状态、当前输入的数值精度和资源生命周期由相应执行接口处理。
 
-`ParameterInput.update` 在调用方修改参数时处理变化字段，支持严格拒绝或对有限标量限幅；白点、矩阵及权重组更新失败时不产生部分写入。`ParameterValueDomain.base` 使用声明范围，`.effective` 使用计算后的有效范围。`accept`、`curve`、`adaptationPolicy` 提供显式输入诊断，`ProfileCodec.decodeChecked` 和 `StyleModelCodec.decodeChecked` 提供严格导入入口；普通 `decode` 行为不变。
+`ParameterInput.update` 在调用方修改参数时处理变化字段，支持严格拒绝或对有限标量限幅；白点、矩阵及权重组更新失败时不产生部分写入。`ParameterValueDomain.base` 使用声明范围，`.effective` 使用计算后的有效范围。`accept`、`curve`、`adaptationPolicy` 提供显式输入诊断，`ProfileCodec.decodeChecked` 和 `StyleModelCodec.decodeChecked` 提供严格导入入口；普通 `decode` 只处理结构解码及格式约束。
 
 ```swift
-// 在编辑事件中处理变化字段，成功后同时发布参数和权重。
-var parameters = model.appearance.parameters
-var weights = model.appearance.lutWeights
-let diagnostics = try ParameterInput.update(
-    [.init(target: "grain.roughness", value: .scalar(1.2))],
-    parameters: &parameters, lutWeights: &weights,
-    domain: .base, behavior: .clamp
+import ImagingCore
+
+// 仅在外部编辑事件中按需调用，返回可一次发布的候选模型。
+func applyingParameterEdits(_ changes: [ControlOverride], to model: StyleModel)
+    throws -> (model: StyleModel, diagnostics: [ControlDiagnostic]) {
+    var parameters = model.appearance.parameters
+    var weights = model.appearance.lutWeights
+    let diagnostics = try ParameterInput.update(
+        changes, parameters: &parameters, lutWeights: &weights,
+        domain: .base, behavior: .clamp
+    )
+    // update 抛错时不会返回部分修改；成功后再组装完整快照。
+    var next = model
+    next.appearance.parameters = parameters
+    next.appearance.lutWeights = weights
+    return (next, diagnostics)
+}
+
+let edited = try applyingParameterEdits(
+    [.init(target: "grain.roughness", value: .scalar(1.2))], to: model
 )
-// parameters.grain.roughness == 1，diagnostics 包含本次限幅记录。
+// edited.model.appearance.parameters.grain.roughness == 1。
+// edited.diagnostics 包含限幅记录；由宿主发布 edited.model 并显示诊断。
 ```
 
+`.clamp` 只限幅有限标量；NaN、无穷大和非法复合值仍抛错，不修复矩阵形状、不重排曲线，也不自动归一化任意 LUT 权重。白点 xy 等关联分量应放在同一次更新中。修改基础模型使用 `.base`；`.effective` 用于明确属于计算结果域的数据，不能用来绕过基础参数范围。
+
+候选模型是新的值快照，不会自动修改已有的 `PreparedStyleModel`。宿主应在配置变化时更新已准备模型，并在连续帧中复用它；共享快照的发布与线程同步由宿主负责。
+
 `update` 处理指定字段及白点、矩阵等关联组，不检查未编辑字段；detail/glow 的半径顺序由显式完整诊断报告。受控入口保证返回时的数据符合其检查范围内的规则；随后直接修改公开属性可以绕过此保证。执行层不查询校验状态，也不会因未使用这些入口而扫描整套参数。
+
+### v0.5.2 升级说明
+
+现有公开参数类型及处理接口保持源码兼容，`Profile` schema 8、`StyleModel` schema 2 和输入身份摘要格式不变。此前依赖普通解码、编译或渲染入口隐式报告参数范围错误的调用，应在导入或编辑位置显式使用 `decodeChecked`、`ParameterInput` 或相应 `validate()` 方法。
+
+渲染修订号更新为 `lumera-renderer-0.5.2`，渲染身份随之变化。依赖渲染身份的结果缓存和报告应使用新修订号；现有配置文件无需改写。连续输入应持续持有并复用 `ProcessingResources`，以获得跨帧纹理和范围归约 Buffer 复用。
 
 ### 文件格式与迁移
 
@@ -347,7 +378,7 @@ let diagnostics = try ParameterInput.update(
 
 ### Profile 配置文件格式
 
-Lumera 0.5.1 的固定风格接口使用 `Profile` JSON schema 8；此格式与 `StyleModel` schema 2 分别解码。根对象必填 `schemaVersion`、`id` 和 `name`。`parameters` 缺省时使用基础参数，`responses` 缺省时使用空数组。以下是最小的固定配置。
+Lumera 0.5.2 的固定风格接口使用 `Profile` JSON schema 8；此格式与 `StyleModel` schema 2 分别解码。根对象必填 `schemaVersion`、`id` 和 `name`。`parameters` 缺省时使用基础参数，`responses` 缺省时使用空数组。以下是最小的固定配置。
 
 ```json
 {
@@ -907,7 +938,7 @@ func makePhotoRequest(input: InputDescriptor) -> RenderRequest {
 
 ## 错误、诊断与日志
 
-无效参数、输入约定不符、设备不匹配及资源准备失败通过错误返回。调用方还应检查 command buffer 完成状态以处理 GPU 执行错误。
+显式参数诊断、输入约定不符、设备不匹配及实际运算或资源准备失败通过错误返回。调用方还应检查 command buffer 完成状态以处理 GPU 执行错误。
 
 `EvaluatedStyle` 提供条件响应与调整限制诊断。桌面渲染 manifest 提供风格、校正和输入摘要、尺寸、输入假设与阶段耗时。
 
@@ -933,3 +964,21 @@ swift test -c release --filter CurveFunctionTests
 ```
 
 GPU 测试需要可用的 Metal 设备。测试结果用于验证参数约束、渲染行为与路径一致性，不代替目标设备的性能测量或风格匹配评估。
+
+
+### v0.5.2 验证摘要
+
+受影响回归套件共 483 项，0 失败；4 项真实 RAW 测试因缺少 `LUMERA_RAW_TEST_FILE` 指定的样本跳过。
+
+普通 LumeraCapture 使用 iPhone 17 Pro、iOS 26.5.2、Debug、EDR/Float16、1206×1608 和 30 fps 配置。基线为完整参数诊断调用整理后、连续帧优化前的实现。三组交替对照每窗 30 秒，热状态均为 Fair，中位数如下：
+
+| 指标 | 优化前 | v0.5.2 实现 |
+| --- | ---: | ---: |
+| CPU 样本时间 / 呈现帧 | 5.2022 ms | 4.9222 ms |
+| GPU active 时间 / 呈现帧 | 2.7167 ms | 2.7222 ms |
+| 呈现间隔 p95 | 41.7394 ms | 41.6665 ms |
+| Metal 分配峰值 | 98.84375 MiB | 98.84375 MiB |
+| 每窗呈现请求数 | 900 | 900 |
+| 每窗范围归约 Buffer 分配事件 | 2700 | 0 |
+
+六个窗口均未记录 Metal 命令错误，当前预览配置未见明显性能劣化。CPU 数据为采样权重之和，GPU active 为执行区间时间并集；呈现间隔不是端到端延迟。结果不包含此前完整参数诊断调用调整的收益，不外推至其他模型、RAW 输入或所有设备。上述测量对应版本编号更新前的相同处理实现；版本更新另行验证渲染缓存身份。

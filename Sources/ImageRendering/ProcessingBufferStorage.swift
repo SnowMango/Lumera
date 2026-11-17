@@ -17,6 +17,8 @@ final class ProcessingBufferStorage: @unchecked Sendable {
 }
 
 /// Shared by the command's retention and CPU readback. Last owner returns storage.
+/// Retain the lease for every GPU/CPU consumer; retaining only `buffer` does not
+/// prevent its storage from being returned to the pool and reused.
 final class ProcessingBufferLease: @unchecked Sendable {
     private let storage: ProcessingBufferStorage
     private let recycle: (ProcessingBufferStorage) -> Void
