@@ -31,10 +31,12 @@ public enum ColorTransform {
     // https://www.color.org/specifications/ICC.1-2022-05.pdf
     private static let bradford:[Double]=[0.8951,0.2664,-0.1614,-0.7502,1.7135,0.0367,0.0389,-0.0685,1.0296]
     public static func prepare(_ color:ColorResponse) throws -> PreparedColorTransform {
-        try color.validate(resolved:true)
-        let source=try cone(color.whiteBalance.source),destination=try cone(color.whiteBalance.destination)
+        guard color.matrix.values.count == 9 else {
+            throw LabError.invalid("Color transform requires nine matrix coefficients")
+        }
         var adapted=ColorMatrix3x3().values
         if color.whiteBalance.source != color.whiteBalance.destination {
+            let source=try cone(color.whiteBalance.source),destination=try cone(color.whiteBalance.destination)
             let ratio=zip(destination,source).map(/)
             let diagonal=[ratio[0],0,0,0,ratio[1],0,0,0,ratio[2]]
             adapted=multiply(xyzToRGB,multiply(inverse(bradford),multiply(diagonal,multiply(bradford,rgbToXYZ))))

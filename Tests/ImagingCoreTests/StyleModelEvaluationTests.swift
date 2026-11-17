@@ -96,14 +96,16 @@ final class StyleModelEvaluationTests: XCTestCase {
         ctx.targetConditions.iso = 200
         XCTAssertNoThrow(try StyleModelEvaluator.evaluate(compiled, context: ctx))
     }
-    func testMalformedHistoryIsRejectedBeforeReadingControls() throws {
+    func testHoldReadsOnlyItsTargetFromHistory() throws {
         var m = model(); m.responses[0].missing = .hold(maxAgeSeconds: 1)
         let compiled = try StyleModelCompiler.compile(m)
         var previous = try StyleModelEvaluator.evaluate(compiled, context: context(m))
         previous.parameters.color.matrix.values = []
+        XCTAssertThrowsError(try previous.parameters.validate())
         var ctx = try context(m, value: nil, time: 0.1, index: 1)
         ctx.fallback = .init(controls: previous, stamp: stamp())
-        XCTAssertThrowsError(try StyleModelEvaluator.evaluate(compiled, context: ctx))
+        let result = try StyleModelEvaluator.evaluate(compiled, context: ctx)
+        XCTAssertEqual(result.parameters.glow.amount, previous.parameters.glow.amount)
     }
     func testDelayedPacketRequiresDeclaredAgeAndIdentity() throws {
         var m = model(); var ctx = try context(m)
@@ -121,15 +123,15 @@ final class StyleModelEvaluationTests: XCTestCase {
         // The closed grammar has no control-reference expression; decoding one must fail.
         XCTAssertThrowsError(try JSONDecoder().decode(ResponseExpression.self, from: Data(#"{"control":{"_0":"glow.amount"}}"#.utf8)))
     }
-    func testCrossParameterExtremaRejected() throws {
+    func testExplicitDiagnosticsReportCrossParameterExtrema() throws {
         var m = model(); m.responses = [.init(target: "detail.fineSigma", expression: .constant(.scalar(8)))]
-        XCTAssertThrowsError(try StyleModelCompiler.compile(m))
+        XCTAssertThrowsError(try StyleModelCompiler.validate(m))
         m.responses = [.init(target: "color.whiteBalance.source.x", expression: .constant(.scalar(0.7)))]
-        XCTAssertThrowsError(try StyleModelCompiler.compile(m))
+        XCTAssertThrowsError(try StyleModelCompiler.validate(m))
     }
     func testNoncanonicalDynamicCurvesRejectedAndStaticBlocksWork() throws {
         var m = model(); m.responses = [.init(target: "tone.curve", expression: .singleAxis(axis: .feature("mean"), nodes: [.init(0, .curve(.identity)), .init(1, .curve(.identity))], boundary: .clamp))]
-        XCTAssertThrowsError(try StyleModelCompiler.compile(m))
+        XCTAssertThrowsError(try StyleModelCompiler.validate(m))
         m.responses[0].expression = .constant(.curve(.identity))
         XCTAssertEqual(try StyleModelEvaluator.evaluate(StyleModelCompiler.compile(m), context: context(m)).parameters.tone.curve, .identity)
     }

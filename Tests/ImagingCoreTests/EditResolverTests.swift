@@ -132,11 +132,13 @@ final class EditResolverTests: XCTestCase {
         XCTAssertEqual(result.parameters.tone.curve.value(at: 0.5), 0.6, accuracy: 1e-12)
     }
     func testUnrepresentableStrengthCurvesReject() throws {
-        XCTAssertThrowsError(try fixture {
+        let (model, automatic) = try fixture {
             $0.edits.strength = .init(neutralParameters: .init())
             $0.appearance.parameters.tone.enabled = true
             $0.appearance.parameters.tone.curve = .init(function: .init(family: .power))
-        })
+        }
+        var edits = EditRequest(); edits.strength = 0.5
+        XCTAssertThrowsError(try EditResolver.resolve(edits, automatic: automatic, model: model))
     }
     func testMissingNeutralLUTRejectsAndDeclaredLUTBlendIsConvex() throws {
         let (model, automatic) = try fixture {

@@ -33,7 +33,7 @@ public final class RealtimeInputPreparer: Sendable {
         let scope = try model.renderer.encoder.beginBoundedPhotoWork(); defer { scope.finish() }
         let normalized = try await adapter.prepare(source, descriptor: descriptor, recipe: recipe, execution: execution,
             rawOverrides: rawOverrides, rawConfiguration: rawConfiguration, trustedNormalizedRGBBounds: trustedNormalizedRGBBounds, resources: inputResources)
-        let input = try await normalizer.normalize(normalized, calibration: calibration, resources: resources, bounded: true)
+        let input = try await normalizer.normalize(normalized, calibration: calibration, resources: resources, bounded: true, processingResources: inputResources)
         // Neither the normalized nor prepared input has escaped this SDK-only path. The
         // adapter allocates fresh output storage, independent of the borrowed camera buffer.
         input.allowStorageTransfer()

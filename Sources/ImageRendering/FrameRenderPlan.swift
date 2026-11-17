@@ -8,6 +8,7 @@ public final class FrameRenderPlan: @unchecked Sendable {
     public let stamp: FrameStamp?
     public let model: PreparedStyleModel
     let input: PreparedInput
+    let configuration: PreparedRenderConfiguration
     let style: PreparedResolvedStyle
     let prefix: PreparedDeviceCorrection?
     let request: RenderRequest
@@ -18,7 +19,8 @@ public final class FrameRenderPlan: @unchecked Sendable {
     private var used = false
     var hasBeenClaimed: Bool { lock.lock(); defer { lock.unlock() }; return used }
     init(controls: ResolvedControls, input: PreparedInput, model: PreparedStyleModel, style: PreparedResolvedStyle,
-         prefix: PreparedDeviceCorrection?, request: RenderRequest, stamp: FrameStamp?, lease: FrameBudgetLease, workingSet: TileWorkingSet, residentInput: PhotoInputResidency? = nil) {
+         prefix: PreparedDeviceCorrection?, request: RenderRequest, stamp: FrameStamp?, lease: FrameBudgetLease, workingSet: TileWorkingSet, residentInput: PhotoInputResidency? = nil, configuration: PreparedRenderConfiguration? = nil) {
+        self.configuration = configuration ?? PreparedRenderConfiguration(parameters: controls.parameters, style: style, prefix: prefix, request: request)
         self.controls = controls; self.input = input; inputID = input.inputID; self.model = model; self.style = style
         self.prefix = prefix; self.request = request; self.stamp = stamp; self.lease = lease; self.workingSet = workingSet; self.residentInput = residentInput
     }

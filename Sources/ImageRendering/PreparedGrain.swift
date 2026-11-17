@@ -1,11 +1,17 @@
 import Foundation
+import ImagingCore
 
 /// Immutable calibration in reference pixels. The stationary covariance of an integrated
 /// lattice is the overlap of its weights, averaged over the lattice phase.
 package struct PreparedGrain: Sendable {
     package let fineSpacing, coarseSpacing, fineGain, coarseGain: Double
 
-    package init(size: Double, roughness: Double) {
+    package init(size: Double, roughness: Double) throws {
+        let fineMixture = sqrt(1 - roughness), coarseMixture = sqrt(roughness)
+        guard size.isFinite, size > 0, (2 * size).isFinite,
+              fineMixture.isFinite, coarseMixture.isFinite else {
+            throw LabError.invalid("Grain spacing and mixture cannot be computed")
+        }
         // Solve the angular mean of the post-integration correlation at the requested lag.
         var lower = 0.02, upper = 2 * size
         for _ in 0..<28 {
@@ -17,8 +23,8 @@ package struct PreparedGrain: Sendable {
         }
         fineSpacing = (lower + upper) * 0.5
         coarseSpacing = fineSpacing * 2.5
-        fineGain = sqrt(1 - roughness) / Self.overlap(spacing: fineSpacing, lag: 0)
-        coarseGain = sqrt(roughness) / Self.overlap(spacing: coarseSpacing, lag: 0)
+        fineGain = fineMixture / Self.overlap(spacing: fineSpacing, lag: 0)
+        coarseGain = coarseMixture / Self.overlap(spacing: coarseSpacing, lag: 0)
     }
 
     /// Parallelize wide output footprints before their area reduction. Each worker

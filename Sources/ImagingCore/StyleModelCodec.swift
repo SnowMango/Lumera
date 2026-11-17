@@ -2,19 +2,24 @@ import Foundation
 
 /// Serialization only. File/resource access belongs to the caller.
 public enum StyleModelCodec {
+    /// Decode and explicitly request complete configuration diagnostics.
+    public static func decodeChecked(_ data: Data) throws -> StyleModel {
+        let value = try decode(data)
+        try StyleModelCompiler.validate(value)
+        return value
+    }
+
     public static let maximumBytes = ProfileCodec.maximumBytes
-    /// 先检查原始 JSON 的大小和结构（含重复键），再解码并验证模型声明。
+    /// 检查 JSON 大小和结构（含重复键）后解码；参数诊断由调用方显式请求。
     public static func decode(_ data: Data) throws -> StyleModel {
         try validateStructure(data)
         let model = try JSONDecoder().decode(StyleModel.self, from: data)
-        try model.validate()
         return model
     }
-    /// 先验证模型声明，再编码为 JSON 并检查输出大小上限。
+    /// 编码为 JSON 并检查输出大小上限；不隐式执行参数诊断。
     public static func encode(_ model: StyleModel) throws -> Data {
-        try model.validate()
         let data = try JSON.encode(model)
-        guard data.count <= maximumBytes else { throw LabError.invalid("Style model exceeds byte budget") }
+        try validateStructure(data)
         return data
     }
 

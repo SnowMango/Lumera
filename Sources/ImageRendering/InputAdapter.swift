@@ -10,26 +10,21 @@ public final class InputAdapter: @unchecked Sendable {
     private let renderer: LumeraRenderer
     private let working: WorkingImageContract
     private let identityLock = UnfairLock()
-    private var cachedIdentity: (key: Data, value: PreparedInputIdentity)?
-
-    private struct IdentityKey: Encodable {
-        let descriptor: SourceDescriptor
-        let recipe: EffectiveInputRecipe
-    }
+    private var cachedIdentity: (key: InputIdentityKey, value: PreparedInputIdentity)?
 
     private func inputIdentity(descriptor: SourceDescriptor, recipe: EffectiveInputRecipe) throws -> PreparedInputIdentity {
-        // Equatable collapses signed zero and canonically equivalent Unicode strings.
-        // Existing identities can distinguish their encodings, so compare bytes instead.
-        let key = try JSON.encode(IdentityKey(descriptor: descriptor, recipe: recipe))
-        identityLock.lock(); defer { identityLock.unlock() }
-        // One bounded entry per adapter. Compare the complete effective recipe, including
-        // actual RAW settings and backend version; the adapter's working contract is immutable.
-        if let cachedIdentity, cachedIdentity.key == key {
-            return cachedIdentity.value
-        }
+        if let cached = identityLock.withLock({ cachedIdentity }),
+           cached.key.matches(descriptor: descriptor, recipe: recipe) { return cached.value }
+        // Encoding and hashing only happen on a miss, outside the cache lock.
         let identity = try PreparedInputIdentity(descriptor: descriptor, recipe: recipe, working: working)
-        cachedIdentity = (key, identity)
-        return identity
+        let key = InputIdentityKey(descriptor: descriptor, recipe: recipe)
+        return identityLock.withLock {
+            if let cachedIdentity, cachedIdentity.key.matches(descriptor: descriptor, recipe: recipe) {
+                return cachedIdentity.value
+            }
+            cachedIdentity = (key, identity)
+            return identity
+        }
     }
     public init(renderer: LumeraRenderer, working: WorkingImageContract) throws {
         try working.validate()
@@ -188,5 +183,45 @@ public final class InputAdapter: @unchecked Sendable {
             return .init(key: setting.key, value: Double(value))
         }
         _ = try effective.digest()
+    }
+}
+
+/// Exact identity-field comparison without per-frame serialization or canonical Unicode equality.
+struct InputIdentityKey {
+    let descriptor: SourceDescriptor
+    let recipe: EffectiveInputRecipe
+    func matches(descriptor other: SourceDescriptor, recipe next: EffectiveInputRecipe) -> Bool {
+        let a = descriptor, b = other, r = recipe
+        return Self.text(a.id, b.id) && Self.text(a.device, b.device) && Self.text(a.camera, b.camera)
+            && a.path == b.path && Self.text(a.recipeID, b.recipeID) && a.primaries == b.primaries
+            && a.transfer == b.transfer && a.reference == b.reference && Self.bounds(a.range, b.range)
+            && Self.declared(r.declared, next.declared) && Self.text(r.backendVersion, next.backendVersion)
+            && Self.text(r.decoderVersion, next.decoderVersion) && Self.settings(r.settings, next.settings)
+            && Self.external(r.externalRAWConfiguration, next.externalRAWConfiguration)
+    }
+    private static func text(_ a: String, _ b: String) -> Bool { a.utf8.elementsEqual(b.utf8) }
+    private static func text(_ a: String?, _ b: String?) -> Bool {
+        switch (a,b) { case (.none,.none): return true; case (.some(let a),.some(let b)): return text(a,b); default: return false }
+    }
+    private static func bounds(_ a: PixelValueBounds, _ b: PixelValueBounds) -> Bool {
+        switch (a,b) {
+        case (.unknown,.unknown): return true
+        case (.finite(let a),.finite(let b)): return a.lower.bitPattern == b.lower.bitPattern && a.upper.bitPattern == b.upper.bitPattern
+        default: return false
+        }
+    }
+    private static func settings(_ a: [RAWSetting], _ b: [RAWSetting]) -> Bool {
+        a.count == b.count && zip(a,b).allSatisfy { $0.key == $1.key && $0.value.bitPattern == $1.value.bitPattern && $0.allowsUserOverride == $1.allowsUserOverride }
+    }
+    private static func declared(_ a: InputRecipe, _ b: InputRecipe) -> Bool {
+        text(a.id,b.id) && text(a.backend,b.backend) && text(a.version,b.version) && text(a.decoderVersion,b.decoderVersion)
+            && a.decodedRendition == b.decodedRendition && settings(a.rawSettings,b.rawSettings)
+    }
+    private static func external(_ a: RAWDevelopmentIdentity?, _ b: RAWDevelopmentIdentity?) -> Bool {
+        switch (a,b) {
+        case (.none,.none): return true
+        case (.some(let a),.some(let b)): return text(a.identifier,b.identifier) && text(a.version,b.version) && text(a.payloadDigest,b.payloadDigest)
+        default: return false
+        }
     }
 }

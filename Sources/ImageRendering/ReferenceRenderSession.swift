@@ -117,6 +117,9 @@ package final class ReferenceRenderSession {
     }
     func pass(_ name:String,_ input:TextureLease,_ extra:[TextureLease]=[],_ params:[Float]=[0],size:(Int,Int)?=nil,lut:MTLTexture?=nil,weights:MTLBuffer?=nil,lutTextures:[MTLTexture]=[]) throws -> TextureLease {
         try Task.checkCancellation()
+        guard !params.isEmpty, params.count <= 4096 / MemoryLayout<Float>.stride else {
+            throw LabError.unsupported("Effect uniforms exceed inline Metal storage")
+        }
         let out=try pool.take(size?.0 ?? input.width,size?.1 ?? input.height)
         guard let pipeline=pipelines[name],let encoder=command?.makeComputeCommandEncoder() else {throw LabError.io("无法创建图像处理任务，请重试")}
         encoder.setComputePipelineState(pipeline);encoder.setTexture(input.texture,index:0);encoder.setTexture(out.texture,index:1)
@@ -169,7 +172,7 @@ package final class ReferenceRenderSession {
                                  consume:(MTLTexture,MTLCommandBuffer)throws->T) throws -> T {
         let image=ReferencePixels(pixels:pixels,descriptor:request.input)
         try Task.checkCancellation()
-        try request.validate();try image.descriptor.validate();try style.parameters.validate(resolved:true);try resources.validate()
+        try request.validate();try image.descriptor.validate();try resources.validate()
         guard request.dynamicRange == .sdr else {
             throw LabError.unsupported("离线标定/分析渲染只支持 SDR；EDR 请使用 LumeraRenderer 或 TextureEffectEncoder")
         }
@@ -225,7 +228,7 @@ package final class ReferenceRenderSession {
         let ratio=Double(limit)/Double(max(image.width,image.height))
         let width=max(1,Int(Double(image.width)*ratio)),height=max(1,Int(Double(image.height)*ratio))
         let geometry=RenderGeometry(fullWidth:width,fullHeight:height,area:CGRect(x:0,y:0,width:width,height:height),sourceWidth:image.width,sourceHeight:image.height,sourceArea:CGRect(x:0,y:0,width:image.width,height:image.height))
-        if executionPlan == nil { executionPlan=PreparedExecutionPlan(parameters:p,color:preparedColor) }
+        if executionPlan == nil { executionPlan=try PreparedExecutionPlan(parameters:p,color:preparedColor) }
         let frame=EffectFrame(executionPlan:executionPlan!,parameters:p,color:preparedColor,curves:PreparedResponseCurves(p),lut:try preparedLUT(resources.lut),lutBoundaryPolicy:resources.lut?.boundaryPolicy ?? .automatic,correction:preparedCorrection,temporal:style.temporalPolicy,request:request,geometry:geometry)
         let backend=ReferenceEffectBackend(session:self)
         let pipeline=EffectPipeline(backend:backend,frame:frame)

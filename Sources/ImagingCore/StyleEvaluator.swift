@@ -31,12 +31,11 @@ public enum StyleEvaluator {
         var frozen = profile
         frozen.parameters = result.parameters
         frozen.responses = []
-        try frozen.validate()
         return frozen
     }
 
     public static func compile(_ profile:Profile) throws -> CompiledStyleDefinition {
-        try profile.validate();return try CompiledStyleDefinition(profile)
+        return try CompiledStyleDefinition(profile)
     }
     static func validateResponses(_ responses:[ConditionBinding],parameters:StyleParameters) throws {
         var seen = Set<ResponseTarget>()
@@ -82,7 +81,6 @@ public enum StyleEvaluator {
         p.halation.amount=amount(p.halation.amount,adjustments.halationMultiplier,1,"halation.amount")
         p.noise.gain=amount(p.noise.gain,adjustments.noiseMultiplier,8,"noise.gain")
         if p.noise.curve.outputRange.upperBound*p.noise.gain>0.1 {limits.append("noise.amplitude") }
-        try p.validate(resolved:true)
         return EvaluatedStyle(parameters:p,definitionIdentity:definition.identity,temporalPolicy:definition.temporalPolicy,diagnostics:diagnostics,adjustmentLimits:limits)
     }
 }

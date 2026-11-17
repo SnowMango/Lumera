@@ -34,10 +34,11 @@ final class HalfInputPreparationTests: XCTestCase {
         let first = try await renderer.prepareHalfInput(bright, bounds: bounds, colorSpace: space,
             budget: 8 * 1024 * 1024, resources: owner)
         let before = try await pixels(first.texture, renderer: renderer)
-        XCTAssertEqual(owner.snapshot().allocationCount, 2)
+        let allocations = owner.snapshot().allocationCount
+        XCTAssertGreaterThanOrEqual(allocations, 2)
         let second = try await renderer.prepareHalfInput(CIImage(color: .black).cropped(to: bounds),
             bounds: bounds, colorSpace: space, budget: 8 * 1024 * 1024, resources: owner)
-        XCTAssertEqual(owner.snapshot().allocationCount, 3, "Reuse staging; acquire only a new leased destination")
+        XCTAssertEqual(owner.snapshot().allocationCount, allocations + 1, "Reuse staging and range buffers; acquire only a new leased destination")
         XCTAssertFalse(first.texture.parent === second.texture.parent)
         let preserved = try await pixels(first.texture, renderer: renderer)
         XCTAssertEqual(preserved, before)

@@ -46,7 +46,7 @@ public final class InputNormalizer: @unchecked Sendable {
     public func normalize(_ source: NormalizedInput, calibration: InputCalibration?, resources: ModelResourceSet) async throws -> PreparedInput {
         try await normalize(source, calibration: calibration, resources: resources, bounded: false)
     }
-    func normalize(_ source: NormalizedInput, calibration: InputCalibration?, resources: ModelResourceSet, bounded: Bool) async throws -> PreparedInput {
+    func normalize(_ source: NormalizedInput, calibration: InputCalibration?, resources: ModelResourceSet, bounded: Bool, processingResources: ProcessingResources? = nil) async throws -> PreparedInput {
         try Task.checkCancellation()
         let selectedResources = try boundResources(calibration: calibration, resources: resources)
         guard source.texture.device.registryID == renderer.device.registryID,
@@ -58,7 +58,6 @@ public final class InputNormalizer: @unchecked Sendable {
             return PreparedInput(texture: source.texture, source: source, calibrationID: identity, working: source.working,
                                  bounds: source.valueBounds, qualifications: [])
         }
-        try calibration.validate()
         guard calibration.source == source.descriptor, calibration.working == source.working,
               calibration.recipeDigest == source.effectiveRecipeDigest else {
             throw LabError.invalid("Input source, effective recipe or reference does not match calibration")
@@ -87,7 +86,7 @@ public final class InputNormalizer: @unchecked Sendable {
         let owned: MTLTexture
         if output === source.texture { owned = source.texture }
         else { owned = try renderer.copyOwned(output, commandBuffer: command, workingSet: workspace) }
-        let range = try renderer.rangeReducer.encode(owned, commandBuffer: command, workingSet: workspace)
+        let range = try renderer.rangeReducer.encode(owned, commandBuffer: command, workingSet: workspace, resources: processingResources)
         try await renderer.complete(command)
         let actual = try range.resolve()
         try Self.validateBounds(actual, working: calibration.working)
@@ -109,7 +108,6 @@ public final class InputNormalizer: @unchecked Sendable {
         -> (style: PreparedResolvedStyle, correction: PreparedDeviceCorrection?, identity: String?) {
         let resources = try boundResources(calibration: calibration, resources: resources)
         if let calibration {
-            try calibration.validate()
             let cached = try preparation(calibration, resources: resources)
             return (cached.tone, cached.correction, cached.identity)
         }
@@ -120,7 +118,6 @@ public final class InputNormalizer: @unchecked Sendable {
         _ = try validatedResources(calibration, resources: resources)
     }
     private static func validatedResources(_ calibration: InputCalibration, resources: ModelResourceSet) throws -> (LUTAsset?, Int) {
-        try calibration.validate()
         guard calibration.resources.count <= 1, calibration.resources.allSatisfy({ $0.role == .correctionLUT }) else {
             throw LabError.unsupported("Input calibration supports one correction LUT and its explicit tone curve")
         }

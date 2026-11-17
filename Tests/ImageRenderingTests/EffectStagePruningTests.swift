@@ -84,7 +84,7 @@ final class EffectStagePruningTests: XCTestCase {
                 arena.configure(width: 4, height: 4, limit: nil, format: precision == .float16 ? .rgba16Float : .rgba32Float)
                 let backend = RealtimeEffectBackend(arena: arena, pipelines: h.encoder.pipelines,
                     commandBuffer: command, geometry: nil, frameGeometry: geometry)
-                let frame = EffectFrame(executionPlan: PreparedExecutionPlan(parameters: p, color: color),
+                let frame = EffectFrame(executionPlan: try PreparedExecutionPlan(parameters: p, color: color),
                     parameters: p, color: color, curves: PreparedResponseCurves(p), lut: nil, lutBoundaryPolicy: .automatic,
                     correction: nil, temporal: .init(), request: request, geometry: geometry)
                 let output = try EffectPipeline(backend: backend, frame: frame).encodeSuffix(input)

@@ -208,7 +208,12 @@ let frameSource = FrameSource(source, using: inputPreparer,
 let outcome = try await session.enqueue(frameSource, stamp: originalStamp)
 ```
 
-`inputResources` 控制 Float16 实测范围路径的转换纹理复用。输入渲染阶段获取 Float32 工作纹理，转换编码阶段获取 Float16 输出纹理；每次只申请当前阶段所需资源。资源池按尺寸和格式匹配空闲存储，缓存未命中时在预算内创建。输入池与会话资源通过 `makeStreamResources()` 共用账本；示例将共享空闲保留额度设为 128 MiB，驻留上限保持默认 256 MiB。额度应覆盖目标尺寸、格式及并发需求，空闲额度不足可能导致跨帧重新分配。
+`inputResources` 控制 Float16 实测范围路径的转换纹理及范围归约 Buffer 复用。输入渲染阶段获取 Float32 工作纹理，转换编码阶段获取 Float16 输出纹理；每次只申请当前阶段所需资源。资源池按尺寸和格式匹配空闲存储，缓存未命中时在预算内创建。输入池与会话资源通过 `makeStreamResources()` 共用账本；示例将共享空闲保留额度设为 128 MiB，驻留上限保持默认 256 MiB。额度应覆盖目标尺寸、格式及并发需求，空闲额度不足可能导致跨帧重新分配。
+
+范围归约按每一层实际长度和存储模式获取 Buffer，空闲存储同样计入共享驻留预算。中间 Buffer 在 GPU 完成后归还；最终读回 Buffer 在 GPU 完成且 CPU 解析或放弃结果后归还。重复解析返回已保存的范围或错误，不重新读取已回池内存。配置准备遇到预算不足时可回收共享账本中的空闲归约 Buffer；关闭资源池不会提前回收仍在使用的存储。未传入持续资源所有者的独立范围测量仍采用独立分配。
+
+相同输入配置的身份缓存命中直接比较字段，不执行 JSON 编码；缓存失配仍使用原有摘要算法。`PreparedStyleModel` 保留一份当前静态渲染配置，复用所选 LUT、输入颜色前缀和资源形状。参数、权重、输入编辑、格式或几何变化时重新准备；当前像素范围、时间戳、随机种子和每帧资源租约独立绑定。在途帧继续持有自身配置，配置缓存不保存历史帧。
+
 
 GPU 和下游消费者持有纹理期间，底层存储不会复用。归还的输入纹理计入空闲容量，受清理、关闭及预算收缩规则管理；纹理视图共用底层像素存储，内存计量按底层存储去重。`inputResources` 为 `nil` 时使用任务内资源，不保留跨帧转换缓存。此参数不使范围归约缓冲区、Core Image 内部资源或其他输入路径自动进入纹理池。
 
@@ -259,7 +264,7 @@ Float16 是默认存储格式，着色器计算使用 Float32；调用方可显�
 | 类型 | 职责 |
 | --- | --- |
 | `StyleModel` | 目标身份、基础外观、观测需求、条件响应、时间适应、编辑权限及适用范围 |
-| `CompiledStyleModel` | 经校验、编译的风格模型与响应程序 |
+| `CompiledStyleModel` | 编译后的风格模型与响应程序 |
 | `SourceDescriptor`、`InputRecipe` | 输入来源与实际解码/重建配方 |
 | `InputCalibration` | 与输入身份、配方和参考呈现绑定的独立校正 |
 | `FrameObservations` | 同一观测包中的拍摄条件、图像特征及来源信息 |
@@ -267,7 +272,7 @@ Float16 是默认存储格式，着色器计算使用 Float32；调用方可显�
 | `ExecutionProfile` | 输出尺寸、精度、统计延迟和资源预算 |
 | `StyleModelPackage` | 离线构建的模型、资源、输入配方/校正及身份清单 |
 
-原生模型通过 `StyleModelCodec` 编解码。模型 schema 为 2，参数语义与响应语义版本均为 1；文件中的资源描述与实际资源内容分别校验。通过 Swift 初始化并编码可生成完整默认声明：
+原生模型通过 `StyleModelCodec` 编解码。模型 schema 为 2，参数语义与响应语义版本均为 1；编解码处理文件结构，资源准备处理实际资源内容。通过 Swift 初始化并编码可生成完整默认声明：
 
 ```swift
 import ImagingCore
@@ -280,7 +285,36 @@ let compiled = try StyleModelCompiler.compile(StyleModelCodec.decode(data))
 
 初始化器生成基础风格定义，不附带效果验证结果。`StyleModelCodec` 接受不超过 16 MiB 的 JSON；完整资源包由 `ModelBuilder` 构建。目标身份与输入设备身份独立，模型编辑不会改变输入校正。
 
-`StyleModel` 的每个 JSON 数组最多 36 项，包括覆盖／锁定权限目标、响应程序、观测特征、资源清单及嵌套控制值。`ResponseProgram` 每轴允许 2–36 个节点；二维响应还要求 `values.count == x.count * y.count` 且 `values.count <= 36`，支持 6×6 网格。字段自身的更严格约束仍然有效；`ResponseCurve` 的 2–32 节点限制及动态色调曲线的固定 32 节点契约独立于数组结构预算。`validate()`、编译、编码和解码使用相同的模型结构预算，超限时抛出错误，不执行截断或采样。JSON 总大小上限为 16 MiB，容器嵌套深度上限为 64 层；解码拒绝重复键。
+`StyleModel` 的每个 JSON 数组最多 36 项，包括覆盖／锁定权限目标、响应程序、观测特征、资源清单及嵌套控制值。`ResponseProgram` 每轴允许 2–36 个节点；二维响应还要求 `values.count == x.count * y.count` 且 `values.count <= 36`，支持 6×6 网格。`ResponseCurve.validate` 使用 2–32 节点的诊断范围；动态色调插值使用固定 32 节点契约。模型结构预算由编解码和显式 `validate()` 执行，超限时抛出错误，不执行截断或采样。编译不扫描整套外观参数；响应程序、插值和资源准备分别处理自身实际使用的数据。JSON 总大小上限为 16 MiB，容器嵌套深度上限为 64 层；解码拒绝重复键。
+
+### 可选参数诊断
+
+`StyleParameters.validate()`、`Profile.validate()`、`StyleModel.validate()` 提供显式诊断。需要检查模型响应的跨参数范围、时间插值端点和风格强度组合时，可调用 `StyleModelCompiler.validate(model)`。
+
+是否执行这些诊断由调用方决定。编译、摘要计算、编解码、参数求值、编辑合成及渲染流程不隐式调用整套参数诊断，也不保存“已校验”状态。不调用诊断即可直接准备和执行。
+
+```swift
+// 仅在调用方需要完整诊断时执行。
+try StyleModelCompiler.validate(model)
+```
+
+各功能在实际消费数据时处理自身的运算和存储条件，例如矩阵系数数量、插值形状和 GPU 参数存储容量。关闭的效果不会因其未使用参数超出诊断范围而阻断渲染。输入绑定、GPU 命令状态、当前输入的数值精度和资源生命周期由相应执行接口处理。
+
+`ParameterInput.update` 在调用方修改参数时处理变化字段，支持严格拒绝或对有限标量限幅；白点、矩阵及权重组更新失败时不产生部分写入。`ParameterValueDomain.base` 使用声明范围，`.effective` 使用计算后的有效范围。`accept`、`curve`、`adaptationPolicy` 提供显式输入诊断，`ProfileCodec.decodeChecked` 和 `StyleModelCodec.decodeChecked` 提供严格导入入口；普通 `decode` 行为不变。
+
+```swift
+// 在编辑事件中处理变化字段，成功后同时发布参数和权重。
+var parameters = model.appearance.parameters
+var weights = model.appearance.lutWeights
+let diagnostics = try ParameterInput.update(
+    [.init(target: "grain.roughness", value: .scalar(1.2))],
+    parameters: &parameters, lutWeights: &weights,
+    domain: .base, behavior: .clamp
+)
+// parameters.grain.roughness == 1，diagnostics 包含本次限幅记录。
+```
+
+`update` 处理指定字段及白点、矩阵等关联组，不检查未编辑字段；detail/glow 的半径顺序由显式完整诊断报告。受控入口保证返回时的数据符合其检查范围内的规则；随后直接修改公开属性可以绕过此保证。执行层不查询校验状态，也不会因未使用这些入口而扫描整套参数。
 
 ### 文件格式与迁移
 
@@ -297,7 +331,7 @@ let compiled = try StyleModelCompiler.compile(StyleModelCodec.decode(data))
 | 类型 | 用途 |
 | --- | --- |
 | `Profile` | 可序列化风格定义，包含基础参数、条件响应和时间策略 |
-| `CompiledStyleDefinition` | 经校验并编译的风格定义，用于连续帧处理 |
+| `CompiledStyleDefinition` | 编译后的风格定义，用于连续帧处理 |
 | `EvaluatedStyle` | 根据拍摄条件与临时调整计算出的有效参数及诊断信息 |
 | `ResolvedStyle` | 最终参数的不可变快照，用于固定参数渲染 |
 | `DeviceCorrection` | 独立的设备白点与矩阵校正 |
@@ -323,7 +357,7 @@ Lumera 0.5.1 的固定风格接口使用 `Profile` JSON schema 8；此格式与 
 }
 ```
 
-使用 `ProfileCodec.load(from:)` 从文件读取配置，或使用 `ProfileCodec.decode(_:)` 解码字节。`ProfileCodec.encode(_:)` 在输出中写入默认值。输入上限为 16 MiB，嵌套深度上限为 64 层。未知字段、重复键、`null` 和超出范围的参数会产生校验错误。
+使用 `ProfileCodec.load(from:)` 从文件读取配置，或使用 `ProfileCodec.decode(_:)` 解码字节。`ProfileCodec.encode(_:)` 在输出中写入默认值。输入上限为 16 MiB，嵌套深度上限为 64 层。未知字段、重复键、`null` 和类型不匹配会产生解码错误。参数范围诊断由调用方通过 `Profile.validate()` 显式执行。
 
 ### Profile schema 7 升级
 
@@ -633,7 +667,7 @@ final class StyleRenderer {
 
 初始化或切换固定风格时调用：
 
-1. `StyleEvaluator.compile(profile)` 校验并编译定义。
+1. `StyleEvaluator.compile(profile)` 编译定义，不执行整套参数诊断。
 2. `encoder.prepare(definition, lut: lut)` 准备静态 GPU 资源。
 
 每帧调用 `StyleEvaluator.evaluate`，将结果包装为 `FrameStyleParameters` 后编码：
@@ -670,7 +704,7 @@ func encodeFrame(
 - `CaptureConditions` 只描述拍摄条件，不会再次施加拍摄曝光或白平衡。
 - 色温单位为 K；色调单位为 CIE 1960 uv 的 Duv，不接受厂商 tint 滑块值作为同义量。
 
-`StyleEvaluator.evaluate(..., adjustments:)` 支持独立的 `StyleAdjustments`。手动设置风格曝光或单张照片的临时曝光时，有限数值自动限制在 −10 到 +10 EV。两者相加后的有效范围为 −20 到 +20 EV。导入 JSON 配置时，曝光和其他参数均须通过范围校验。可选白点覆盖对应白点设置；效果倍率按各参数范围处理，达到限制时通过 `adjustmentLimits` 返回信息。临时调整不写入 `Profile`。
+`StyleEvaluator.evaluate(..., adjustments:)` 支持独立的 `StyleAdjustments`。手动设置风格曝光或单张照片的临时曝光时，有限数值自动限制在 −10 到 +10 EV。两者相加后的有效范围为 −20 到 +20 EV。导入 JSON 配置时，有限曝光值沿用 `Profile` 属性的范围处理，其他参数的范围诊断由调用方选择执行。可选白点覆盖对应白点设置；效果倍率按各参数范围处理，达到限制时通过 `adjustmentLimits` 返回信息。临时调整不写入 `Profile`。
 
 ## 处理顺序
 

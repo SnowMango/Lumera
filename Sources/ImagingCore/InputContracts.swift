@@ -64,7 +64,7 @@ public struct InputRecipe: Codable, Equatable, Sendable {
               Set(rawSettings.map(\.key)).count == rawSettings.count,
               rawSettings.allSatisfy({ $0.value.isFinite }) else { throw LabError.invalid("Invalid input recipe") }
     }
-    public func digest() throws -> String { try validate(); return try StyleIdentity.digest(self) }
+    public func digest() throws -> String { try StyleIdentity.digest(self) }
 }
 
 /// Pixel representation and frozen reference rendition are distinct from source camera identity.
@@ -95,7 +95,7 @@ public struct WorkingImageContract: Codable, Equatable, Sendable {
         try whitePoint.validate()
         if case .finite(let bounds) = valueBounds { try bounds.validate() }
     }
-    public func digest() throws -> String { try validate(); return try StyleIdentity.digest(self) }
+    public func digest() throws -> String { try StyleIdentity.digest(self) }
 }
 /// 按领域和适用条件范围引用输入校准证据。
 public struct CalibrationQualification: Codable, Equatable, Sendable {
@@ -153,7 +153,7 @@ public struct InputCalibration: Codable, Equatable, Sendable {
         return try processing.digest()
     }
     /// 完整校准的内容摘要，包含资质条目及证据摘要。
-    public func digest() throws -> String { try validate(); return try StyleIdentity.digest(self) }
+    public func digest() throws -> String { try StyleIdentity.digest(self) }
 }
 func validateDigest(_ digest: String) throws {
     guard digest.count == 64, digest.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {

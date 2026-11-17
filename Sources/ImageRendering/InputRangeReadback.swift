@@ -37,15 +37,15 @@ final class InputRangeReducer {
     }
 
     func encode(_ input: MTLTexture, commandBuffer: MTLCommandBuffer,
-                workingSet: TileWorkingSet? = nil, width: Int? = nil, height: Int? = nil) throws -> InputRangeReadback {
-        try encode(input, halfOutput: nil, commandBuffer: commandBuffer, workingSet: workingSet, width: width, height: height)
+                workingSet: TileWorkingSet? = nil, width: Int? = nil, height: Int? = nil, resources: ProcessingResources? = nil) throws -> InputRangeReadback {
+        try encode(input, halfOutput: nil, commandBuffer: commandBuffer, workingSet: workingSet, width: width, height: height, resources: resources)
     }
 
     /// Checks source pixels before narrowing, writes Half pixels and measures those exact values
     /// in the same traversal. No texture can be published until the returned ticket resolves.
     func encodeHalfPreparation(_ input: MTLTexture, output: MTLTexture, commandBuffer: MTLCommandBuffer,
                                workingSet: TileWorkingSet, width: Int? = nil, height: Int? = nil,
-                               outputOrigin: SIMD2<UInt32> = .zero) throws -> InputRangeReadback {
+                               outputOrigin: SIMD2<UInt32> = .zero, resources: ProcessingResources? = nil) throws -> InputRangeReadback {
         let w = width ?? input.width, h = height ?? input.height
         guard input.pixelFormat == .rgba32Float, output.pixelFormat == .rgba16Float,
               output.device.registryID == device.registryID,
@@ -53,22 +53,33 @@ final class InputRangeReducer {
               UInt64(outputOrigin.y) + UInt64(h) <= UInt64(output.height) else {
             throw LabError.invalid("Invalid Half preparation textures")
         }
-        return try encode(input, halfOutput: output, commandBuffer: commandBuffer, workingSet: workingSet, width: width, height: height, outputOrigin: outputOrigin)
+        return try encode(input, halfOutput: output, commandBuffer: commandBuffer, workingSet: workingSet, width: width, height: height, outputOrigin: outputOrigin, resources: resources)
     }
 
     private func encode(_ input: MTLTexture, halfOutput: MTLTexture?, commandBuffer: MTLCommandBuffer,
                         workingSet: TileWorkingSet?, width: Int?, height: Int?,
-                        outputOrigin: SIMD2<UInt32> = .zero) throws -> InputRangeReadback {
+                        outputOrigin: SIMD2<UInt32> = .zero, resources: ProcessingResources? = nil) throws -> InputRangeReadback {
         let pixelWidth = width ?? input.width, pixelHeight = height ?? input.height
         guard commandBuffer.status == .notEnqueued, commandBuffer.retainedReferences,
               input.device.registryID == device.registryID, commandBuffer.device.registryID == device.registryID,
               pixelWidth > 0, pixelHeight > 0, pixelWidth <= input.width, pixelHeight <= input.height else {
             throw LabError.invalid("Range measurement command/device mismatch")
         }
+        try resources?.checkRangeDevice(device.registryID)
+        let retention = RangeCommandBuffers()
+        commandBuffer.addCompletedHandler { [retention] _ in retention.complete() }
+        var readbackLease: ProcessingBufferLease?
         func allocate(_ count: Int, shared: Bool) throws -> MTLBuffer {
             let options: MTLResourceOptions = shared ? .storageModeShared : .storageModePrivate
             let estimate = device.heapBufferSizeAndAlign(length: count * 16, options: options).size
             try workingSet?.reserve(estimate)
+            if let resources {
+                let lease = try resources.acquireRangeBuffer(length: count * 16, options: options)
+                try workingSet?.reserve(max(0, lease.bytes - estimate))
+                retention.retain(lease)
+                if shared { readbackLease = lease }
+                return lease.buffer
+            }
             guard let buffer = device.makeBuffer(length: count * 16, options: options) else {
                 throw LabError.io("Cannot allocate input range reduction")
             }
@@ -114,17 +125,57 @@ final class InputRangeReducer {
             reduce.endEncoding()
             buffer = output; count = groups
         } while count > 1
-        return InputRangeReadback(buffer: buffer, count: 1, command: commandBuffer, requiresHalfSafety: halfOutput != nil)
+        return InputRangeReadback(buffer: buffer, count: 1, command: commandBuffer, requiresHalfSafety: halfOutput != nil, lease: readbackLease)
     }
 }
 /// 读取时合并分块范围，并拒绝任一分块报告的非有限样本。
 struct InputRangeReadback {
-    let buffer: MTLBuffer
+    private let state: RangeReadbackState
     let count: Int
-    let command: MTLCommandBuffer
-    var requiresHalfSafety = false
+    /// Available only before resolution; resolved tickets retain values, not GPU storage.
+    var buffer: MTLBuffer? { state.buffer }
+    init(buffer: MTLBuffer, count: Int, command: MTLCommandBuffer, requiresHalfSafety: Bool = false,
+         lease: ProcessingBufferLease? = nil) {
+        self.count = count
+        state = RangeReadbackState(buffer: buffer, command: command, count: count,
+                                   requiresHalfSafety: requiresHalfSafety, lease: lease)
+    }
+    func resolve() throws -> NumericBounds { try state.resolve() }
+}
+
+/// Copies share GPU ownership until resolution, then only the cached terminal result.
+private final class RangeReadbackState: @unchecked Sendable {
+    private let lock = UnfairLock()
+    private var storage: MTLBuffer?
+    private var command: MTLCommandBuffer?
+    private var lease: ProcessingBufferLease?
+    private let count: Int
+    private let requiresHalfSafety: Bool
+    private var result: Result<NumericBounds, Error>?
+    var buffer: MTLBuffer? { lock.withLock { storage } }
+    init(buffer: MTLBuffer, command: MTLCommandBuffer, count: Int, requiresHalfSafety: Bool, lease: ProcessingBufferLease?) {
+        storage = buffer; self.command = command; self.count = count
+        self.requiresHalfSafety = requiresHalfSafety; self.lease = lease
+    }
     func resolve() throws -> NumericBounds {
-        guard command.status == .completed, command.error == nil else { throw LabError.invalid("Range readback requires successful GPU completion") }
+        try lock.withLock {
+            if let result { return try result.get() }
+            guard let command, command.status == .completed || command.status == .error else {
+                throw LabError.invalid("Range readback requires GPU completion")
+            }
+            let value = Result<NumericBounds, Error> {
+                guard command.status == .completed, command.error == nil else {
+                    throw command.error ?? LabError.invalid("Range readback GPU command failed")
+                }
+                guard let storage else { throw LabError.invalid("Missing range readback storage") }
+                return try Self.readBounds(buffer: storage, count: count, requiresHalfSafety: requiresHalfSafety)
+            }
+            result = value
+            storage = nil; self.command = nil; lease = nil
+            return try value.get()
+        }
+    }
+    private static func readBounds(buffer: MTLBuffer, count: Int, requiresHalfSafety: Bool) throws -> NumericBounds {
         let values = buffer.contents().bindMemory(to: SIMD4<Float>.self, capacity: count)
         var lower = Float.infinity, upper = -Float.infinity
         for i in 0..<count {

@@ -65,7 +65,7 @@ final class StyleModelContractTests: XCTestCase {
             XCTAssertEqual(try StyleModelCodec.decode(StyleModelCodec.encode(model)), model, file: file, line: line)
         } else {
             XCTAssertThrowsError(try model.validate(), file: file, line: line)
-            XCTAssertThrowsError(try StyleModelCompiler.compile(model), file: file, line: line)
+            XCTAssertThrowsError(try StyleModelCompiler.validate(model), file: file, line: line)
             XCTAssertThrowsError(try StyleModelCodec.encode(model), file: file, line: line)
             XCTAssertThrowsError(try StyleModelCodec.decode(raw), file: file, line: line)
         }

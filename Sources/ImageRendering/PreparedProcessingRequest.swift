@@ -74,7 +74,7 @@ public final class PreparedProcessingRequest: @unchecked Sendable {
         options.previewGlow = request.previewGlow; options.glowScale = request.glowScale
         options.halationScale = request.halationScale; options.softeningScale = request.softeningScale
         self.options = options
-        shape = ProcessingResourceShape(parameters, style: style, correction: correction, request: request)
+        shape = plan.configuration.shape
     }
     func matchesResources(_ other: PreparedProcessingRequest) -> Bool {
         var a = request, b = other.request

@@ -95,9 +95,13 @@ public struct ResponseCurve:Codable,Equatable,Sendable {
         guard x.isFinite else{return .nan}
         if let f=function {return f.value(normalized:(coordinate(x)-coordinate(f.xLower))/(coordinate(f.xUpper)-coordinate(f.xLower)))}
         let k=knots.map{ResponseKnot(x:coordinate($0.x),y:$0.y)},v=coordinate(x)
+        guard v.isFinite, k.allSatisfy({ $0.x.isFinite && $0.y.isFinite }) else { return .nan }
         guard k.count>=2 else{return k.first?.y ?? 0}
         if v<=k[0].x{return k[0].y};if v>=k.last!.x{return k.last!.y}
-        let i=(1..<k.count).first{k[$0].x>=v}!-1,a=k[i],b=k[i+1],h=b.x-a.x,t=(v-a.x)/h
+        guard let upper = (1..<k.count).first(where: { k[$0].x >= v }) else { return .nan }
+        let i=upper-1,a=k[i],b=k[i+1],h=b.x-a.x
+        guard h.isFinite, h > 0 else { return .nan }
+        let t=(v-a.x)/h
         if interpolation == .linear {return min(max(a.y,b.y),max(min(a.y,b.y),(1-t)*a.y+t*b.y))}
         let m=Self.tangents(k),t2=t*t,t3=t2*t
         let y=(2*t3-3*t2+1)*a.y+(t3-2*t2+t)*h*m[i]+(-2*t3+3*t2)*b.y+(t3-t2)*h*m[i+1]

@@ -50,10 +50,10 @@ final class StyleEvaluatorTests:XCTestCase {
         p.parameters.grain.enabled=true;p.parameters.grain.amount=0
         XCTAssertEqual(try StyleEvaluator.evaluate(StyleEvaluator.compile(p),conditions:c).parameters.grain.amount,0.03)
     }
-    func testRejectsDuplicateTargetUnsupportedOperationAndOutOfRangeDefinition() throws {
-        var p=profile();p.responses.append(p.responses[0]);XCTAssertThrowsError(try StyleEvaluator.compile(p))
-        p=profile();p.responses[0].curve.knots[1].y=0.2;XCTAssertThrowsError(try StyleEvaluator.compile(p))
-        p=profile();p.responses[0].target = .noiseGain;XCTAssertThrowsError(try StyleEvaluator.compile(p))
+    func testExplicitDiagnosticsReportDuplicateTargetUnsupportedOperationAndOutOfRangeDefinition() throws {
+        var p=profile();p.responses.append(p.responses[0]);XCTAssertThrowsError(try p.validate())
+        p=profile();p.responses[0].curve.knots[1].y=0.2;XCTAssertThrowsError(try p.validate())
+        p=profile();p.responses[0].target = .noiseGain;XCTAssertThrowsError(try p.validate())
         let data=try JSON.encode(profile())
         XCTAssertThrowsError(try JSONDecoder().decode(Profile.self,from:Data(String(decoding:data,as:UTF8.self).replacingOccurrences(of:"grain.amount",with:"arbitrary.expression").utf8)))
     }

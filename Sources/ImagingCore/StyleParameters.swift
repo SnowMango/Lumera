@@ -6,6 +6,8 @@ public struct StyleParameters: Codable, Equatable, Sendable {
     public var vignette=Vignette(), glow=Glow(), halation=Halation()
     public var noise=Noise(), grain=FilmGrain()
     public init() {}
+    /// Optional diagnostics for every parameter, including disabled effects.
+    /// Rendering and decision execution do not invoke this scan.
     public func validate(resolved: Bool = false) throws {
         try validateField("$.parameters.tone.curve") { try tone.curve.validate(kind: .tone) }
         try validateField("$.parameters.noise.curve") { try noise.curve.validate(kind: .noise) }

@@ -154,7 +154,7 @@ extension LumeraRenderer {
     }
 
     /// 在目标色彩空间中以 Float32 逐块测量完整图像，再检查半精度存储所需的余量。
-    func measureInputRange(_ image: CIImage, bounds: CGRect, colorSpace: CGColorSpace, budget: Int = 64 * 1024 * 1024, requireHalf: Bool = true) async throws -> NumericBounds {
+    func measureInputRange(_ image: CIImage, bounds: CGRect, colorSpace: CGColorSpace, budget: Int = 64 * 1024 * 1024, requireHalf: Bool = true, resources: ProcessingResources? = nil) async throws -> NumericBounds {
         try Task.checkCancellation()
         guard budget >= 4096, let width = Int(exactly: bounds.width), let height = Int(exactly: bounds.height),
               width > 0, height > 0, bounds.minX.isFinite, bounds.minY.isFinite else {
@@ -202,7 +202,7 @@ extension LumeraRenderer {
                 // CI writes and range reads share a tracked texture in command order.
                 // Edge tiles scan only the valid area, excluding stale staging pixels.
                 context.render(image, to: staging, commandBuffer: command, bounds: area, colorSpace: colorSpace)
-                readbacks.append(try rangeReducer.encode(staging, commandBuffer: command, workingSet: workspace, width: w, height: h))
+                readbacks.append(try rangeReducer.encode(staging, commandBuffer: command, workingSet: workspace, width: w, height: h, resources: resources))
                 x += w
                 if x == width { x = 0; y += h }
             }

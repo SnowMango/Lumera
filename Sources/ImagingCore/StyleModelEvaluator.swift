@@ -26,7 +26,6 @@ public enum StyleModelEvaluator {
               observations.featureDigest == model.featureDigest else { throw LabError.invalid("Observation identity or declared age mismatch") }
         var parameters = model.definition.appearance.parameters, weights = model.definition.appearance.lutWeights
         var provenance: [ControlProvenance] = [], diagnostics: [ControlDiagnostic] = []
-        var usesLockedFallback = false
         if let legacy = model.legacy {
             let result = try StyleEvaluator.evaluate(legacy, conditions: observations.captureConditions)
             parameters = result.parameters
@@ -55,7 +54,7 @@ public enum StyleModelEvaluator {
                     if let lock = lockedControls.first(where: { $0.target == instruction.target }) {
                         value = lock.value
                         validStamp = priorValidStamp(model, context: context, target: instruction.target)
-                        lockedFallback = true; usesLockedFallback = true
+                        lockedFallback = true
                     } else {
                         switch instruction.missing {
                         case .reject: throw LabError.invalid("Missing observation for \(instruction.target)")
@@ -65,7 +64,7 @@ public enum StyleModelEvaluator {
                         case .hold(let maximumAge):
                             guard let history = context.fallback else { throw LabError.invalid("No valid history for \(instruction.target)") }
                             let previous = history.controls
-                            try previous.parameters.validate(); try ResourceWeight.validate(previous.lutWeights)
+                            try ResourceWeight.validate(previous.lutWeights)
                             guard previous.modelID == model.identity, previous.sourceID == observations.sourceID,
                                   previous.calibrationID == observations.calibrationID, previous.featureDigest == observations.featureDigest else {
                                 throw LabError.invalid("Fallback content identity mismatch")
@@ -86,11 +85,11 @@ public enum StyleModelEvaluator {
                     diagnostics.append(.init(code: .missingObservation, target: instruction.target,
                                              message: lockedFallback ? "Using explicit locked value" : "Using declared fallback"))
                 }
-                try ControlAccess.apply(value, target: instruction.target, parameters: &parameters, lutWeights: &weights, effective: lockedFallback)
+                try ControlAccess.writeComputed(value, target: instruction.target, parameters: &parameters, lutWeights: &weights)
                 provenance.append(.init(target: instruction.target, lastValidStamp: validStamp, isFallback: fallback))
             }
         }
-        try parameters.validate(resolved: model.legacy != nil || usesLockedFallback); try ResourceWeight.validate(weights)
+        try ResourceWeight.validate(weights)
         var result = AutomaticControls(parameters: parameters, lutWeights: weights, modelID: model.identity, sourceID: observations.sourceID, calibrationID: observations.calibrationID, featureDigest: observations.featureDigest)
         result.provenance = provenance; result.diagnostics = diagnostics
         return result
@@ -118,7 +117,6 @@ public enum StyleModelEvaluator {
         return age
     }
     private static func validateHeld(_ value: ControlValue, instruction: ResponseProgram) throws {
-        try ParameterSpecification.lookup(instruction.target).validate(value)
         try ControlInterpolation.validateEnvelope(value, anchors: instruction.expression.values)
     }
     private static func bracket(_ value: Double, positions: [Double], axis: ObservationAxis, boundary: ResponseBoundaryPolicy) throws -> (Int, Double) {

@@ -3,6 +3,13 @@ import Foundation
 /// The byte boundary checks constraints that a Codable decoder cannot observe once it has
 /// created a keyed container (in particular, duplicate spellings of the same member).
 public enum ProfileCodec {
+    /// Decode and explicitly request complete configuration diagnostics.
+    public static func decodeChecked(_ data: Data) throws -> Profile {
+        let value = try decode(data)
+        try value.validate()
+        return value
+    }
+
     public static let maximumBytes = 16 * 1024 * 1024
 
     /// Read at most one byte past the limit, even for a changing or non-seekable file.
@@ -34,7 +41,6 @@ public enum ProfileCodec {
     }
 
     public static func encode(_ profile: Profile) throws -> Data {
-        try profile.validate()
         let data = try JSON.encode(profile)
         guard data.count <= maximumBytes else { throw LabError.invalid("$: 超出 16 MiB") }
         return data
@@ -58,12 +64,9 @@ public enum ProfileCodec {
         let parsed: Fields
         do { parsed = try JSONDecoder().decode(Fields.self, from: data) }
         catch let error as DecodingError { throw LabError.invalid(error.fieldMessage) }
-        // Validate the serialized values before the editable profile limits exposure.
-        try parsed.parameters.validate()
         var p = Profile()
         p.id = parsed.id; p.name = parsed.name; p.description = parsed.description
         p.parameters = parsed.parameters; p.responses = parsed.responses; p.temporalPolicy = parsed.temporalPolicy
-        try p.validate()
         return p
     }
 

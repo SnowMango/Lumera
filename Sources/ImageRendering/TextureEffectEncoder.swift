@@ -18,9 +18,9 @@ public final class PreparedResolvedStyle: @unchecked Sendable {
     }
     let executionPlan: PreparedExecutionPlan
     fileprivate let deviceID: UInt64
-    fileprivate init(style: ResolvedStyle, color:PreparedColorTransform, lut: PreparedLUT?, deviceID: UInt64) {
+    fileprivate init(style: ResolvedStyle, color:PreparedColorTransform, lut: PreparedLUT?, deviceID: UInt64) throws {
         self.lutBlend = nil
-        self.executionPlan = PreparedExecutionPlan(parameters: style.parameters, color: color)
+        self.executionPlan = try PreparedExecutionPlan(parameters: style.parameters, color: color)
         self.curves=PreparedResponseCurves(style.parameters);self.style=style; self.color=color; self.lut=lut; self.deviceID=deviceID
     }
     fileprivate init(base: PreparedResolvedStyle, blend: PreparedLUTBlend) {
@@ -101,9 +101,8 @@ public final class TextureEffectEncoder: @unchecked Sendable {
         return prepared
     }
     public func prepare(_ style:ResolvedStyle,lut:LUTAsset?=nil) throws -> PreparedResolvedStyle {
-        try style.parameters.validate(resolved:true)
         let prepared = try prepareLUT(lut)
-        return PreparedResolvedStyle(style:style,color:try ColorTransform.prepare(style.parameters.color),lut:prepared,deviceID:device.registryID)
+        return try PreparedResolvedStyle(style:style,color:try ColorTransform.prepare(style.parameters.color),lut:prepared,deviceID:device.registryID)
     }
 
     public func prepareCorrection(_ correction:DeviceCorrection?,lut:LUTAsset?=nil) throws -> PreparedDeviceCorrection? {
@@ -224,8 +223,8 @@ public final class TextureEffectEncoder: @unchecked Sendable {
     }
 
     private func assess(style: PreparedResolvedStyle, parameters: StyleParameters, color: PreparedColorTransform,
-                        correction: PreparedDeviceCorrection?, request: RenderRequest, geometry: RenderGeometry) -> PrecisionAssessment {
-        PrecisionSafety.assess(parameters: parameters, color: color, correction: correction, lut: style.lut,
+                        correction: PreparedDeviceCorrection?, request: RenderRequest, geometry: RenderGeometry) throws -> PrecisionAssessment {
+        try PrecisionSafety.assess(parameters: parameters, color: color, correction: correction, lut: style.lut,
             blend: style.lutBlend, precision: precision, request: request,
             scale: EffectScale.factor(width: geometry.fullWidth, height: geometry.fullHeight),
             resizing: geometry.sourceWidth != geometry.fullWidth || geometry.sourceHeight != geometry.fullHeight,
@@ -277,7 +276,7 @@ public final class TextureEffectEncoder: @unchecked Sendable {
             backend.destination = destination
             let activity = EffectActivity(p, previewGlow: request.previewGlow)
             if p.grain.isActive {
-                let factor = style.executionPlan.grain(for: p.grain).subdivision(scale: EffectScale.factor(width: frameGeometry.fullWidth, height: frameGeometry.fullHeight))
+                let factor = try style.executionPlan.grain(for: p.grain).subdivision(scale: EffectScale.factor(width: frameGeometry.fullWidth, height: frameGeometry.fullHeight))
                 backend.finalPass = factor > 1 ? (request.dynamicRange == .edr ? "grainReduceExtended" : "grainReduce") :
                     (request.dynamicRange == .edr ? "filmGrainExtended" : "filmGrain")
             } else {

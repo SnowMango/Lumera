@@ -123,7 +123,6 @@ public struct AdaptationPolicy: Codable, Equatable, Sendable {
         return copy
     }
     func digest() throws -> String {
-        try validate()
         return try preparedDigest ?? StyleIdentity.digest(self)
     }
     public init() {}

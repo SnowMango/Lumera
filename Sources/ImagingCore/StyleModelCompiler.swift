@@ -25,7 +25,7 @@ public struct CompiledStyleModel: Sendable {
         var preparedDefinition = model
         preparedDefinition.observations = try model.observations.preparingFeatureDigest()
         preparedDefinition.adaptation = try model.adaptation.preparingDigest()
-        definition = preparedDefinition; identity = try model.digest()
+        definition = preparedDefinition; identity = try StyleIdentity.digest(model)
         featureDigest = try preparedDefinition.observations.featureDigest()
         resourceDigest = Digest.data(try JSON.encode(model.appearance.resources))
         instructions = model.responses
@@ -56,28 +56,48 @@ public enum ControlAccess {
         case "style.lutWeights": return .resourceWeights(lutWeights)
         default:
             guard let descriptor = ParameterDescriptor.all.first(where: { $0.id == target }) else { throw LabError.invalid("Unknown control: \(target)") }
+            guard !target.hasPrefix("color.matrix.") || parameters.color.matrix.values.count == 9 else {
+                throw LabError.invalid("Matrix control requires nine coefficients")
+            }
             return .scalar(parameters[keyPath: descriptor.keyPath])
         }
     }
     /// 先验证目标形状及范围，再写入对应存储。默认使用声明范围；解析后的标量控制可选择有效范围。
     public static func apply(_ value: ControlValue, target: String, parameters: inout StyleParameters, lutWeights: inout [ResourceWeight], effective: Bool = false) throws {
         try ParameterSpecification.lookup(target).validate(value, effective: effective)
+        try writeComputed(value, target: target, parameters: &parameters, lutWeights: &lutWeights)
+    }
+    /// Internal result storage; no declaration-range diagnostics or unrelated field scans.
+    static func writeComputed(_ value: ControlValue, target: String, parameters: inout StyleParameters,
+                              lutWeights: inout [ResourceWeight]) throws {
         switch (target, value) {
         case ("color.matrix", .matrix(let matrix)): parameters.color.matrix = matrix
         case ("tone.curve", .curve(let curve)): parameters.tone.curve = curve
         case ("style.lutWeights", .resourceWeights(let weights)): lutWeights = weights
         case (_, .scalar(let number)):
             guard let descriptor = ParameterDescriptor.all.first(where: { $0.id == target }) else { throw LabError.invalid("Unknown scalar control: \(target)") }
+            guard !target.hasPrefix("color.matrix.") || parameters.color.matrix.values.count == 9 else {
+                throw LabError.invalid("Matrix control requires nine coefficients")
+            }
             parameters[keyPath: descriptor.keyPath] = number
         default: throw LabError.invalid("Incorrect control shape: \(target)")
         }
     }
 }
 
-/// 在逐帧求值前验证自动响应、时间插值端点及 LUT 调色板的兼容性。
+/// Compiles response storage independently of optional whole-model diagnostics.
 public enum StyleModelCompiler {
     /// 从模型声明生成不可变求值程序，并提取观测依赖和可用 LUT 集合。
     public static func compile(_ model: StyleModel) throws -> CompiledStyleModel {
+        guard model.responses.count <= ParameterSpecification.all.count else { throw LabError.invalid("Response instruction limit exceeded") }
+        for instruction in model.responses { try instruction.validate() }
+        try ParameterSpecification.validateOwners(model.responses.map(\.target))
+        return try CompiledStyleModel(model, lutResourceIDs: validatePalette(model))
+    }
+
+    /// Optional model diagnostics, including all parameter ranges and response envelopes.
+    /// Compilation and frame execution do not call this method.
+    public static func validate(_ model: StyleModel) throws {
         try model.validate()
         guard model.responses.count <= ParameterSpecification.all.count else { throw LabError.invalid("Response instruction limit exceeded") }
         var baseline = model.appearance.parameters, weights = model.appearance.lutWeights
@@ -137,12 +157,11 @@ public enum StyleModelCompiler {
                 for value in endpoints { if case .curve(let curve) = value { _ = try ControlInterpolation.canonicalKnots(curve) } }
             }
         }
-        let palette = try validatePalette(model)
+        _ = try validatePalette(model)
         if let strength = model.edits.strength {
             try EditResolver.validateStrength(strength, parameters: baseline, lutWeights: weights,
                                               resources: model.appearance.resources)
         }
-        return try CompiledStyleModel(model, lutResourceIDs: palette)
     }
     /// Initial execution palette is capped globally, not merely per interpolation
     /// cell, so temporal blending across cells cannot accumulate more than four LUTs.
@@ -177,7 +196,6 @@ public enum StyleModelCompiler {
 /// Dynamic curves accept only the canonical grid; no approximation is performed.
 public enum ControlInterpolation {
     public static func canonicalKnots(_ curve: ResponseCurve) throws -> [ResponseKnot] {
-        try curve.validate(kind: .tone)
         guard case .points(let knots, .linear) = curve.shape, knots.count == 32,
               knots.enumerated().allSatisfy({ $0.element.x == Double($0.offset) / 31 }) else {
             throw LabError.unsupported("Dynamic curves require exactly 32 uniform linear knots; approximation is not performed")
@@ -190,7 +208,9 @@ public enum ControlInterpolation {
     private static func components(_ value: ControlValue, ids: [String]) throws -> [Double] {
         switch value {
         case .scalar(let v): guard v.isFinite else { throw LabError.invalid("Nonfinite scalar") }; return [v]
-        case .matrix(let m): try m.validate(); return m.values
+        case .matrix(let m):
+            guard m.values.count == 9 else { throw LabError.invalid("Matrix interpolation requires nine coefficients") }
+            return m.values
         case .curve(let c): return try canonicalKnots(c).map(\.y)
         case .resourceWeights(let weights):
             try ResourceWeight.validate(weights)
@@ -234,10 +254,10 @@ public enum ControlInterpolation {
         switch first {
         case .scalar: return .scalar(mixed[0])
         case .matrix:
-            let matrix = ColorMatrix3x3(values: mixed); try matrix.validate(); return .matrix(matrix)
+            return .matrix(ColorMatrix3x3(values: mixed))
         case .curve:
             let curve = ResponseCurve(knots: mixed.enumerated().map { .init(x: Double($0.offset)/31, y: $0.element) })
-            try curve.validate(kind: .tone); return .curve(curve)
+            return .curve(curve)
         case .resourceWeights:
             let sum = mixed.reduce(0,+)
             let result = zip(ids, mixed).map { ResourceWeight(resourceID: $0.0, weight: $0.1 / (sum == 0 ? 1 : sum)) }

@@ -25,7 +25,7 @@ public enum AdaptationReducer {
     /// 沿用历史时要求内容身份、流世代和策略一致，且索引与呈现时间严格递增。
     /// 显式重置丢弃历史，包括缺测计时和锁定。
     public static func reduce(_ controls: AutomaticControls, state: AdaptationState?, stamp: FrameStamp, event: AdaptationEvent?, policy: AdaptationPolicy) throws -> AdaptationResult {
-        try stamp.validate(); try policy.validate(); try validate(controls, at: stamp)
+        try stamp.validate(); try validate(controls, at: stamp)
         let digest = try policy.digest()
         let reset: Bool
         if case .reset = event { reset = true } else { reset = false }
@@ -35,7 +35,6 @@ public enum AdaptationReducer {
             guard elapsed.isFinite, elapsed > 0 else { throw LabError.invalid("Invalid temporal elapsed time") }
             try previous.stamp.validate(); try validate(previous.controls, at: previous.stamp)
             try ParameterSpecification.validateOwners(previous.locks.map(\.target))
-            for lock in previous.locks { try ParameterSpecification.lookup(lock.target).validate(lock.value, effective: true) }
             guard previous.policyDigest == digest,
                   previous.controls.modelID == controls.modelID, previous.controls.sourceID == controls.sourceID,
                   previous.controls.calibrationID == controls.calibrationID, previous.controls.featureDigest == controls.featureDigest,
@@ -136,10 +135,10 @@ public enum AdaptationReducer {
         try ControlAccess.value(target: target, parameters: controls.parameters, lutWeights: controls.lutWeights)
     }
     private static func write(_ value: ControlValue, _ target: String, _ controls: inout AutomaticControls) throws {
-        try ControlAccess.apply(value, target: target, parameters: &controls.parameters, lutWeights: &controls.lutWeights, effective: true)
+        try ControlAccess.writeComputed(value, target: target, parameters: &controls.parameters, lutWeights: &controls.lutWeights)
     }
     private static func validate(_ controls: AutomaticControls, at stamp: FrameStamp) throws {
-        try controls.parameters.validate(resolved: true); try ResourceWeight.validate(controls.lutWeights)
+        try ResourceWeight.validate(controls.lutWeights)
         guard controls.lutWeights.count <= 4 else { throw LabError.unsupported("Temporal LUT palette is limited to four resources") }
         guard [controls.modelID, controls.sourceID, controls.calibrationID, controls.featureDigest].allSatisfy({ !$0.isEmpty }),
               Set(controls.provenance.map(\.target)).count == controls.provenance.count else { throw LabError.invalid("Invalid temporal controls") }

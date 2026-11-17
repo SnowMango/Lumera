@@ -10,7 +10,7 @@ struct PreparedLUTBlend {
     let boundaryPolicy: LUTBoundaryPolicy
 }
 
-/// 实时和参考后端共用的已校验帧参数、资源和几何信息。
+/// 实时和参考后端共用的帧参数、资源和几何信息。
 struct EffectFrame {
     let executionPlan: PreparedExecutionPlan
     let parameters: StyleParameters
@@ -145,7 +145,7 @@ struct EffectPipeline<Backend: EffectPipelineBackend> {
             (extended ? "finishEncodedExtended" : "finishEncoded")
         let result=try pass(finish,current,[luma,chroma],EffectUniforms.noise(p.noise,envelope:curves.noise))
         if p.grain.isActive {
-            let prepared = executionPlan.grain(for:p.grain)
+            let prepared = try executionPlan.grain(for:p.grain)
             let uniforms = EffectUniforms.grain(p.grain,scale:scale,seed:request.seed,
                 frameIndex:temporal.grain == .fixed ? 0:request.frameIndex,envelope:curves.grain,
                 originX:frameGeometry.originX,originY:frameGeometry.originY,prepared:prepared)

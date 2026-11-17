@@ -92,9 +92,12 @@ final class AdaptationReducerTests: XCTestCase {
         var p = policy(); p.rules[0].timeConstantSeconds = .nan
         XCTAssertThrowsError(try AdaptationReducer.reduce(controls(0),state:nil,stamp:stamp(0),event:nil,policy:p))
         p = policy(); p.rules[0].expired = .hold(maxAgeSeconds:1)
-        XCTAssertThrowsError(try AdaptationReducer.reduce(controls(0),state:nil,stamp:stamp(0),event:nil,policy:p))
+        XCTAssertThrowsError(try ParameterInput.adaptationPolicy(p))
         let locks = [ControlOverride(target:"detail.fineSigma",value:.scalar(8)),ControlOverride(target:"detail.midSigma",value:.scalar(1))]
-        XCTAssertThrowsError(try AdaptationReducer.reduce(controls(0),state:nil,stamp:stamp(0),event:.lock(locks),policy:policy()))
+        let result = try AdaptationReducer.reduce(controls(0),state:nil,stamp:stamp(0),event:.lock(locks),policy:policy())
+        XCTAssertEqual(result.controls.parameters.detail.fineSigma, 8)
+        XCTAssertEqual(result.controls.parameters.detail.midSigma, 1)
+        XCTAssertThrowsError(try result.controls.parameters.validate(resolved: true))
     }
     func testLockedMissingValueExpiresOnlyAfterUnlockContinuityFrame() throws {
         var c = controls(0); c.provenance[0] = .init(target:"glow.amount",lastValidStamp:nil,isFallback:true)

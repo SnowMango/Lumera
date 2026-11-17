@@ -4,7 +4,6 @@ import Foundation
 /// are sorted, collections are counted, and all numbers use IEEE-754 binary64 big endian.
 public enum StyleIdentity {
     public static func profile(_ profile: Profile) throws -> String {
-        try profile.validate()
         struct Content: Encodable {
             let schemaVersion: Int, parameters: StyleParameters
             let responses: [ConditionBinding], temporalPolicy: TemporalPolicy
@@ -18,7 +17,7 @@ public enum StyleIdentity {
         try ResolvedStyle(parameters: parameters, temporalPolicy: temporalPolicy).effectiveDigest
     }
 
-    static func validatedEffectiveDigest(parameters: StyleParameters, temporalPolicy: TemporalPolicy) throws -> String {
+    static func effectiveDigest(parameters: StyleParameters, temporalPolicy: TemporalPolicy) throws -> String {
         struct Content: Encodable { let parameters: StyleParameters, temporalPolicy: TemporalPolicy }
         return try digest(Content(parameters: parameters, temporalPolicy: temporalPolicy))
     }

@@ -37,10 +37,10 @@ final class ColorResponseProgramTests: XCTestCase {
     }
     func testNoncanonicalDynamicCurveRejectedWithoutApproximation() throws {
         var m = model("tone.curve", [.curve(.identity), .curve(curve(1))])
-        XCTAssertThrowsError(try StyleModelCompiler.compile(m))
+        XCTAssertThrowsError(try StyleModelCompiler.validate(m))
         var invalid = curve(1); invalid.knots[1].x += 0.001
         m = model("tone.curve", [.curve(invalid), .curve(curve(1))])
-        XCTAssertThrowsError(try StyleModelCompiler.compile(m))
+        XCTAssertThrowsError(try StyleModelCompiler.validate(m))
         m.responses[0].expression = .constant(.curve(.identity))
         XCTAssertNoThrow(try StyleModelCompiler.compile(m))
     }
@@ -96,25 +96,25 @@ final class ColorResponseProgramTests: XCTestCase {
         m.appearance.resources = resources(["a", "b"])
         var rule = AdaptationRule(target: "style.lutWeights", timeConstantSeconds: 1)
         rule.initialization = .constant(.resourceWeights([])); m.adaptation.rules = [rule]
-        XCTAssertThrowsError(try StyleModelCompiler.compile(m))
+        XCTAssertThrowsError(try StyleModelCompiler.validate(m))
         m.adaptation.rules = []
         m.edits.strength = .init(neutralParameters: .init(), neutralLUTWeights: [])
-        XCTAssertThrowsError(try StyleModelCompiler.compile(m))
+        XCTAssertThrowsError(try StyleModelCompiler.validate(m))
     }
 
-    func testStaticTemporalEndpointsAreValidatedBeforeFirstFrame() throws {
+    func testStaticTemporalEndpointsAreReportedByExplicitDiagnostics() throws {
         for hasConstantOwner in [false, true] {
             var m = model("tone.curve", [.curve(curve(0)), .curve(curve(1))])
             m.responses = hasConstantOwner ? [.init(target: "tone.curve", expression: .constant(.curve(.identity)))] : []
             var rule = AdaptationRule(target: "tone.curve", timeConstantSeconds: 1)
             rule.initialization = .constant(.curve(curve(0.5))); m.adaptation.rules = [rule]
-            XCTAssertThrowsError(try StyleModelCompiler.compile(m))
+            XCTAssertThrowsError(try StyleModelCompiler.validate(m))
         }
         var m = StyleModel(identity: .init(id: "static", name: "test"))
         m.appearance.resources = resources(["a"])
         var rule = AdaptationRule(target: "style.lutWeights", timeConstantSeconds: 1)
         rule.initialization = .constant(.resourceWeights([.init(resourceID: "a", weight: 1)])); m.adaptation.rules = [rule]
-        XCTAssertThrowsError(try StyleModelCompiler.compile(m))
+        XCTAssertThrowsError(try StyleModelCompiler.validate(m))
     }
     func testTemporalCurveEditsAndLocksRejectNoncanonicalEndpointsImmediately() throws {
         var m = model("tone.curve", [.curve(curve(0)), .curve(curve(1))])

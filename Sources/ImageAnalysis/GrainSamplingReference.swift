@@ -8,9 +8,10 @@ public struct GrainSamplingReference {
     private let grain: FilmGrain
 
     public init(parameters: FilmGrain) throws {
-        var style = StyleParameters()
-        style.grain = parameters
-        try style.validate(resolved:true)
+        guard parameters.size.isFinite, parameters.size > 0, (2 * parameters.size).isFinite,
+              parameters.roughness.isFinite, (0...1).contains(parameters.roughness) else {
+            throw LabError.invalid("Grain spacing and mixture cannot be computed")
+        }
         geometry = ReferenceCalibration(size:parameters.size,roughness:parameters.roughness)
         grain = parameters
     }

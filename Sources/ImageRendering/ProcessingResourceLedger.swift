@@ -19,6 +19,10 @@ final class ProcessingResourceLedger: @unchecked Sendable {
         let currentOwners = lock.withLock { owners.compactMap(\.value) }
         currentOwners.forEach { $0.clearIdleResources() }
     }
+    func clearIdleRangeBuffers() {
+        let currentOwners = lock.withLock { owners.compactMap(\.value) }
+        currentOwners.forEach { $0.clearIdleRangeBuffers() }
+    }
     func trimOwners() {
         let currentOwners = lock.withLock { owners.compactMap(\.value) }
         currentOwners.forEach { $0.trimSharedIdle() }

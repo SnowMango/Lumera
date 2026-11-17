@@ -5,6 +5,134 @@ import ImagingCore
 @testable import ImageRendering
 
 final class ModelRenderPlanTests: XCTestCase {
+    func testStaticConfigurationRebindsCurrentFrameAndInvalidatesEdits() async throws {
+        let renderer = try LumeraRenderer(), firstInput = try await input(renderer)
+        let compiled = try StyleModelCompiler.compile(model())
+        let prepared = try ModelPreparer(renderer: renderer).prepare(compiled, resources: .init(), execution: execution())
+        var values = controls(compiled, input: firstInput)
+        values.parameters.color.exposureEV = 0.5
+        let first = try RenderPlanner().plan(values, input: firstInput, model: prepared, seed: 7)
+        let configuration = first.configuration
+        first.cancel()
+        let nextInput = try await input(renderer)
+        let next = try RenderPlanner().plan(values, input: nextInput, model: prepared, seed: 42)
+        XCTAssertTrue(configuration === next.configuration)
+        XCTAssertTrue(next.input === nextInput)
+        XCTAssertEqual(next.request.seed, 42)
+        XCTAssertEqual(next.request.inputValueBounds, nextInput.valueBounds)
+        XCTAssertFalse(first.lease === next.lease)
+        next.cancel()
+        values.inputExposureEV = 1
+        let changed = try RenderPlanner().plan(values, input: nextInput, model: prepared)
+        XCTAssertFalse(configuration === changed.configuration)
+        XCTAssertNotNil(changed.prefix)
+        changed.cancel()
+        values.inputExposureEV = 0
+        values.parameters.grain.enabled = true; values.parameters.grain.amount = 0.01
+        let grain = try RenderPlanner().plan(values, input: nextInput, model: prepared)
+        XCTAssertFalse(configuration === grain.configuration)
+        XCTAssertNil(grain.prefix)
+        grain.cancel()
+    }
+
+    func testDisabledNoiseDoesNotUploadUnusedLargeCurve() async throws {
+        let renderer = try LumeraRenderer(), input = try await input(renderer)
+        let compiled = try StyleModelCompiler.compile(model())
+        let prepared = try ModelPreparer(renderer: renderer).prepare(compiled, resources: .init(), execution: execution())
+        var values = controls(compiled, input: input)
+        values.parameters.color.exposureEV = 1
+        values.parameters.noise.enabled = false
+        values.parameters.noise.curve = .init(knots: (0..<400).map { .init(x: Double($0) / 399, y: 0.01) })
+        let plan = try RenderPlanner().plan(values, input: input, model: prepared)
+        let result = try await renderer.submit(input, plan: plan).value()
+        var pixels = [Float](repeating: 0, count: 16)
+        pixels.withUnsafeMutableBytes { CIContext().render(result.frame.image, toBitmap: $0.baseAddress!, rowBytes: 32,
+            bounds: result.frame.image.extent, format: .RGBAf, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)) }
+        XCTAssertEqual(pixels[0], 0.6858, accuracy: 0.004)
+    }
+
+    func testResourceStorageRejectsUnrepresentableDimensionBeforeBudgetArithmetic() throws {
+        var definition = model()
+        definition.appearance.resources = [.init(id: "curve", sha256: String(repeating: "a", count: 64), dimension: Int.max)]
+        definition.appearance.resources[0].role = .toneCurve
+        let renderer = try LumeraRenderer()
+        let compiled = try StyleModelCompiler.compile(definition)
+        let resources = try ModelResourceSet(curves: ["curve": .identity])
+        XCTAssertThrowsError(try ModelPreparer(renderer: renderer).prepare(compiled, resources: resources, execution: execution()))
+    }
+
+    func testOversizedActiveCurveRejectsAtUniformUpload() async throws {
+        let renderer = try LumeraRenderer(), input = try await input(renderer)
+        let compiled = try StyleModelCompiler.compile(model())
+        let prepared = try ModelPreparer(renderer: renderer).prepare(compiled, resources: .init(), execution: execution())
+        var values = controls(compiled, input: input)
+        values.parameters.tone.enabled = true
+        values.parameters.tone.curve = .init(knots: (0..<400).map { .init(x: Double($0) / 399, y: Double($0) / 798) })
+        let plan = try RenderPlanner().plan(values, input: input, model: prepared)
+        let command = try XCTUnwrap(renderer.queue.makeCommandBuffer())
+        XCTAssertThrowsError(try FrameEncoder(renderer: renderer).encode(input, plan: plan, commandBuffer: command))
+    }
+
+    func testEmptyAndSingletonToneCurvesMatchCPUSampling() async throws {
+        let renderer = try LumeraRenderer(), input = try await input(renderer)
+        let compiled = try StyleModelCompiler.compile(model())
+        let prepared = try ModelPreparer(renderer: renderer).prepare(compiled, resources: .init(), execution: execution())
+        for (knots, expected) in [([ResponseKnot](), Float(0)), ([ResponseKnot(x: 0.5, y: 0.25)], Float(0.25))] {
+            var values = controls(compiled, input: input)
+            values.parameters.tone.enabled = true; values.parameters.tone.curve = .init(knots: knots)
+            let plan = try RenderPlanner().plan(values, input: input, model: prepared)
+            let result = try await renderer.submit(input, plan: plan).value()
+            var pixels = [Float](repeating: 0, count: 16)
+            pixels.withUnsafeMutableBytes { CIContext().render(result.frame.image, toBitmap: $0.baseAddress!, rowBytes: 32,
+                bounds: result.frame.image.extent, format: .RGBAf, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)) }
+            XCTAssertEqual(pixels[0], expected, accuracy: 0.004)
+        }
+    }
+
+    func testGlowTileSupportUsesBothConsumedBlurRadii() throws {
+        var parameters = StyleParameters()
+        parameters.glow.enabled = true; parameters.glow.amount = 0.1
+        parameters.glow.nearSigma = 40; parameters.glow.farSigma = 1
+        let planner = try TilePlanner(width: 2048, height: 2048, style: parameters,
+            options: .init(), budget: 256 * 1024 * 1024, preparedGrain: nil)
+        XCTAssertEqual(planner.halo, 121)
+    }
+
+    func testGrainPreparationHandlesItsOwnArithmeticDomain() throws {
+        var grain = FilmGrain(); grain.enabled = true; grain.amount = 0.01; grain.roughness = 2
+        XCTAssertThrowsError(try EffectUniforms.grain(grain, scale: 1, seed: 42))
+    }
+
+    func testColorPreparationAcceptsExecutableValuesOutsideDiagnosticRange() throws {
+        var color = ColorResponse(); color.matrix.values[0] = 5
+        XCTAssertThrowsError(try color.validate())
+        XCTAssertEqual(try ColorTransform.prepare(color).apply([0.1, 0.2, 0.3])[0], 0.5, accuracy: 1e-12)
+        color.matrix.values = [1, 0]
+        XCTAssertThrowsError(try ColorTransform.prepare(color))
+    }
+    func testUnusedParameterDiagnosticsDoNotBlockPlanningOrSubmission() async throws {
+        let renderer = try LumeraRenderer(), input = try await input(renderer)
+        let compiled = try StyleModelCompiler.compile(model())
+        let prepared = try ModelPreparer(renderer: renderer).prepare(compiled, resources: .init(), execution: execution())
+        var values = controls(compiled, input: input)
+        values.parameters.grain.enabled = false
+        values.parameters.grain.roughness = 2
+        values.parameters.color.exposureEV = 1
+        XCTAssertThrowsError(try values.parameters.validate(resolved: true))
+        let plan = try RenderPlanner().plan(values, input: input, model: prepared)
+        let request = try PreparedProcessingRequest(plan: plan)
+        let resources = ProcessingResources(device: renderer.device)
+        guard case .ready = resources.prepare(request), case .ready(let frame) = resources.acquireFrame(for: request) else {
+            return XCTFail("Could not prepare frame resources")
+        }
+        let result = try await renderer.submit(input, plan: plan, output: frame.outputTexture,
+            workspace: frame.workspace, request: request).value()
+        var pixels = [Float](repeating: 0, count: 16)
+        pixels.withUnsafeMutableBytes { CIContext().render(result.frame.image, toBitmap: $0.baseAddress!, rowBytes: 32,
+            bounds: result.frame.image.extent, format: .RGBAf, colorSpace: CGColorSpace(name: CGColorSpace.sRGB)) }
+        XCTAssertEqual(pixels[0], 0.6858, accuracy: 0.004)
+        XCTAssertEqual(result.frame.resolvedControls.parameters.grain.roughness, 2)
+    }
     func execution(bytes: Int = 32 * 1024 * 1024) -> ExecutionProfile {
         .init(width: 2, height: 2, budget: .init(maxInFlightFrames: 1, maxResidentBytes: bytes))
     }
@@ -159,7 +287,7 @@ final class ModelRenderPlanTests: XCTestCase {
             guard case CancellationAtCommit.injected = error else { return XCTFail("Failure did not reach final commit hook: \(error)") }
         }
         XCTAssertTrue(called)
-        let retainedInput = input.texture.allocatedSize + (input.texture === input.source.texture ? 0 : input.source.texture.allocatedSize)
+        let retainedInput = input.residentStorageBytes
         let next = try prepared.reserveFrame()
         XCTAssertEqual(next.execution.budget.maxResidentBytes,plan.lease.allowance - retainedInput,
                        "Aborted unpublished output must not remain charged while the failed plan is retained")

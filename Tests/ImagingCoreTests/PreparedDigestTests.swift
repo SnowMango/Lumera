@@ -64,6 +64,7 @@ final class PreparedDigestTests: XCTestCase {
         changed.rules[0].timeConstantSeconds = 2
         XCTAssertNotEqual(try changed.digest(), try prepared.digest())
         changed.rules[0].timeConstantSeconds = -1
-        XCTAssertThrowsError(try changed.digest())
+        XCTAssertNoThrow(try changed.digest())
+        XCTAssertThrowsError(try ParameterInput.adaptationPolicy(changed))
     }
 }

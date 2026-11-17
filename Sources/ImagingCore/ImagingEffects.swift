@@ -5,7 +5,11 @@ public struct ToneResponse: Codable, Equatable, Sendable {
     public var enabled=false
     public var curve=ResponseCurve.identity
     public init() {}
-    public var isActive:Bool {enabled && curve.knots.contains(where:{$0.x != $0.y})}
+    public var isActive:Bool {
+        guard enabled else { return false }
+        let knots = curve.knots
+        return knots.count < 2 || knots.contains(where: { $0.x != $0.y })
+    }
 }
 /// Linear-light RGB diffusion; independent from luminance frequency-band contrast.
 public struct Softening: Codable, Equatable, Sendable {

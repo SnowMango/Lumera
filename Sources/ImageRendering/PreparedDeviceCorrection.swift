@@ -16,8 +16,8 @@ public final class PreparedDeviceCorrection: @unchecked Sendable {
     }
     /// 用户输入曝光和白平衡编辑复用前置颜色变换，位于已完成输入校正之后。
     static func inputEdit(_ response: ColorResponse, device: MTLDevice) throws -> PreparedDeviceCorrection? {
-        let color = try ColorTransform.prepare(response)
         guard response.isActive else { return nil }
+        let color = try ColorTransform.prepare(response)
         return PreparedDeviceCorrection(digest: "frame-input-edit", color: color, active: true, lut: nil,
             device: device)
     }
@@ -28,7 +28,6 @@ public final class PreparedDeviceCorrection: @unchecked Sendable {
         guard correction != nil || preparedLUT != nil else{return nil}
         guard preparedLUT == nil || preparedLUT!.deviceID==device.registryID else {throw LabError.invalid("LUT 不属于当前 Metal 设备")}
         let correction=correction ?? DeviceCorrection()
-        try correction.validate()
         var response=ColorResponse();response.whiteBalance=correction.whiteBalance;response.matrix=correction.matrix
         let color=try ColorTransform.prepare(response)
         // Retain explicitly clamped identity LUTs: they still bound EDR inputs.

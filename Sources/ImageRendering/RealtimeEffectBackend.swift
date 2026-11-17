@@ -23,6 +23,9 @@ final class RealtimeEffectBackend: EffectPipelineBackend {
         let value=frame.opticalGrid(resolution);grid=value;return value
     }
     func pass(_ name:String,_ source:MTLTexture,_ extras:[MTLTexture]=[],_ parameters:[Float]=[0],size:(Int,Int)?=nil,weights:MTLBuffer?=nil,lut:MTLTexture?=nil,lutTextures:[MTLTexture]=[]) throws -> MTLTexture {
+            guard !parameters.isEmpty, parameters.count <= 4096 / MemoryLayout<Float>.stride else {
+                throw LabError.unsupported("Effect uniforms exceed inline Metal storage")
+            }
             let result: MTLTexture
             if name == finalPass, let destination { result = destination }
             else { result = try arena.take(width:size?.0 ?? source.width,height:size?.1 ?? source.height) }

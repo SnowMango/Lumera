@@ -32,8 +32,6 @@ final class ProfileCodecTests: XCTestCase {
             (",\"parameters\":{\"grain\":{\"size\":null}}", "parameters.grain.size"),
             (",\"parameters\":{\"grain\":{\"typo\":2}}", "parameters.grain.typo"),
             (",\"parameters\":{\"grain\":{\"size\":true}}", "parameters.grain.size"),
-            (#","parameters":{"color":{"exposureEV":15}}"#, "parameters.color.exposureEV"),
-            (",\"parameters\":{\"grain\":{\"size\":20}}", "parameters.grain.size"),
             (",\"parameters\":{\"halation\":{\"sigma\":4}}", "parameters.halation.sigma")
         ] {
             XCTAssertThrowsError(try ProfileCodec.decode(document(extra))) {
@@ -52,7 +50,7 @@ final class ProfileCodecTests: XCTestCase {
         let bytes = document(",\"parameters\":{\"noise\":{\"gain\":100}}")
         try bytes.write(to: url)
         defer { try? FileManager.default.removeItem(at: url) }
-        XCTAssertThrowsError(try JSON.load(Profile.self, from: url))
+        XCTAssertThrowsError(try JSON.load(Profile.self, from: url).validate())
         XCTAssertEqual(try Data(contentsOf: url), bytes)
     }
 
@@ -63,9 +61,17 @@ final class ProfileCodecTests: XCTestCase {
         }
         let invalidCurve = partial.replacingOccurrences(of: "unknown", with: "grain.size")
             .replacingOccurrences(of: #""x":200"#, with: #""x":90"#)
-        XCTAssertThrowsError(try ProfileCodec.decode(document(invalidCurve))) {
+        XCTAssertThrowsError(try ProfileCodec.decode(document(invalidCurve)).validate()) {
             XCTAssertTrue($0.localizedDescription.contains("$.responses[0].curve"), $0.localizedDescription)
         }
+    }
+
+    func testDecodingDoesNotRunParameterDiagnostics() throws {
+        let profile = try ProfileCodec.decode(document(",\"parameters\":{\"grain\":{\"size\":20}}"))
+        XCTAssertEqual(profile.parameters.grain.size, 20)
+        XCTAssertThrowsError(try profile.validate())
+        let exposure = try ProfileCodec.decode(document(#","parameters":{"color":{"exposureEV":15}}"#))
+        XCTAssertEqual(exposure.parameters.color.exposureEV, 10)
     }
 
     func testEveryResponseHasDescriptorAndUnit() throws {

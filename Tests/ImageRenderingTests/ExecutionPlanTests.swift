@@ -5,18 +5,18 @@ import ImagingCore
 final class ExecutionPlanTests: XCTestCase {
     func testOnlyDependentResourcesChange() throws {
         var p = try StylePresets.make("film-demo").parameters
-        let plan = PreparedExecutionPlan(parameters:p,color:try ColorTransform.prepare(p.color))
+        let plan = try PreparedExecutionPlan(parameters:p,color:try ColorTransform.prepare(p.color))
         let first = plan.counts
         let originalHalation = plan.halation(for:p.halation)
         p.grain.amount *= 0.5; p.halation.amount = 0.8
         p.halation.threshold = 0.22; p.halation.blue = 0.8
-        _ = plan.grain(for:p.grain)
+        _ = try plan.grain(for:p.grain)
         XCTAssertEqual(plan.halation(for:p.halation).sigmas,originalHalation.sigmas)
         XCTAssertEqual(plan.counts.grains,first.grains); XCTAssertEqual(plan.counts.halations,first.halations)
         _ = try plan.color(for:p.color); XCTAssertEqual(plan.counts.colors,1)
         p.color.exposureEV = -1; _ = try plan.color(for:p.color); _ = try plan.color(for:p.color)
         XCTAssertEqual(plan.counts.colors,2)
-        p.grain.roughness = 0.73; _ = plan.grain(for:p.grain)
+        p.grain.roughness = 0.73; _ = try plan.grain(for:p.grain)
         XCTAssertEqual(plan.counts.grains,first.grains+1); XCTAssertEqual(plan.counts.halations,first.halations)
         p.halation.radius *= 2
         XCTAssertEqual(plan.halation(for:p.halation).sigmas,originalHalation.sigmas.map { $0*2 })

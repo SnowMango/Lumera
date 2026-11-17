@@ -2,7 +2,7 @@ import Foundation
 import Metal
 import ImagingCore
 
-/// 已校验并准备到设备上的模型资源，持有用于分配帧槽和驻留预算的账本。
+/// 已准备到设备上的模型资源，持有用于分配帧槽和驻留预算的账本。
 public final class PreparedStyleModel: @unchecked Sendable {
     public let compiled: CompiledStyleModel
     public let execution: ExecutionProfile
@@ -15,6 +15,8 @@ public final class PreparedStyleModel: @unchecked Sendable {
     let budget: ModelFrameBudget
     private let resourceLease: ModelResourceLease?
     private let inputLock = UnfairLock()
+    let configurationLock = UnfairLock()
+    var renderConfigurationCache: (key: RenderConfigurationKey, value: PreparedRenderConfiguration)?
     private var processingCharges: [ObjectIdentifier: [ProcessingResourceCharge]] = [:]
     func registerProcessingResources(_ manager: ProcessingResources) throws {
         try inputLock.withLock {
@@ -36,7 +38,6 @@ public final class PreparedStyleModel: @unchecked Sendable {
             try normalizer.prewarm(calibration: nil, resources: .init(), residency: nil)
             return normalizer
         }
-        try calibration.validate()
         guard calibration.resources.count <= 1, calibration.resources.allSatisfy({ $0.role == .correctionLUT }) else {
             throw LabError.unsupported("Input calibration supports one correction LUT")
         }
@@ -167,7 +168,16 @@ public final class ModelPreparer {
         guard Set(resources.luts.keys).union(resources.curves.keys) == expectedIDs else { throw LabError.invalid("Model resources must match declared IDs exactly") }
         var resourceBytes = 0, largestDecodeWorkspace = 0
         for descriptor in model.definition.appearance.resources {
-            if descriptor.role == .toneCurve { resourceBytes += descriptor.dimension * 16; continue }
+            guard (2...256).contains(descriptor.dimension) else {
+                throw LabError.unsupported("Model resource storage requires a dimension in 2...256")
+            }
+            if descriptor.role == .toneCurve {
+                let bytes = descriptor.dimension * 16
+                guard bytes <= execution.budget.maxResidentBytes - resourceBytes else {
+                    throw LabError.invalid("Model curve resources exceed memory budget")
+                }
+                resourceBytes += bytes; continue
+            }
             largestDecodeWorkspace = max(largestDecodeWorkspace, descriptor.dimension * descriptor.dimension * descriptor.dimension * 16)
             let texture = MTLTextureDescriptor(); texture.textureType = .type3D; texture.pixelFormat = .rgba32Float
             texture.width = descriptor.dimension; texture.height = descriptor.dimension; texture.depth = descriptor.dimension
@@ -202,7 +212,7 @@ public final class ModelPreparer {
         let base = try renderer.prepare(style)
         // Even zero-amplitude effects can be activated by a response or permitted edit.
         if parameters.halation.enabled { _ = base.executionPlan.halation(for: parameters.halation) }
-        if parameters.grain.enabled { _ = base.executionPlan.grain(for: parameters.grain) }
+        if parameters.grain.enabled { _ = try base.executionPlan.grain(for: parameters.grain) }
         var lutStyles: [String: PreparedResolvedStyle] = [:]
         var cubes: [String: CubeLUT] = [:]
         for descriptor in model.definition.appearance.resources {
@@ -226,7 +236,7 @@ public final class ModelPreparer {
             }
             let prepared = try renderer.prepare(style, lut: asset)
             if parameters.halation.enabled { _ = prepared.executionPlan.halation(for: parameters.halation) }
-            if parameters.grain.enabled { _ = prepared.executionPlan.grain(for: parameters.grain) }
+            if parameters.grain.enabled { _ = try prepared.executionPlan.grain(for: parameters.grain) }
             lutStyles[descriptor.id] = prepared
         }
         if let strength = model.definition.edits.strength, !strength.neutralLUTWeights.isEmpty {

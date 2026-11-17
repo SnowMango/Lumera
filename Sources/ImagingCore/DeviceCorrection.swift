@@ -14,11 +14,9 @@ public struct DeviceCorrection: Codable, Equatable, Sendable {
         let c=try decoder.container(keyedBy:CodingKeys.self)
         whiteBalance=try c.decode(WhiteBalanceCorrection.self,forKey:.whiteBalance)
         matrix=try c.decode(ColorMatrix3x3.self,forKey:.matrix)
-        try validate()
     }
     public func validate() throws {
-        var p=StyleParameters();p.color.whiteBalance=whiteBalance;p.color.matrix=matrix
-        try p.validate()
+        try whiteBalance.validate(); try matrix.validate()
     }
-    public func effectDigest() throws -> String {try validate();return try StyleIdentity.digest(self)}
+    public func effectDigest() throws -> String {try StyleIdentity.digest(self)}
 }

@@ -24,6 +24,6 @@ public enum StylePresets {
             p.parameters.halation.enabled=true;p.parameters.halation.amount=0.12
         default:throw LabError.invalid("Unknown preset: \(name). Choose \(names.joined(separator:", "))")
         }
-        try p.validate();return p
+        return p
     }
 }

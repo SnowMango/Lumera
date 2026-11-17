@@ -25,23 +25,32 @@ struct TilePlanner {
         fullWidth = max(1, Int(Double(width) * ratio)); fullHeight = max(1, Int(Double(height) * ratio))
         let scale = EffectScale.factor(width: fullWidth, height: fullHeight)
         grainSubdivision = preparedGrain?.subdivision(scale:scale) ?? 1
-        func optical(_ sigma: Double, _ divisor: EffectResolution, support: Double = 3) -> Int {
+        func radius(_ sigma: Double, support: Double = 3) throws -> Int {
+            let extent = ceil(support * sigma * scale)
+            guard sigma.isFinite, sigma > 0, extent.isFinite, extent <= Double(1 << 24) else {
+                throw LabError.invalid("Effect support cannot be represented by a tile")
+            }
+            return Int(extent)
+        }
+        func optical(_ sigma: Double, _ divisor: EffectResolution, support: Double = 3) throws -> Int {
             // Every reduced sample covers up to divisor full pixels; include bilinear reconstruction.
             let d = divisor.rawValue
-            return Int(ceil(support * sigma * scale)) + (d == 1 ? 1 : 3 * d)
+            return try radius(sigma, support: support) + (d == 1 ? 1 : 3 * d)
         }
         var extent = 0
         let activity = EffectActivity(style, previewGlow: options.previewGlow)
         if activity.detailBands {
-            extent += Int(ceil(3 * max(style.detail.fineSigma, style.detail.midSigma) * scale))
+            extent += try radius(max(style.detail.fineSigma, style.detail.midSigma))
         }
-        if activity.sharpening { extent += Int(ceil(3 * style.detail.sharpenSigma * scale)) }
-        if style.softening.isActive { extent += optical(style.softening.sigma, options.softeningScale) }
-        if options.previewGlow && style.glow.isActive { extent += optical(style.glow.farSigma, options.glowScale) }
+        if activity.sharpening { extent += try radius(style.detail.sharpenSigma) }
+        if style.softening.isActive { extent += try optical(style.softening.sigma, options.softeningScale) }
+        if options.previewGlow && style.glow.isActive {
+            extent += try optical(max(style.glow.nearSigma, style.glow.farSigma), options.glowScale)
+        }
         if options.previewGlow && style.halation.isActive {
-            extent += optical(PreparedHalation(radius: style.halation.radius).sigmas[2], options.halationScale, support: 4)
+            extent += try optical(PreparedHalation(radius: style.halation.radius).sigmas[2], options.halationScale, support: 4)
         }
-        if style.noise.isActive { extent += Int(ceil(3 * max(style.noise.chromaSigma, style.noise.lumaSigma) * scale)) }
+        if style.noise.isActive { extent += try radius(max(style.noise.chromaSigma, style.noise.lumaSigma)) }
         halo = extent
         let spatial = options.previewGlow
         // Per distinct grid, arena storage is reusable between stages; parallel blur

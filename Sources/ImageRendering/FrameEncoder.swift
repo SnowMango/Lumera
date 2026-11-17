@@ -14,7 +14,7 @@ public struct FrameEncoder {
         guard plan.inputID == input.inputID, plan.model.renderer === renderer else {
             throw LabError.invalid("Frame plan belongs to another input or renderer")
         }
-        try plan.request.validate(); try plan.controls.parameters.validate(resolved: true)
+        try plan.request.validate()
         try renderer.encoder.checkModelSafety(style: plan.style, parameters: plan.controls.parameters, prefix: plan.prefix, request: plan.request)
     }
     func encode(_ input: PreparedInput, plan: FrameRenderPlan, commandBuffer: MTLCommandBuffer, alreadyClaimed: Bool, alreadyValidated: Bool = false) throws -> EncodedFrame {

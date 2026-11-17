@@ -6,7 +6,6 @@ public enum EditResolver {
     /// 输入曝光与白平衡作为独立字段传给渲染阶段。
     public static func resolve(_ edits: EditRequest, automatic: AutomaticControls, model: CompiledStyleModel) throws -> ResolvedControls {
         guard automatic.modelID == model.identity, automatic.featureDigest == model.featureDigest else { throw LabError.invalid("Edit model identity mismatch") }
-        try automatic.parameters.validate(resolved: true)
         try validateResources(automatic.lutWeights, resources: model.definition.appearance.resources)
         guard automatic.lutWeights.allSatisfy({ model.lutResourceIDs.contains($0.resourceID) }) else { throw LabError.invalid("Automatic LUT weights are outside the compiled palette") }
         let capabilities = model.definition.edits
@@ -20,7 +19,6 @@ public enum EditResolver {
         var diagnostics: [ControlDiagnostic] = []
         if let strength = edits.strength {
             guard strength.isFinite, (0...1).contains(strength), let definition = capabilities.strength else { throw LabError.invalid("Unsupported strength") }
-            try validateStrength(definition, parameters: parameters, lutWeights: weights, resources: model.definition.appearance.resources)
             parameters = try interpolate(definition.neutralParameters, parameters, strength)
             weights = blendWeights(definition.neutralLUTWeights, weights, strength)
             diagnostics.append(.init(code: .strengthApplied))
@@ -42,7 +40,7 @@ public enum EditResolver {
             let range = try ParameterSpecification.lookup(target).effectiveRange
             let limited = min(range.upperBound, max(range.lowerBound, value))
             if limited != value { diagnostics.append(.init(code: .clamped, target: target)) }
-            try ControlAccess.apply(.scalar(limited), target: target, parameters: &parameters, lutWeights: &weights, effective: true)
+            try ControlAccess.writeComputed(.scalar(limited), target: target, parameters: &parameters, lutWeights: &weights)
         }
         for edit in edits.overrides + edits.locks {
             guard capabilities.overrideTargets.contains(edit.target) else { throw LabError.invalid("Unsupported override: \(edit.target)") }
@@ -51,7 +49,7 @@ public enum EditResolver {
                 let automaticValue = try ControlAccess.value(target: edit.target, parameters: automatic.parameters, lutWeights: automatic.lutWeights)
                 try ControlInterpolation.validateTemporalEndpoints([automaticValue, edit.value])
             }
-            try ControlAccess.apply(edit.value, target: edit.target, parameters: &parameters, lutWeights: &weights, effective: true)
+            try ControlAccess.writeComputed(edit.value, target: edit.target, parameters: &parameters, lutWeights: &weights)
             if offsetTargets.contains(edit.target) || (edit.target == "color.matrix" && offsetTargets.contains(where: { $0.hasPrefix("color.matrix.") })) {
                 diagnostics.append(.init(code: .overridden, target: edit.target))
             }
@@ -59,7 +57,6 @@ public enum EditResolver {
         let locked = Set(edits.locks.map(\.target))
         let edited = Set((edits.overrides + edits.locks).map(\.target)).union(offsetTargets)
         try constrain(&parameters, weights: &weights, locked: locked, edited: edited, diagnostics: &diagnostics)
-        try parameters.validate(resolved: true)
         try validateResources(weights, resources: model.definition.appearance.resources)
         guard weights.allSatisfy({ model.lutResourceIDs.contains($0.resourceID) }) else { throw LabError.invalid("Edited LUT weights are outside the compiled palette") }
         for lock in edits.locks {
@@ -75,11 +72,12 @@ public enum EditResolver {
         }
         func write(_ id: String, _ value: Double) throws {
             guard !locked.contains(id) else { throw LabError.invalid("Contradictory locked constraints") }
-            try ControlAccess.apply(.scalar(value), target: id, parameters: &p, lutWeights: &weights, effective: true)
+            try ControlAccess.writeComputed(.scalar(value), target: id, parameters: &p, lutWeights: &weights)
             diagnostics.append(.init(code: .constraintAdjusted, target: id))
         }
         // 修复耦合范围时优先保留锁定值，其次在可行时保留显式编辑的值。
         for (low, high) in [("detail.fineSigma", "detail.midSigma"), ("glow.nearSigma", "glow.farSigma")] {
+            guard edited.contains(low) || edited.contains(high) else { continue }
             let a = try read(low), b = try read(high)
             if a > b {
                 if locked.contains(high) || (!locked.contains(low) && edited.contains(high) && !edited.contains(low)) { try write(low, b) }
@@ -88,6 +86,7 @@ public enum EditResolver {
         }
         for point in ["source", "destination"] {
             let xID = "color.whiteBalance.\(point).x", yID = "color.whiteBalance.\(point).y"
+            guard edited.contains(xID) || edited.contains(yID) else { continue }
             let epsilon = 1e-9
             if try read(xID) <= 0 { try write(xID, epsilon) }
             if try read(yID) <= 0 { try write(yID, epsilon) }
@@ -158,6 +157,9 @@ public enum EditResolver {
     private static func interpolate(_ neutral: StyleParameters, _ current: StyleParameters, _ t: Double) throws -> StyleParameters {
         if t == 0 { return neutral }; if t == 1 { return current }
         var a = neutral, b = current
+        guard a.color.matrix.values.count == 9, b.color.matrix.values.count == 9 else {
+            throw LabError.invalid("Strength interpolation requires nine matrix coefficients")
+        }
         // Disabled modules contribute their effective neutral amplitude, not stored values.
         func effective(_ p: inout StyleParameters) {
             if !p.detail.enabled { p.detail.fineGain = 1; p.detail.midGain = 1; p.detail.sharpenAmount = 0 }

@@ -196,10 +196,9 @@ public struct StyleModel: Codable, Equatable, Sendable {
             try legacyProfile.validate()
             guard responses.isEmpty, legacyProfile.parameters == appearance.parameters else { throw LabError.invalid("Legacy and new response owners cannot be mixed") }
         }
-        // Apply the persisted structure budget to every array, including nested control values.
-        // Use raw encoding here: calling StyleModelCodec.encode would recurse into validate().
+        // Explicit diagnostics include the persisted budget for every array and nested control value.
         try StyleModelCodec.validateStructure(JSON.encode(self))
     }
-    /// 验证后计算完整模型定义的内容摘要，用于区分同一展示 ID 下的模型修订。
-    public func digest() throws -> String { try validate(); return try StyleIdentity.digest(self) }
+    /// 计算完整模型定义的内容摘要，不隐式执行参数诊断。
+    public func digest() throws -> String { try StyleIdentity.digest(self) }
 }

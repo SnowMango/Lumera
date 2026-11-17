@@ -16,7 +16,7 @@ final class PreparedExecutionPlan: @unchecked Sendable {
     private var colorPreparations = 1
     private var grainPreparations = 0
 
-    init(parameters: StyleParameters, color: PreparedColorTransform) {
+    init(parameters: StyleParameters, color: PreparedColorTransform) throws {
         baseParameters = parameters
         baseActivity = PreparedEffectActivity(parameters)
         self.baseColor = (parameters.color, color)
@@ -24,7 +24,7 @@ final class PreparedExecutionPlan: @unchecked Sendable {
             _ = halation(for: parameters.halation)
         }
         if parameters.grain.isActive {
-            _ = grain(for: parameters.grain)
+            _ = try grain(for: parameters.grain)
         }
     }
 
@@ -55,13 +55,13 @@ final class PreparedExecutionPlan: @unchecked Sendable {
         return value
     }
 
-    func grain(for parameters: FilmGrain) -> PreparedGrain {
+    func grain(for parameters: FilmGrain) throws -> PreparedGrain {
         lock.lock()
         defer { lock.unlock() }
         if let cached = lastGrain, cached.size == parameters.size, cached.roughness == parameters.roughness {
             return cached.value
         }
-        let value = PreparedGrain(size: parameters.size, roughness: parameters.roughness)
+        let value = try PreparedGrain(size: parameters.size, roughness: parameters.roughness)
         lastGrain = (parameters.size, parameters.roughness, value)
         grainPreparations += 1
         return value

@@ -97,3 +97,25 @@ final class InputIdentityReuseTests: XCTestCase {
         }
     }
 }
+
+extension InputIdentityReuseTests {
+    func testIdentityKeyPreservesAllEffectiveFieldsWithoutEncoding() throws {
+        let base = EffectiveInputRecipe(declared: recipe, backendVersion: "backend")
+        let key = InputIdentityKey(descriptor: descriptor, recipe: base)
+        XCTAssertTrue(key.matches(descriptor: descriptor, recipe: base))
+        var changed = base; changed.settings = [.init(key: .exposureEV, value: 0)]
+        XCTAssertFalse(key.matches(descriptor: descriptor, recipe: changed))
+        let zero = InputIdentityKey(descriptor: descriptor, recipe: changed)
+        changed.settings[0].value = -0.0
+        XCTAssertFalse(zero.matches(descriptor: descriptor, recipe: changed))
+        changed = base; changed.backendVersion = "other"
+        XCTAssertFalse(key.matches(descriptor: descriptor, recipe: changed))
+        changed = base; changed.decoderVersion = "decoder"
+        XCTAssertFalse(key.matches(descriptor: descriptor, recipe: changed))
+        changed = base; changed.declared.rawSettings = [.init(key: .sharpness, value: 1, allowsUserOverride: true)]
+        XCTAssertFalse(key.matches(descriptor: descriptor, recipe: changed))
+        var a = descriptor; a.camera = "caf\u{e9}"
+        var b = descriptor; b.camera = "cafe\u{301}"
+        XCTAssertFalse(InputIdentityKey(descriptor: a, recipe: base).matches(descriptor: b, recipe: base))
+    }
+}

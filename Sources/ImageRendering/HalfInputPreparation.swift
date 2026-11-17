@@ -75,7 +75,7 @@ extension LumeraRenderer {
                     output = target; residentBytes += extra
                 }
                 readbacks.append(try rangeReducer.encodeHalfPreparation(staging, output: output!, commandBuffer: command,
-                    workingSet: workspace, width: w, height: h, outputOrigin: .init(UInt32(x), UInt32(y))))
+                    workingSet: workspace, width: w, height: h, outputOrigin: .init(UInt32(x), UInt32(y)), resources: owner))
                 x += w
                 if x == width { x = 0; y += h }
             }

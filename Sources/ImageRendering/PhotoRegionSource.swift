@@ -77,7 +77,7 @@ public final class ResolvedPhotoSource: PhotoRegionSource, @unchecked Sendable {
         try workspace.reserve(max(0, texture.allocatedSize - textureBytes))
         renderer.context.render(image, to: texture, commandBuffer: command, bounds: region, colorSpace: LumeraRenderer.colorSpace(for: range))
         // Core Image 的内部精度可能随输出格式改变，因此从实际写入的纹理读取数值范围。
-        let readback = try renderer.rangeReducer.encode(texture, commandBuffer: command, workingSet: workspace)
+        let readback = try renderer.rangeReducer.encode(texture, commandBuffer: command, workingSet: workspace, resources: resources)
         try await renderer.complete(command)
         let bounds = try readback.resolve()
         if let declared = trustedNormalizedRGBBounds {
